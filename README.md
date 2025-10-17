@@ -169,8 +169,8 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 - `eventdb plugin tcp --host <hostname> --port <u16> [--disable]`
 - `eventdb plugin http --endpoint <url> [--header KEY=VALUE]... [--disable]`
 - `eventdb plugin json --path <file> [--pretty] [--disable]`
-- `eventdb plugin map --plugin postgres --aggregate <name> --field <field> --datatype <sql-type>`  
-  Registers Postgres column overrides; other plugin kinds reject mapping requests.
+- `eventdb plugin map --aggregate <name> --field <field> --datatype <type> [--plugin postgres]`  
+  Sets the base column type for an aggregate field; add `--plugin postgres` to override the type only for the Postgres plugin.
 
 Plugins are notified after each committed event so downstream systems stay synchronized.
 

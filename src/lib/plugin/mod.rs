@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use tracing::error;
 
@@ -25,6 +25,8 @@ use json::JsonPlugin;
 mod log;
 use log::LogPlugin;
 
+pub(super) type ColumnTypes = BTreeMap<String, BTreeMap<String, String>>;
+
 pub trait Plugin: Send + Sync {
     fn name(&self) -> &'static str;
     fn notify_event(
@@ -43,13 +45,17 @@ pub struct PluginManager {
 impl PluginManager {
     pub fn from_config(config: &Config) -> Result<Self> {
         let mut plugins: Vec<Box<dyn Plugin>> = Vec::new();
+        let base_types: Arc<ColumnTypes> = Arc::new(config.column_types.clone());
         for definition in &config.plugins {
             if !definition.enabled {
                 continue;
             }
             match &definition.config {
                 PluginConfig::Postgres(settings) => {
-                    plugins.push(Box::new(PostgresPlugin::new(settings.clone())));
+                    plugins.push(Box::new(PostgresPlugin::new(
+                        settings.clone(),
+                        base_types.clone(),
+                    )));
                 }
                 PluginConfig::Sqlite(settings) => {
                     plugins.push(Box::new(SqlitePlugin::new(settings.clone())));

@@ -140,7 +140,7 @@ pub struct KeyValue {
 pub struct PluginMapArgs {
     /// Plugin identifier
     #[arg(long, value_enum)]
-    pub plugin: PluginTarget,
+    pub plugin: Option<PluginTarget>,
 
     /// Aggregate name to configure
     #[arg(long)]
@@ -315,57 +315,68 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 println!("Log plugin configured");
             }
         }
-        PluginCommands::Map(args) => match PluginKind::from(args.plugin) {
-            PluginKind::Postgres => {
-                let definition = config
-                    .plugins
-                    .iter_mut()
-                    .find(|def| matches!(def.config, PluginConfig::Postgres(_)))
-                    .ok_or_else(|| {
+        PluginCommands::Map(args) => match args.plugin {
+            None => {
+                config.set_column_type(&args.aggregate, &args.field, args.data_type.clone());
+                config.ensure_data_dir()?;
+                config.save(&path)?;
+                println!(
+                    "Mapped base {}.{} as {}",
+                    args.aggregate, args.field, args.data_type
+                );
+            }
+            Some(plugin) => match PluginKind::from(plugin) {
+                PluginKind::Postgres => {
+                    let definition = config
+                        .plugins
+                        .iter_mut()
+                        .find(|def| matches!(def.config, PluginConfig::Postgres(_)))
+                        .ok_or_else(|| {
                         anyhow!(
                             "configure postgres plugin before mapping fields with `eventdb plugin postgres --connection=...`"
                         )
                     })?;
 
-                match &mut definition.config {
-                    PluginConfig::Postgres(settings) => {
-                        let mut field_config = PostgresColumnConfig::default();
-                        field_config.data_type = Some(args.data_type.clone());
+                    match &mut definition.config {
+                        PluginConfig::Postgres(settings) => {
+                            let mut field_config = PostgresColumnConfig::default();
+                            field_config.data_type = Some(args.data_type.clone());
 
-                        settings
-                            .field_mappings
-                            .entry(args.aggregate.clone())
-                            .or_default()
-                            .insert(args.field.clone(), field_config);
+                            settings
+                                .field_mappings
+                                .entry(args.aggregate.clone())
+                                .or_default()
+                                .insert(args.field.clone(), field_config);
 
-                        config.ensure_data_dir()?;
-                        config.save(&path)?;
+                            config.ensure_data_dir()?;
+                            config.save(&path)?;
 
-                        println!(
-                            "Mapped {}.{} as {}",
-                            args.aggregate, args.field, args.data_type
-                        );
-                    }
-                    _ => {
-                        return Err(anyhow!(
-                            "unexpected plugin configuration variant; reconfigure the postgres plugin and try again"
-                        ));
+                            println!(
+                                "Mapped {}.{} as {}",
+                                args.aggregate, args.field, args.data_type
+                            );
+                        }
+                        _ => {
+                            return Err(anyhow!(
+                                "unexpected plugin configuration variant; reconfigure the postgres plugin and try again"
+                            ));
+                        }
                     }
                 }
-            }
-            PluginKind::Sqlite => {
-                return Err(anyhow!(
-                    "field mapping is not supported for the SQLite plugin"
-                ));
-            }
-            PluginKind::Csv => {
-                return Err(anyhow!("field mapping is not supported for the CSV plugin"));
-            }
-            PluginKind::Tcp | PluginKind::Http | PluginKind::Json | PluginKind::Log => {
-                return Err(anyhow!(
-                    "field mapping is only supported for the Postgres plugin"
-                ));
-            }
+                PluginKind::Sqlite => {
+                    return Err(anyhow!(
+                        "field mapping is not supported for the SQLite plugin"
+                    ));
+                }
+                PluginKind::Csv => {
+                    return Err(anyhow!("field mapping is not supported for the CSV plugin"));
+                }
+                PluginKind::Tcp | PluginKind::Http | PluginKind::Json | PluginKind::Log => {
+                    return Err(anyhow!(
+                        "field mapping is only supported for the Postgres plugin"
+                    ));
+                }
+            },
         },
     }
 

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use postgres::{Client, NoTls};
 
@@ -10,17 +10,18 @@ use crate::{
 };
 
 use super::{
-    Plugin,
+    ColumnTypes, Plugin,
     util::{quote_identifier, sanitize_identifier},
 };
 
 pub(super) struct PostgresPlugin {
     config: PostgresPluginConfig,
+    base_types: Arc<ColumnTypes>,
 }
 
 impl PostgresPlugin {
-    pub(super) fn new(config: PostgresPluginConfig) -> Self {
-        Self { config }
+    pub(super) fn new(config: PostgresPluginConfig, base_types: Arc<ColumnTypes>) -> Self {
+        Self { config, base_types }
     }
 
     fn ensure_table(
@@ -88,6 +89,11 @@ impl PostgresPlugin {
                 .get(aggregate)
                 .and_then(|map| map.get(field))
                 .map(build_column_type)
+                .or_else(|| {
+                    self.base_types
+                        .get(aggregate)
+                        .and_then(|map| map.get(field).cloned())
+                })
                 .unwrap_or_else(|| "TEXT".into());
             let alter_sql = format!(
                 "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {}",

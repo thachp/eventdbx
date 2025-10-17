@@ -29,6 +29,8 @@ pub struct Config {
     pub restrict: bool,
     #[serde(default)]
     pub plugins: Vec<PluginDefinition>,
+    #[serde(default)]
+    pub column_types: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Default for Config {
@@ -44,6 +46,7 @@ impl Default for Config {
             updated_at: now,
             restrict: default_restrict(),
             plugins: Vec::new(),
+            column_types: BTreeMap::new(),
         }
     }
 }
@@ -115,6 +118,19 @@ impl Config {
             self.restrict = restrict;
         }
         self.updated_at = Utc::now();
+    }
+
+    pub fn set_column_type(&mut self, aggregate: &str, field: &str, data_type: String) {
+        self.column_types
+            .entry(aggregate.to_string())
+            .or_default()
+            .insert(field.to_string(), data_type);
+    }
+
+    pub fn column_type(&self, aggregate: &str, field: &str) -> Option<&String> {
+        self.column_types
+            .get(aggregate)
+            .and_then(|fields| fields.get(field))
     }
 
     pub fn ensure_data_dir(&self) -> Result<()> {
