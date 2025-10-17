@@ -162,17 +162,50 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 
 ### Plugins
 
+- `eventdb plugin map --aggregate <name> --field <field> --datatype <type> [--plugin postgres]`  
+  Records the base column type for a field; use `--plugin postgres` to override only the Postgres mapping.
 - `eventdb plugin postgres --connection <connection-string> [--disable]`
 - `eventdb plugin sqlite --path <file> [--disable]`
 - `eventdb plugin csv --output-dir <dir> [--disable]`
-- `eventdb plugin log --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
 - `eventdb plugin tcp --host <hostname> --port <u16> [--disable]`
 - `eventdb plugin http --endpoint <url> [--header KEY=VALUE]... [--disable]`
 - `eventdb plugin json --path <file> [--pretty] [--disable]`
-- `eventdb plugin map --aggregate <name> --field <field> --datatype <type> [--plugin postgres]`  
-  Sets the base column type for an aggregate field; add `--plugin postgres` to override the type only for the Postgres plugin.
+- `eventdb plugin log --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
 
-Plugins are notified after each committed event so downstream systems stay synchronized.
+Plugins fire after every committed event to keep external systems in sync. Each plugin sends or records different data:
+
+- **Postgres**: Applies schema/base types to create/alter columns and upsert the aggregate row. Payload is the aggregate state at the time of the event.
+- **SQLite**: Mirrors state into a local SQLite file with the same column set as Postgres.
+- **CSV**: Appends state snapshots into `<aggregate>.csv`, expanding columns as new fields appear.
+- **TCP**: Writes a single-line JSON `EventRecord` to the configured socket.
+- **HTTP**: POSTs the `EventRecord` JSON to the endpoint with optional headers.
+- **JSON**: Appends the `EventRecord` JSON (pretty if requested) to the given file.
+- **Log**: Emits a formatted line via `tracing` at the configured level. By default: `aggregate=<type> id=<id> event=<event>`.
+
+Example TCP/HTTP/JSON payload (`EventRecord`):
+
+```json
+{
+  "aggregate_type": "patient",
+  "aggregate_id": "p-001",
+  "event_type": "patient-updated",
+  "payload": {
+    "status": "inactive",
+    "comment": "Archived via API"
+  },
+  "metadata": {
+    "event_id": "45c3013e-9b95-4ed0-9af9-1a465f81d3cf",
+    "created_at": "2024-12-01T17:22:43.512345Z",
+    "issued_by": {
+      "group": "admin",
+      "user": "jane"
+    }
+  },
+  "version": 5,
+  "hash": "cafe…",
+  "merkle_root": "deadbeef…"
+}
+```
 
 ## REST API
 
