@@ -10,6 +10,70 @@ Status: In progress
 
 EventfulDB is an event-sourced, key-value, write-side database system designed to provide immutable, append-only storage for events across various domains. It is ideal for applications requiring detailed audit trails for compliance, complex business processes involving states, and high data integrity levels.
 
+## Getting Started
+
+Follow the steps below to spin up EventfulDB locally. All commands are expected to run from the repository root unless stated otherwise.
+
+1. **Install prerequisites**
+   - Rust toolchain (edition 2024) via [`rustup`](https://rustup.rs/)
+   - `rocksdb` is vendored through the Rust crate, so no extra native packages are required.
+
+2. **Clone and build**
+   ```bash
+   git clone https://github.com/thachp/eventful.git
+   cd eventful
+   cargo build
+   ```
+
+3. **(Optional) Run checks**
+   ```bash
+   cargo fmt -- --check
+   cargo check
+   cargo test    # if you add tests locally
+   ```
+
+4. **Create the initial configuration**
+   The first configuration must include both a master key and a data-encryption key. These values can be any non-empty strings in development.
+   ```bash
+   cargo run -- config --master-key dev-master --dek dev-dek
+   ```
+
+5. **Start the server**
+   ```bash
+   cargo run -- start --foreground
+   ```
+   - Omit `--foreground` to daemonise the process.
+   - Use `--data-dir <path>` to override the default `./.eventful` directory.
+   - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
+
+6. **Define a schema (recommended when running in restricted mode)**
+   ```bash
+   cargo run -- schema create \
+     --aggregate patient \
+     --events patient-added,patient-updated \
+     --snapshot-threshold 100
+   ```
+
+7. **Issue a token for CLI access**
+   ```bash
+   cargo run -- token generate \
+     --identifier-type user \
+     --identifier-id admin \
+     --expiration 3600
+   ```
+
+8. **Append an event**
+   ```bash
+   cargo run -- aggregate apply \
+     --aggregate patient \
+     --aggregate-id p-001 \
+     --event patient-added \
+     --field name="Jane Doe" \
+     --field status=active
+   ```
+
+You now have a working EventfulDB instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
+
 ## Background
 
 My drive to create this immutable system was inspired by three key scenarios I've encountered:
@@ -33,389 +97,74 @@ My drive to create this immutable system was inspired by three key scenarios I'v
 
 </aside>
 
-## **System Commands**
+## Command-Line Reference
 
-- **`config`**: Setup the EventfulDB system, preparing it for first-time use by setting up necessary configurations or update the system configuration.
-  ```toml
-  # Configure Eventful with a Master Key (only for initial setup)
-  # Limit the number of events in memory to 10,000
-  # using a FIFO (First-In, First-Out) queue approach.
-  # Set the Data Encryption Key for data at rest.
+EventfulDB ships a single `eventful` binary. Every command accepts an optional `--config <path>` to point at an alternate configuration file.
 
-  eventful config --master-key=xxx --memory-threshold=10000 --dek=xxxx-xxx-xxx
-  ```
-- You must supply both `--master-key` and `--dek` the first time you configure EventfulDB; the CLI will refuse to start the server or issue tokens until both secrets are present. The master key governs token derivation, while the `--dek` value enables transparent data encryption (TDE-style) so persisted storage cannot be read without the configured key.
-- By default, EventfulDB stores its data under `./.eventful` inside the application directory (with configuration persisted at `./.eventful/config.toml`). You can point `--data-dir` elsewhere if you prefer a custom location.
-- **`start`**: Launches the EventualDB server, making it ready to accept and process requests.
-  ```toml
-  # start eventful service on port 9595 (default)
-  eventful start --port 9595
+### Server lifecycle
 
-  # start in development (unrestricted) mode where schemas are optional
-  eventful start --mode dev
-  ```
-  Development mode skips schema enforcement, while the default production mode requires every event to satisfy its schema definition.
-- **`plugin:postgres`**: Configure the Postgres notification plugin so persisted events are mirrored to an external Postgres database. (Future releases will add `plugin:mssql` and `plugin:sqlite` commands following the same pattern.)
-  ```toml
-  # configure the plugin with a connection string (auto-enables by default)
-  eventful plugin postgres --connection="postgres://user:pass@host/db"
+- `eventful start [--port <u16>] [--data-dir <path>] [--foreground] [--restrict | --restrict=false]`  
+  Launches the server. Schema validation is enforced by default; pass `--restrict=false` to run in permissive mode.
+- `eventful stop`  
+  Stops the running daemon referenced by the PID file.
+- `eventful status`  
+  Prints the current port, PID, uptime, and whether restriction is enabled.
+- `eventful restart [start options…]`  
+  Stops the existing daemon (if any) and restarts it with the provided options.
+- `eventful destroy [--yes]`  
+  Removes the PID file, data directory, and configuration file after confirmation (or immediately with `--yes`).
 
-  # configure but leave the plugin disabled
-  eventful plugin postgres --connection="postgres://..." --disable
-  ```
-- **`plugin:map`**: Define column metadata for a specific plugin so fields are created with the correct database types.
-  ```toml
-  # store person.first_name as VARCHAR(255) in Postgres
-  eventful plugin map --plugin=postgres --aggregate=person --field=first_name --datatype="VARCHAR(255)"
+### Configuration
 
-  # store person.age as INTEGER
-  eventful plugin map --plugin=postgres --aggregate=person --field=age --datatype=INTEGER
+- `eventful config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>]`  
+  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`.
 
-  # store person.balance as NUMERIC(12,2)
-  eventful plugin map --plugin=postgres --aggregate=person --field=balance --datatype="NUMERIC(12,2)"
-  ```
-- **`stop`**: Gracefully shuts down the EventfulDB server, ensuring that all processes are correctly terminated.
-  ```toml
-  # stop eventful service gracefully (end all connections and services)
-  eventful stop --all
+### Tokens
 
-  # stop individual services
-  eventful stop --graphql --restful --grpc
+- `eventful token generate --identifier-type <type> --identifier-id <id> [--expiration <secs>] [--limit <writes>] [--keep-alive]`  
+  Issues a new token tied to an identifier.
+- `eventful token list`  
+  Lists all tokens with status, expiry, and remaining writes.
+- `eventful token revoke --token <value>`  
+  Revokes a token immediately.
+- `eventful token refresh --token <value> [--expiration <secs>] [--limit <writes>]`  
+  Extends the lifetime or write allowance of an existing token.
 
-  # stop eventful service immediate, ending all services
-  evenful stop --force
-  ```
-- **`restart`**: Stops the running EventfulDB server (if any) and launches a fresh instance, ensuring schemas and tokens are reloaded from disk.
-  ```toml
-  # restart the daemonized server
-  eventful restart
+### Schemas
 
-  # restart and run in the foreground
-  eventful restart --foreground
-  ```
-- **`destroy`**: Removes all EventfulDB data, configuration, and metadata, returning the environment to a pristine, first-install state.
-  ```toml
-  # destroy all EventfulDB state (prompts for confirmation)
-  eventful destroy
+- `eventful schema create --aggregate <name> --events <event1,event2,...> [--snapshot-threshold <u64>]`
+- `eventful schema add --aggregate <name> --events <event1,event2,...>`
+- `eventful schema alter <aggregate> [--event <name>] [--snapshot-threshold <u64>] [--lock <true|false>] [--field <name>] [--add <field1,field2,...>] [--remove <field1,field2,...>]`
+- `eventful schema remove --aggregate <name> --event <name>`
+- `eventful schema list`
+- `eventful schema show --aggregate <name>`
 
-  # destroy without prompt
-  eventful destroy --yes
-  ```
-- **`version`**: Displays the current version of the EventfulDB system, helping users identify the installed version.
-  ```toml
-  # display the current version
-  eventful --version
-  ```
-- **`upgrade`**: Upgrades EventfulDB to a newer version, applying new system features and patches etc. EventfulDB must guaranteed that upgrading to newer version would not break existing data.
-  ```toml
-  # upgrade the eventful to the latest version
-  eventful upgrade@latest -f
+Schemas are stored on disk; when the server runs with restriction enabled, incoming events must satisfy the recorded schema.
 
-  # see what will change prior to applying the upgrade
-  eventful upgrade@latest --dry-run
-  ```
-- **`remote`**: Manage EventfulDB nodes. All data will be eventually be synced crossed all nodes
-  ```toml
-  # add a remote database call upstream (can be anyname)
-  eventful remote add --name=upstream ev4+ssh://ev4.example.com
-  ```
+### Aggregates
 
-## **Managing Tokens**
+- `eventful aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE...`  
+  Appends an event to the store (validated against the schema when restricted).
+- `eventful aggregate list`  
+  Lists aggregates with version, Merkle root, and archive status.
+- `eventful aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
+- `eventful aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
+- `eventful aggregate verify --aggregate <type> --aggregate-id <id>`
+- `eventful aggregate snapshot --aggregate <type> --aggregate-id <id> [--comment <text>]`
+- `eventful aggregate archive --aggregate <type> --aggregate-id <id> [--comment <text>]`
+- `eventful aggregate restore --aggregate <type> --aggregate-id <id> [--comment <text>]`
+- `eventful aggregate commit`  
+  Currently a no-op placeholder.
 
-A token represents a set of credentials and permissions encoded as a compact, URL-safe string. When a user or service authenticates successfully with a KEK, EventfulDB issues a token that includes claims about the identity of the token holder and their authorized actions. This token is then used in subsequent requests to access protected resources or execute operations, eliminating the need for repeated authentication.
+### Plugins
 
-<aside>
-💡 To mitigate the risk of exploitation, such as data spamming, writing operations in EventfulDB require tokens. Each token is associated with a specific write limit. Once this limit is reached, or a certain time period has elapsed, further writing is prohibited. A new token must then be generated for subsequent requests. It's important to note that EventfulDB does not utilize a traditional username and password system; instead, authentication is outsourced to the system integrating with EventfulDB.
+- `eventful plugin postgres --connection <connection-string> [--disable]`
+- `eventful plugin sqlite --path <file> [--disable]`
+- `eventful plugin csv --output-dir <dir> [--disable]`
+- `eventful plugin map --plugin postgres --aggregate <name> --field <field> --datatype <sql-type>`  
+  Registers Postgres column overrides; other plugin kinds reject mapping requests.
 
-</aside>
-
-- **`token:auth`:** Authenticate and keeping the session alive
-
-  ```toml
-  # authenticate and keep session open for future requests
-  eventful token:auth <auth-key> --keep-alive
-  ```
-
-- **`token:generate`**: Creates a new access token for authentication and authorization within the EventualDB system.
-  ```toml
-
-  # generate a token with expiration date and request horizon,
-  # whichever occur first.
-  eventful token:generate
-  				--expiration=5000 --limit=10
-  				--identifierType=<provider>
-  				--identifierId=<xxx>
-
-  # generate an auth key
-  eventful token:generate --master-key=xxx --auth-key
-  ```
-- **`token:revoke`**: Invalidates an existing token, removing its access privileges to secure the system.
-  ```toml
-  # revoke a token
-  eventful token:revoke --token=xxx
-
-  # revoke an auth key
-  eventful token:revoke --auth-key=xxx
-  ```
-- **`token:list`**: Lists all active tokens, providing an overview of current access permissions.
-  ```toml
-  # list active token
-  eventful token:list cursor --take=xx --active
-
-  # list tokens
-  eventful token:list  cursor --take=xx --inactive
-
-  # see a list of auth keys
-  eventful token:list --kek --auth-key=xxx
-  ```
-- **`token:update`**: Updates the permissions or details associated with an existing auth-key.
-  ```toml
-  # update auth-key permissions
-  eventful token:update <auth-key> --p1=x1 --p2=x2 --p3=x3
-  ```
-- **`token:refresh`**: Refreshes an access token, extending its validity without altering its permissions.
-  ```toml
-  # increase expiration by x seconds and limit by x number
-  eventful token:refresh <access-token> --expiration=xx --limit=xxx
-  ```
-
-## **Schema Operations**
-
-A schema in EventfulDB is a formal definition that outlines the structure, constraints, and rules for data within the system, such as events and aggregates. It serves as a blueprint for ensuring data integrity and consistency by specifying the allowed format and content for stored information
-
-- **`schema:create`**: Defines a new schema for events or aggregates, establishing the data structure and rules.
-  ```toml
-  # create a schema
-  evenful schema:create
-  							--aggregate=patient
-  							--events=patient-updated, patient-created
-  							--snapshot-threshold=25
-  ```
-- **`schema:alter`**: Modifies an existing schema to accommodate changes in data requirements or business logic.
-  ```toml
-  # Set the snapshot threshold to 25. Update the threshold to every 25 events.
-  eventful schema:alter patient --snapshot-threshold=25
-
-  # Lock the patient aggregate, preventing execution of additional events.
-  eventful schema:alter patient --lock
-
-  # Lock the birthdate field, disallowing updates.
-  eventful schema:alter patient --field=birthdate --lock
-
-  # Unlock the birthdate field, allowing updates.
-  eventful schema:alter patient --field=birthdate --lock=false
-
-  # add field for <event>
-  eventful schema:alter patient --event=<event> -a fieldname
-
-  # remove field for <event>
-  eventful schema:alter patient -e <event> -r fieldname
-  ```
-- **`schema:remove`**: Deletes an event definition from an aggregate while leaving the remaining events untouched.
-  ```toml
-  # remove the person_updated event from the person aggregate
-  eventful schema:remove person person_updated
-  ```
-- **`schema:list`**: Displays all defined schemas, allowing users to review the existing data models.
-  ```toml
-  # show a list of schemas available in the system.
-  eventful schema:list
-  ```
-- **`schema:show`**: Retrieves detailed information about a specific schema, including its structure and constraints.
-  ```toml
-  # show the schema spec for the patient aggregate
-  eventful schema:show patient
-  ```
-- **`schema:pull`**: Pull schema definition from remote sources. By default, —dry-run flag is enabled .
-  ```toml
-  # pull all schemas definition from origin
-  eventful schema:pull origin
-
-  # pull scheme <x> definition from origin
-  eventful schema:pull origin <x>
-  ```
-- **`schema:push`**: Push schema definition to remote sources
-  ```toml
-  # push schemas definition to origin
-  eventful schema:push --origin
-
-  # push a schema definition to origin
-  event schema:push origin <x>
-  ```
-- **`schema:migrate`**: Apply schemas change to the system, users can now utilize newly created / updated aggregates or events.
-  ```toml
-  # see what will change
-  eventful migrate --dry-run
-
-  # discard changes
-  eventul migrate --discard
-
-  # apply the changes
-  eventful migrate -f
-  ```
-
-## **Working with Aggregates and Events**
-
-### Aggregate
-
-An aggregate in EventfulDB is a collection of related events that are treated as a single unit for the purpose of data manipulation and state management. Aggregates serve as the cornerstone of EventDB's event sourcing model, encapsulating a set of changes or actions that together represent the state of a domain entity.
-
-- **`aggregate:apply`**: Applies an event to an aggregate, altering its state according to the event's data.
-  ```toml
-  # apply patient_added event
-  eventful aggregate:apply <event1> --field1=data1 --field2=data2
-  eventful aggregate:apply <event2> --field1=data1 --field2=data2
-  eventful aggregate:apply <event3> --field1=data1 --field2=data2
-  ```
-- **`aggregate:list`**: Lists all aggregates, offering a snapshot of the system's current state entities.
-  ```toml
-  # display a list of aggregates
-  eventful aggregate:list
-  ```
-- **`aggregate:commit`**: commit all events in order (like a transactions, all events must committed successful or rollback will occurred).
-  ```toml
-  # apply uncommit events to aggregates
-  eventful aggregate:commit
-  ```
-- **`aggregate:get`**: Fetches detailed information about a specific aggregate, including its state and event history.
-  ```toml
-  # get the current state of an aggregate
-  eventful aggregate:get <x>
-
-  # get the state of an aggreate at version 10
-  eventful aggregate:get <x> 10
-  ```
-- **`aggregate:replay`**: Reapplies past events to an aggregate, useful for rebuilding state or debugging.
-  ```toml
-  # replay recent 10 events for an aggregate instant
-  eventful aggregate:replay <id> 10
-
-  #replay an aggregate instant starting from version 0
-  eventful aggregate:replay <id> --skip=0 --take=10
-  ```
-- **`aggregate:snapshot`**: Creates a point-in-time snapshot of an aggregate's state, optimizing future state reconstructions.
-  ```toml
-  # create a snapshot of an aggregate instant with comments
-  eventful aggregate:snapshot <id> --comment="useful comments here"
-  ```
-- **`aggregate:archive`**: Moves an aggregate to archival storage, preserving its history while optimizing active storage.
-  ```toml
-  # archive an aggregate instant, locking it for future updates
-  eventful aggregate:archive <xx> --comment="useful comments here"
-  ```
-- **`aggregate:restore`:** Moves an aggregate out of storage into memory, unlocking it for future updates
-  ```toml
-  # activate an aggregate instant
-  eventful aggreate:restore <xxx> --coments "useful comments here"
-  ```
-- **`aggregate:verify`:** Verify that an instant of aggregate has not been tampered,
-  ```toml
-  # verify that aggregate id <1234>
-  eventful aggregate:verify <123>
-  ```
-
-### **Events**
-
-Events in EventfulDB are intrinsically linked to aggregates, with each event representing an individual state change or action that affects a specific aggregate. Aggregates are composed of these related events and are treated as a cohesive unit, encapsulating the sequence of changes that collectively define the state of a domain entity.
-
-- **`event:add`:** Records a new event, capturing a state change within the system. Similar to (`aggretate:apply + aggregate:commit`)
-  ```toml
-  # apply an event
-  eventful event:add patient-added
-  					--field1=data1
-  					--field2=data2
-  					--field3=data3
-  ```
-- **`event:get`**: Retrieves detailed data about a specific event, including its type, payload, and timestamp.
-  ```toml
-  # retreive specific event detail
-  eventful event:get <hash>
-  ```
-- **`event:archive`**: Transfers events in short term memory to long-term storage, maintaining system performance while preserving history.
-  ```toml
-  # archive all
-  eventful event:archive --all
-
-  # archive a specific aggregtate id <x>
-  eventful event:archive <xxx>
-  ```
-
-## Working with Data
-
-Local data in EventfulDB can synced with remote sources via push and pull command. This is feature is heavily inspired by Git.
-
-- `data:push` : Push data to other eventful databases.
-  ```toml
-  # see what data will be pushed to origin
-  eventful data:push origin
-  or
-  eventful data:push origin --dry-run
-
-  # push data to origin
-  eventful data:push origin -f --dry-run=false
-  ```
-- `data:pull` : Pull data from other eventful databases.
-  ```toml
-  # pull data from origin in dry mode
-  eventful data:pull origin
-  or
-  eventful data:pull origin --dry-run
-
-  # pull data from upstream, sync local database
-  eventful data:pull upstream -f --dry-run=false
-
-  # subcribe to changes in upstream and continously sync the database
-  eventful data:pull upstream --subscribe
-
-  # pull a specific aggregate from origin
-  eventful data:pull origin <xxx>
-  ```
-
-## Plugins
-
-Plugins in EventfulDB enable seamless connections between EventfulDB and external systems, services, or applications, enhancing its core functionalities and enabling a more comprehensive data ecosystem. Through plugins, EventfulDB can export data for analysis, trigger workflows in other systems, synchronize with external databases, and much more.
-
-- **`plugin:config`**: Sets up or modify a plugin establishing a connection between EventfulDB and an external service, enabling data exchange or functionality extension.
-  ```toml
-  # config an
-  eventful plugin:config <plugin> --option1=xxx --option2=xxx
-  ```
-- **`plugin:list`**: Lists all configured plugins, providing an overview of external connections.
-  ```toml
-  # display a list of plugins
-  eventful plugin:list
-
-  # dispay a list of active plugin
-  eventful plugin:list --active
-  ```
-- **`plugin:remove`**: Remove a plugin, severing the connection between EventDB and an external service.
-  ```toml
-  # event must be disabled with the disable flag before remove
-  eventful plugin:remove <event> --disable
-  ```
-- **`plugin:replay`**: Manually triggers a replay with an external service
-  ```toml
-  # trigger a replay for a specify aggregate instant
-  eventful plugin:replay <plugin> <aggregate_id>
-
-  # trigger replay for all instant of an aggregate
-  eventful plugin:replay <aggegate> -f
-  ```
-- **`plugin:test`**: Verifies the setup of an integration, ensuring that EventDB can communicate effectively with the external service.
-  ```toml
-  # test that a plugin is working by sending a dump event
-  eventful plugin:test <plugin>
-  ```
-- **`plugin:enable`**: Activates a configured plugin, enabling its operations within EventfulDB.
-  ```toml
-  # enable a plugin, establishing a connection with underling system
-  eventful plugin:enable <plugin>
-  ```
-- **`plugin:disable`**: Temporarily turns off a plugin, halting its data exchange or functional impact on EventfulDB.
-  ```toml
-  # disable a plugin, disconnect the underlining system
-  eventful plugin:disable <plugin>
-  ```
+Plugins are notified after each committed event so downstream systems stay synchronized.
 
 ## Contributing
 
