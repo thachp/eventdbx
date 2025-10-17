@@ -1,0 +1,27 @@
+[package]
+name = "eventful"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.7", features = ["macros", "json"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+dirs = "5.0"
+hex = "0.4"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "1.0"
+tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "signal"] }
+toml = "0.8"
+tower-http = { version = "0.5", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+rocksdb = { version = "0.21", default-features = false, features = ["multi-threaded-cf"] }
+
+[dev-dependencies]
+tempfile = "3.10"
