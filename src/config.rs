@@ -48,6 +48,7 @@ pub struct ConfigUpdate {
 
 pub fn default_config_path() -> Result<PathBuf> {
     let mut path = env::current_dir().map_err(|err| EventfulError::Config(err.to_string()))?;
+    path.push(".eventful");
     path.push("config.toml");
     Ok(path)
 }
@@ -117,10 +118,27 @@ impl Config {
     pub fn schema_store_path(&self) -> PathBuf {
         self.data_dir.join("schemas.json")
     }
+
+    pub fn pid_file_path(&self) -> PathBuf {
+        self.data_dir.join("eventful.pid")
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        self.master_key
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+            && self
+                .data_encryption_key
+                .as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+    }
 }
 
 fn default_data_dir() -> PathBuf {
-    let mut dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    dir.push("eventful");
-    dir
+    let Ok(current_dir) = env::current_dir() else {
+        return PathBuf::from(".eventful");
+    };
+    current_dir.join(".eventful")
 }

@@ -145,6 +145,10 @@ async fn append_event(
     let token = extract_bearer_token(&headers).ok_or(EventfulError::Unauthorized)?;
     let claims = state.tokens.authorize(&token, AccessKind::Write)?.into();
 
+    state
+        .schemas
+        .validate_event(&aggregate_type, &request.event_type, &request.payload)?;
+
     let record = state.store.append(AppendEvent {
         aggregate_type,
         aggregate_id,

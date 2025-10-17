@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, io, path::PathBuf};
 
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
@@ -81,6 +81,7 @@ impl TokenManager {
     }
 
     pub fn authorize(&self, token: &str, access: AccessKind) -> Result<TokenGrant> {
+        self.refresh_from_disk()?;
         let mut records = self.records.write();
         let now = Utc::now();
 
@@ -126,6 +127,7 @@ impl TokenManager {
     }
 
     pub fn issue(&self, input: IssueTokenInput) -> Result<TokenRecord> {
+        self.refresh_from_disk()?;
         let mut records = self.records.write();
         let token = format!("EVT-{}", Uuid::new_v4().simple());
         let issued_at = Utc::now();
@@ -149,10 +151,12 @@ impl TokenManager {
     }
 
     pub fn list(&self) -> Vec<TokenRecord> {
+        let _ = self.refresh_from_disk();
         self.records.read().clone()
     }
 
     pub fn revoke(&self, token_or_id: &str) -> Result<()> {
+        self.refresh_from_disk()?;
         let mut records = self.records.write();
         let Some(record) = records
             .iter_mut()
@@ -171,6 +175,7 @@ impl TokenManager {
         expiration_secs: Option<u64>,
         limit: Option<u64>,
     ) -> Result<TokenRecord> {
+        self.refresh_from_disk()?;
         let mut records = self.records.write();
         let updated_record = {
             let record = records
@@ -198,6 +203,30 @@ impl TokenManager {
     fn persist(&self, records: &[TokenRecord]) -> Result<()> {
         let payload = serde_json::to_string_pretty(records)?;
         fs::write(&self.path, payload)?;
+        Ok(())
+    }
+
+    fn refresh_from_disk(&self) -> Result<()> {
+        let contents = match fs::read_to_string(&self.path) {
+            Ok(data) => data,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                if let Some(parent) = self.path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&self.path, "[]")?;
+                String::new()
+            }
+            Err(err) => return Err(EventfulError::Io(err)),
+        };
+
+        let parsed: Vec<TokenRecord> = if contents.trim().is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(&contents)?
+        };
+
+        let mut records = self.records.write();
+        *records = parsed;
         Ok(())
     }
 }

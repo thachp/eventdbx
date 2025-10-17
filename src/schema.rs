@@ -205,6 +205,93 @@ impl SchemaManager {
             .ok_or(EventfulError::SchemaNotFound)
     }
 
+    pub fn validate_event(
+        &self,
+        aggregate: &str,
+        event_type: &str,
+        payload: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let items = self.items.read();
+        let Some(schema) = items.get(aggregate) else {
+            return Ok(());
+        };
+
+        if schema.locked {
+            return Err(EventfulError::SchemaViolation(format!(
+                "aggregate {} is locked for updates",
+                aggregate
+            )));
+        }
+
+        for key in payload.keys() {
+            if schema.field_locks.contains(key) {
+                return Err(EventfulError::SchemaViolation(format!(
+                    "field {} is locked for aggregate {}",
+                    key, aggregate
+                )));
+            }
+        }
+
+        let event_schema = schema.events.get(event_type).ok_or_else(|| {
+            EventfulError::SchemaViolation(format!(
+                "event {} is not defined for aggregate {}",
+                event_type, aggregate
+            ))
+        })?;
+
+        if !event_schema.fields.is_empty() {
+            for required in &event_schema.fields {
+                if !payload.contains_key(required) {
+                    return Err(EventfulError::SchemaViolation(format!(
+                        "missing required field {} for event {}",
+                        required, event_type
+                    )));
+                }
+            }
+
+            for key in payload.keys() {
+                if !event_schema.fields.contains(key) {
+                    return Err(EventfulError::SchemaViolation(format!(
+                        "field {} is not permitted for event {}",
+                        key, event_type
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_event(&self, aggregate: &str, event: &str) -> Result<AggregateSchema> {
+        let mut items = self.items.write();
+        let result = {
+            let schema = items
+                .get_mut(aggregate)
+                .ok_or(EventfulError::SchemaNotFound)?;
+
+            if !schema.events.contains_key(event) {
+                return Err(EventfulError::SchemaViolation(format!(
+                    "event {} is not defined for aggregate {}",
+                    event, aggregate
+                )));
+            }
+
+            if schema.events.len() == 1 {
+                return Err(EventfulError::SchemaViolation(format!(
+                    "aggregate {} must define at least one event",
+                    aggregate
+                )));
+            }
+
+            schema.events.remove(event);
+            schema.updated_at = Utc::now();
+            schema.clone()
+        };
+
+        self.persist(&items)?;
+        Ok(result)
+    }
+
     fn persist(&self, items: &BTreeMap<String, AggregateSchema>) -> Result<()> {
         let payload = serde_json::to_string_pretty(items)?;
         fs::write(&self.path, payload)?;
@@ -215,6 +302,7 @@ impl SchemaManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn create_and_update_schema() {
@@ -261,5 +349,65 @@ mod tests {
                 .fields
                 .contains(&"name".to_string())
         );
+    }
+
+    #[test]
+    fn remove_event_from_aggregate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schemas.json");
+        let manager = SchemaManager::load(path).unwrap();
+
+        manager
+            .create(CreateSchemaInput {
+                aggregate: "person".into(),
+                events: vec!["person_created".into(), "person_updated".into()],
+                snapshot_threshold: None,
+            })
+            .unwrap();
+
+        let updated = manager.remove_event("person", "person_updated").unwrap();
+        assert!(updated.events.contains_key("person_created"));
+        assert!(!updated.events.contains_key("person_updated"));
+
+        let err = manager.remove_event("person", "missing").unwrap_err();
+        assert!(matches!(err, EventfulError::SchemaViolation(_)));
+
+        let err = manager
+            .remove_event("person", "person_created")
+            .unwrap_err();
+        assert!(matches!(err, EventfulError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn validates_required_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schemas.json");
+        let manager = SchemaManager::load(path).unwrap();
+
+        manager
+            .create(CreateSchemaInput {
+                aggregate: "person".into(),
+                events: vec!["person_created".into()],
+                snapshot_threshold: None,
+            })
+            .unwrap();
+
+        let mut update = SchemaUpdate::default();
+        update
+            .event_add_fields
+            .insert("person_created".into(), vec!["first_name".into()]);
+        manager.update("person", update).unwrap();
+
+        let mut payload = BTreeMap::new();
+        payload.insert("first_name".into(), "Alice".into());
+        manager
+            .validate_event("person", "person_created", &payload)
+            .unwrap();
+
+        payload.remove("first_name");
+        let err = manager
+            .validate_event("person", "person_created", &payload)
+            .unwrap_err();
+        assert!(matches!(err, EventfulError::SchemaViolation(_)));
     }
 }
