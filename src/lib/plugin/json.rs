@@ -2,7 +2,7 @@ use std::{fs::OpenOptions, io::Write};
 
 use crate::{
     config::JsonPluginConfig,
-    error::{EventfulError, Result},
+    error::{EventError, Result},
     schema::AggregateSchema,
     store::{AggregateState, EventRecord},
 };
@@ -23,7 +23,7 @@ impl JsonPlugin {
             .create(true)
             .append(true)
             .open(&self.config.path)
-            .map_err(|err| EventfulError::Storage(err.to_string()))
+            .map_err(|err| EventError::Storage(err.to_string()))
     }
 }
 
@@ -44,9 +44,9 @@ impl Plugin for JsonPlugin {
         } else {
             serde_json::to_writer(&mut file, record)
         }
-        .map_err(|err| EventfulError::Serialization(err.to_string()))?;
+        .map_err(|err| EventError::Serialization(err.to_string()))?;
         file.write_all(b"\n")
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
         Ok(())
     }
 }

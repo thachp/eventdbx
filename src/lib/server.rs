@@ -14,7 +14,7 @@ use tracing::info;
 
 use super::{
     config::Config,
-    error::{EventfulError, Result},
+    error::{EventError, Result},
     plugin::PluginManager,
     schema::{AggregateSchema, SchemaManager},
     store::{AggregateState, AppendEvent, EventRecord, EventStore},
@@ -68,7 +68,7 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!(
-        "Starting EventDB server on {addr} (restrict={})",
+        "Starting EventDBX server on {addr} (restrict={})",
         config.restrict
     );
 
@@ -76,7 +76,7 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(|err| EventfulError::Storage(err.to_string()))?;
+        .map_err(|err| EventError::Storage(err.to_string()))?;
 
     Ok(())
 }
@@ -150,7 +150,7 @@ async fn append_event(
     headers: HeaderMap,
     Json(request): Json<AppendEventRequest>,
 ) -> Result<Json<EventRecord>> {
-    let token = extract_bearer_token(&headers).ok_or(EventfulError::Unauthorized)?;
+    let token = extract_bearer_token(&headers).ok_or(EventError::Unauthorized)?;
     let claims = state.tokens.authorize(&token, AccessKind::Write)?.into();
 
     if state.restrict {

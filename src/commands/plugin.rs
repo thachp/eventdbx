@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand, ValueEnum};
 
-use eventdb::config::{
+use eventdbx::config::{
     CsvPluginConfig, HttpPluginConfig, JsonPluginConfig, LogPluginConfig, PluginConfig,
     PluginDefinition, PluginKind, PostgresColumnConfig, PostgresPluginConfig, SqlitePluginConfig,
     TcpPluginConfig, load_or_default,
@@ -333,7 +333,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                         .find(|def| matches!(def.config, PluginConfig::Postgres(_)))
                         .ok_or_else(|| {
                         anyhow!(
-                            "configure postgres plugin before mapping fields with `eventdb plugin postgres --connection=...`"
+                            "configure postgres plugin before mapping fields with `eventdbx plugin postgres --connection=...`"
                         )
                     })?;
 

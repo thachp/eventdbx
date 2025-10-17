@@ -1,14 +1,14 @@
-# EventDB
+# EventDBX
 
 You'll likely enjoy this database system. Worry less about how you structure your data and focus more on your business logic.
 
 ## Overview
 
-EventDB is an event-sourced, key-value, write-side database system designed to provide immutable, append-only storage for events across various domains. It is ideal for applications requiring detailed audit trails for compliance, complex business processes involving states, and high data integrity levels.
+EventDBX is an event-sourced, key-value, write-side database system designed to provide immutable, append-only storage for events across various domains. It is ideal for applications requiring detailed audit trails for compliance, complex business processes involving states, and high data integrity levels.
 
 ## Getting Started
 
-Follow the steps below to spin up EventDB locally. All commands are expected to run from the repository root unless stated otherwise.
+Follow the steps below to spin up EventDBX locally. All commands are expected to run from the repository root unless stated otherwise.
 
 1. **Install prerequisites**
 
@@ -18,8 +18,8 @@ Follow the steps below to spin up EventDB locally. All commands are expected to 
 2. **Clone and build**
 
    ```bash
-   git clone https://github.com/thachp/eventdb.git
-   cd eventdb
+   git clone https://github.com/thachp/eventdbx.git
+   cd eventdbx
    cargo build
    ```
 
@@ -45,7 +45,7 @@ Follow the steps below to spin up EventDB locally. All commands are expected to 
    ```
 
    - Omit `--foreground` to daemonise the process.
-   - Use `--data-dir <path>` to override the default `./.eventdb` directory.
+   - Use `--data-dir <path>` to override the default `./.eventdbx` directory.
    - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
 
 6. **Define a schema (recommended when running in restricted mode)**
@@ -76,7 +76,7 @@ Follow the steps below to spin up EventDB locally. All commands are expected to 
      --field status=active
    ```
 
-You now have a working EventDB instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
+You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
 
 ## Background
 
@@ -88,89 +88,89 @@ My drive to create this immutable system was inspired by three key scenarios I'v
 
 ## Features
 
-- **String-Only Storage**: EventDB adopts a string-only storage format, meaning all data, regardless of its original type (e.g., integers, dates), is stored as strings. This approach simplifies data handling and ensures uniformity across the database, which is particularly beneficial for data integrity and auditability.
-- **Immutable Data Structure**: Once data is entered into EventDB, it becomes immutable, meaning it cannot be altered or deleted. This characteristic is crucial for applications where the accuracy and traceability of historical data are paramount, such as medical records, financial transactions, and supply chain management. Data can be archived, moving from short-term to long-term storage, but cannot be deleted.
-- **Event Sourcing and Replay**: EventDB is built on the principle of event sourcing, storing all changes to the data as a sequence of events. This allows for the complete replay of events to reconstruct the database's state at any point in time, thereby enhancing data recovery and audit capabilities. Unlike traditional databases that execute update statements to modify data, this system is event-driven. Aggregate state changes are defined in the event object, allowing these events to be replayed at any time to reconstruct the aggregate's current state.
-- **Merkle Tree Integration**: Each aggregate in EventDB is associated with a Merkle tree of events, enabling verification of data integrity. The Merkle tree structure ensures that any data tampering can be detected, offering an additional security layer against data corruption.
-- **Built-in Audit Trails**: EventDB automatically maintains a comprehensive audit trail of all transactions, a feature invaluable for meeting compliance and regulatory requirements. It provides transparent and tamper-evident records. During audits, administrators can issue specific tokens to auditors to access and review specific aggregate instances and all relevant events associated with those instances.
-- **Security with Token-Based Authorization**: EventDB implements token-based authorization to manage database access. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes. Unlike systems where a single application user account performs CRUD operations, EventDB mandates that each user of the application obtains their own access token with a specific time horizon. For example, a doctor will receive their own access token, linked to their identifier (IAM-managed outside EventDB), generated by the system for each event they handle, rather than having a single application user manage all CRUD operations. This ensures the system can accurately track that it was the doctor who made changes to an aggregate state, not the application.
+- **String-Only Storage**: EventDBX adopts a string-only storage format, meaning all data, regardless of its original type (e.g., integers, dates), is stored as strings. This approach simplifies data handling and ensures uniformity across the database, which is particularly beneficial for data integrity and auditability.
+- **Immutable Data Structure**: Once data is entered into EventDBX, it becomes immutable, meaning it cannot be altered or deleted. This characteristic is crucial for applications where the accuracy and traceability of historical data are paramount, such as medical records, financial transactions, and supply chain management. Data can be archived, moving from short-term to long-term storage, but cannot be deleted.
+- **Event Sourcing and Replay**: EventDBX is built on the principle of event sourcing, storing all changes to the data as a sequence of events. This allows for the complete replay of events to reconstruct the database's state at any point in time, thereby enhancing data recovery and audit capabilities. Unlike traditional databases that execute update statements to modify data, this system is event-driven. Aggregate state changes are defined in the event object, allowing these events to be replayed at any time to reconstruct the aggregate's current state.
+- **Merkle Tree Integration**: Each aggregate in EventDBX is associated with a Merkle tree of events, enabling verification of data integrity. The Merkle tree structure ensures that any data tampering can be detected, offering an additional security layer against data corruption.
+- **Built-in Audit Trails**: EventDBX automatically maintains a comprehensive audit trail of all transactions, a feature invaluable for meeting compliance and regulatory requirements. It provides transparent and tamper-evident records. During audits, administrators can issue specific tokens to auditors to access and review specific aggregate instances and all relevant events associated with those instances.
+- **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes. Unlike systems where a single application user account performs CRUD operations, EventDBX mandates that each user of the application obtains their own access token with a specific time horizon. For example, a doctor will receive their own access token, linked to their identifier (IAM-managed outside EventDBX), generated by the system for each event they handle, rather than having a single application user manage all CRUD operations. This ensures the system can accurately track that it was the doctor who made changes to an aggregate state, not the application.
 - **Powered by RocksDB and Rust**: At its core, EventualDB utilizes RocksDB for storage, taking advantage of its high performance and efficiency. The system is developed in Rust, known for its safety, efficiency, and concurrency capabilities, ensuring that EventualDB is both rapid and dependable.
 
 <aside>
-💡 EventDB is optimally employed within a microservice architecture, wherein each microservice is aligned with a distinct domain context. For example, at OM.Farm, distinct microservices are deployed for Farm Management, Livestock Management, and Livestock Leasing Agreements. Similarly, in the health sector, there could be separate microservices for managing patient demographics and patient appointments. Each microservice operates its own EventDB instance, tailored for its specialized purposes.
+💡 EventDBX is optimally employed within a microservice architecture, wherein each microservice is aligned with a distinct domain context. For example, at OM.Farm, distinct microservices are deployed for Farm Management, Livestock Management, and Livestock Leasing Agreements. Similarly, in the health sector, there could be separate microservices for managing patient demographics and patient appointments. Each microservice operates its own EventDBX instance, tailored for its specialized purposes.
 
 </aside>
 
 ## Command-Line Reference
 
-EventDB ships a single `eventdb` binary. Every command accepts an optional `--config <path>` to point at an alternate configuration file.
+EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--config <path>` to point at an alternate configuration file.
 
 ### Server lifecycle
 
-- `eventdb start [--port <u16>] [--data-dir <path>] [--foreground] [--restrict | --restrict=false]`  
+- `eventdbx start [--port <u16>] [--data-dir <path>] [--foreground] [--restrict | --restrict=false]`  
   Launches the server. Schema validation is enforced by default; pass `--restrict=false` to run in permissive mode.
-- `eventdb stop`  
+- `eventdbx stop`  
   Stops the running daemon referenced by the PID file.
-- `eventdb status`  
+- `eventdbx status`  
   Prints the current port, PID, uptime, and whether restriction is enabled.
-- `eventdb restart [start options…]`  
+- `eventdbx restart [start options…]`  
   Stops the existing daemon (if any) and restarts it with the provided options.
-- `eventdb destroy [--yes]`  
+- `eventdbx destroy [--yes]`  
   Removes the PID file, data directory, and configuration file after confirmation (or immediately with `--yes`).
 
 ### Configuration
 
-- `eventdb config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>]`  
+- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>]`  
   Persists configuration updates. The first invocation must include both `--master-key` and `--dek`.
 
 ### Tokens
 
-- `eventdb token generate --group <name> --user <name> [--expiration <secs>] [--limit <writes>] [--keep-alive]`  
+- `eventdbx token generate --group <name> --user <name> [--expiration <secs>] [--limit <writes>] [--keep-alive]`  
   Issues a new token tied to a Unix-style group and user.
-- `eventdb token list`  
+- `eventdbx token list`  
   Lists all tokens with status, expiry, and remaining writes.
-- `eventdb token revoke --token <value>`  
+- `eventdbx token revoke --token <value>`  
   Revokes a token immediately.
-- `eventdb token refresh --token <value> [--expiration <secs>] [--limit <writes>]`  
+- `eventdbx token refresh --token <value> [--expiration <secs>] [--limit <writes>]`  
   Extends the lifetime or write allowance of an existing token.
 
 ### Schemas
 
-- `eventdb schema create --aggregate <name> --events <event1,event2,...> [--snapshot-threshold <u64>]`
-- `eventdb schema add --aggregate <name> --events <event1,event2,...>`
-- `eventdb schema alter <aggregate> [--event <name>] [--snapshot-threshold <u64>] [--lock <true|false>] [--field <name>] [--add <field1,field2,...>] [--remove <field1,field2,...>]`
-- `eventdb schema remove --aggregate <name> --event <name>`
-- `eventdb schema list`
-- `eventdb schema show --aggregate <name>`
+- `eventdbx schema create --aggregate <name> --events <event1,event2,...> [--snapshot-threshold <u64>]`
+- `eventdbx schema add --aggregate <name> --events <event1,event2,...>`
+- `eventdbx schema alter <aggregate> [--event <name>] [--snapshot-threshold <u64>] [--lock <true|false>] [--field <name>] [--add <field1,field2,...>] [--remove <field1,field2,...>]`
+- `eventdbx schema remove --aggregate <name> --event <name>`
+- `eventdbx schema list`
+- `eventdbx schema show --aggregate <name>`
 
 Schemas are stored on disk; when the server runs with restriction enabled, incoming events must satisfy the recorded schema.
 
 ### Aggregates
 
-- `eventdb aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE...`  
+- `eventdbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE...`  
   Appends an event to the store (validated against the schema when restricted).
-- `eventdb aggregate list`  
+- `eventdbx aggregate list`  
   Lists aggregates with version, Merkle root, and archive status.
-- `eventdb aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
-- `eventdb aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
-- `eventdb aggregate verify --aggregate <type> --aggregate-id <id>`
-- `eventdb aggregate snapshot --aggregate <type> --aggregate-id <id> [--comment <text>]`
-- `eventdb aggregate archive --aggregate <type> --aggregate-id <id> [--comment <text>]`
-- `eventdb aggregate restore --aggregate <type> --aggregate-id <id> [--comment <text>]`
-- `eventdb aggregate commit`  
+- `eventdbx aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
+- `eventdbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
+- `eventdbx aggregate verify --aggregate <type> --aggregate-id <id>`
+- `eventdbx aggregate snapshot --aggregate <type> --aggregate-id <id> [--comment <text>]`
+- `eventdbx aggregate archive --aggregate <type> --aggregate-id <id> [--comment <text>]`
+- `eventdbx aggregate restore --aggregate <type> --aggregate-id <id> [--comment <text>]`
+- `eventdbx aggregate commit`  
   Currently a no-op placeholder.
 
 ### Plugins
 
-- `eventdb plugin map --aggregate <name> --field <field> --datatype <type> [--plugin postgres]`  
+- `eventdbx plugin map --aggregate <name> --field <field> --datatype <type> [--plugin postgres]`  
   Records the base column type for a field; use `--plugin postgres` to override only the Postgres mapping.
-- `eventdb plugin postgres --connection <connection-string> [--disable]`
-- `eventdb plugin sqlite --path <file> [--disable]`
-- `eventdb plugin csv --output-dir <dir> [--disable]`
-- `eventdb plugin tcp --host <hostname> --port <u16> [--disable]`
-- `eventdb plugin http --endpoint <url> [--header KEY=VALUE]... [--disable]`
-- `eventdb plugin json --path <file> [--pretty] [--disable]`
-- `eventdb plugin log --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
+- `eventdbx plugin postgres --connection <connection-string> [--disable]`
+- `eventdbx plugin sqlite --path <file> [--disable]`
+- `eventdbx plugin csv --output-dir <dir> [--disable]`
+- `eventdbx plugin tcp --host <hostname> --port <u16> [--disable]`
+- `eventdbx plugin http --endpoint <url> [--header KEY=VALUE]... [--disable]`
+- `eventdbx plugin json --path <file> [--pretty] [--disable]`
+- `eventdbx plugin log --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
 
 Plugins fire after every committed event to keep external systems in sync. Each plugin sends or records different data:
 
@@ -265,9 +265,9 @@ curl \
 
 ### **Quick Start**
 
-1. **Report Issues**: Found a bug or have a suggestion? [Open an issue](https://chat.openai.com/g/g-kvXdAN8VA-eventdb-guide/c/72d2fa39-c3e2-4e40-bd61-5694f7b82aab#) with detailed information.
+1. **Report Issues**: Found a bug or have a suggestion? [Open an issue](https://chat.openai.com/g/g-kvXdAN8VA-eventdbx-guide/c/72d2fa39-c3e2-4e40-bd61-5694f7b82aab#) with detailed information.
 2. **Contribute Code**:
-   - **Fork & Clone**: Fork the EventDB repo and clone your fork.
+   - **Fork & Clone**: Fork the EventDBX repo and clone your fork.
    - **Branch**: Create a branch for your changes from **`develop`**.
    - **Develop**: Make your changes, adhering to our coding standards. Add or update tests as necessary.
    - **Commit**: Use [Conventional Commits](https://www.conventionalcommits.org/) for clear, structured commit messages (e.g., **`feat: add new feature`** or **`fix: correct a bug`**).
@@ -275,9 +275,11 @@ curl \
 
 ### **Guidelines**
 
+- **Formatting**: A project-wide Prettier configuration lives at `.prettierrc.json`; use it for Markdown/JSON/YAML changes.
+- **Commit linting**: Conventional Commit headers are enforced through `.commitlintrc.json`.
 - **Code Review**: Your PR will be reviewed by the team. Be open to feedback and make requested adjustments.
 - **Merge**: Once approved, your PR will be merged into the project, and you'll be credited as a contributor.
 
 ## License
 
-EventDB is licensed under the [MIT](https://github.com/thachp/eventdb/blob/HEAD/apps/system/) License.
+EventDBX is licensed under the [MIT](https://github.com/thachp/eventdbx/blob/HEAD/apps/system/) License.

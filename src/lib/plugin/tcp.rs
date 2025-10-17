@@ -2,7 +2,7 @@ use std::{io::Write, net::TcpStream};
 
 use crate::{
     config::TcpPluginConfig,
-    error::{EventfulError, Result},
+    error::{EventError, Result},
     schema::AggregateSchema,
     store::{AggregateState, EventRecord},
 };
@@ -20,7 +20,7 @@ impl TcpPlugin {
 
     fn connect(&self) -> Result<TcpStream> {
         let addr = format!("{}:{}", self.config.host, self.config.port);
-        TcpStream::connect(&addr).map_err(|err| EventfulError::Storage(err.to_string()))
+        TcpStream::connect(&addr).map_err(|err| EventError::Storage(err.to_string()))
     }
 }
 
@@ -37,13 +37,13 @@ impl Plugin for TcpPlugin {
     ) -> Result<()> {
         let mut stream = self.connect()?;
         let payload = serde_json::to_string(record)
-            .map_err(|err| EventfulError::Serialization(err.to_string()))?;
+            .map_err(|err| EventError::Serialization(err.to_string()))?;
         stream
             .write_all(payload.as_bytes())
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
         stream
             .write_all(b"\n")
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
         Ok(())
     }
 }

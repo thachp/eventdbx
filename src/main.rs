@@ -15,9 +15,9 @@ use crate::commands::{
 };
 
 #[derive(Parser)]
-#[command(author, version, about = "EventDB server CLI")]
+#[command(author, version, about = "EventDBX server CLI")]
 struct Cli {
-    /// Path to the configuration file. Defaults to ~/.config/eventdb/config.toml
+    /// Path to the configuration file. Defaults to ~/.config/eventdbx/config.toml
     #[arg(long)]
     config: Option<PathBuf>,
 
@@ -27,15 +27,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the EventDB server
+    /// Start the EventDBX server
     Start(StartArgs),
-    /// Stop the EventDB server
+    /// Stop the EventDBX server
     Stop,
-    /// Display EventDB server status
+    /// Display EventDBX server status
     Status,
-    /// Restart the EventDB server
+    /// Restart the EventDBX server
     Restart(StartArgs),
-    /// Destroy all EventDB data and configuration
+    /// Destroy all EventDBX data and configuration
     Destroy(DestroyArgs),
     /// Update system configuration
     Config(ConfigArgs),
@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
 
 async fn restart(config: Option<PathBuf>, args: StartArgs) -> Result<()> {
     if let Err(err) = commands::start::stop(config.clone()) {
-        tracing::warn!("failed to stop EventDB server before restart: {err}");
+        tracing::warn!("failed to stop EventDBX server before restart: {err}");
     }
     commands::start::execute(config, args).await
 }

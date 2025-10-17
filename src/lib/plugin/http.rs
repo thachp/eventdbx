@@ -4,7 +4,7 @@ use reqwest::blocking::Client;
 
 use crate::{
     config::HttpPluginConfig,
-    error::{EventfulError, Result},
+    error::{EventError, Result},
     schema::AggregateSchema,
     store::{AggregateState, EventRecord},
 };
@@ -45,7 +45,7 @@ impl Plugin for HttpPlugin {
         request
             .json(record)
             .send()
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
         Ok(())
     }
 }

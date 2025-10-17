@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
-use super::error::{EventfulError, Result};
+use super::error::{EventError, Result};
 
 pub const DEFAULT_PORT: u16 = 7070;
 pub const DEFAULT_MEMORY_THRESHOLD: usize = 10_000;
@@ -62,8 +62,8 @@ pub struct ConfigUpdate {
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
-    let mut path = env::current_dir().map_err(|err| EventfulError::Config(err.to_string()))?;
-    path.push(".eventdb");
+    let mut path = env::current_dir().map_err(|err| EventError::Config(err.to_string()))?;
+    path.push(".eventdbx");
     path.push("config.toml");
     Ok(path)
 }
@@ -151,7 +151,7 @@ impl Config {
     }
 
     pub fn pid_file_path(&self) -> PathBuf {
-        self.data_dir.join("eventdb.pid")
+        self.data_dir.join("eventdbx.pid")
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -181,9 +181,9 @@ impl Config {
 
 fn default_data_dir() -> PathBuf {
     let Ok(current_dir) = env::current_dir() else {
-        return PathBuf::from(".eventdb");
+        return PathBuf::from(".eventdbx");
     };
-    current_dir.join(".eventdb")
+    current_dir.join(".eventdbx")
 }
 
 fn default_restrict() -> bool {
