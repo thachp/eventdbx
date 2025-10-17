@@ -426,7 +426,6 @@ dependencies = [
  "libc",
  "parking_lot",
  "postgres",
- "postgres-types",
  "rocksdb",
  "serde",
  "serde_json",
@@ -1027,10 +1026,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef4605b7c057056dd35baeb6ac0c0338e4975b1f2bef0f65da953285eb007095"
 dependencies = [
  "bytes",
+ "chrono",
  "fallible-iterator",
  "postgres-protocol",
- "serde_core",
- "serde_json",
 ]
 
 [[package]]

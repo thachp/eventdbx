@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use postgres::{Client, NoTls};
-use postgres_types::Json;
 use tracing::error;
 
 use crate::{
@@ -81,21 +80,41 @@ impl PostgresPlugin {
         schema: Option<&AggregateSchema>,
         state: &BTreeMap<String, String>,
     ) -> Result<(String, Vec<(String, String)>)> {
-        let table_name = format!("eventful_{}", sanitize_identifier(aggregate));
+        let table_name = sanitize_identifier(aggregate);
         let quoted_table = quote_identifier(&table_name);
 
         let create_sql = format!(
             "CREATE TABLE IF NOT EXISTS {} (
-                aggregate_id TEXT NOT NULL,
+                id TEXT NOT NULL,
                 version BIGINT NOT NULL,
-                state_json JSONB NOT NULL,
-                PRIMARY KEY (aggregate_id)
+                created_at TIMESTAMPTZ NOT NULL,
+                created_by TEXT,
+                updated_at TIMESTAMPTZ NOT NULL,
+                updated_by TEXT,
+                PRIMARY KEY (id)
             )",
             quoted_table
         );
         client
             .batch_execute(&create_sql)
             .map_err(|err| EventfulError::Storage(err.to_string()))?;
+
+        for (column, ty) in [
+            ("created_at", "TIMESTAMPTZ"),
+            ("created_by", "TEXT"),
+            ("updated_at", "TIMESTAMPTZ"),
+            ("updated_by", "TEXT"),
+        ] {
+            let alter_sql = format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {}",
+                quoted_table,
+                quote_identifier(column),
+                ty
+            );
+            client
+                .batch_execute(&alter_sql)
+                .map_err(|err| EventfulError::Storage(err.to_string()))?;
+        }
 
         // Collect required fields from schema or payload keys.
         let mut fields = BTreeMap::new();
@@ -153,15 +172,30 @@ impl Plugin for PostgresPlugin {
             self.ensure_table(&mut client, &record.aggregate_type, schema, &state.state)?;
 
         let mut columns = vec![
-            "aggregate_id".to_string(),
+            "id".to_string(),
             "version".to_string(),
-            "state_json".to_string(),
+            "created_at".to_string(),
+            "created_by".to_string(),
+            "updated_at".to_string(),
+            "updated_by".to_string(),
         ];
 
         let mut params: Vec<Box<dyn postgres::types::ToSql + Sync>> = Vec::new();
         params.push(Box::new(state.aggregate_id.clone()));
         params.push(Box::new(state.version as i64));
-        params.push(Box::new(Json(serde_json::to_value(&state.state)?)));
+
+        let actor_id = record
+            .metadata
+            .issued_by
+            .as_ref()
+            .map(|claims| claims.identifier_id.clone());
+        let created_at = record.metadata.created_at;
+        let updated_at = record.metadata.created_at;
+
+        params.push(Box::new(created_at));
+        params.push(Box::new(actor_id.clone()));
+        params.push(Box::new(updated_at));
+        params.push(Box::new(actor_id.clone()));
 
         for (column, original) in &field_columns {
             let value: Option<String> = state.state.get(original).cloned();
@@ -173,21 +207,17 @@ impl Plugin for PostgresPlugin {
             (1..=columns.len()).map(|idx| format!("${}", idx)).collect();
         let quoted_columns: Vec<String> = columns.iter().map(|c| quote_identifier(c)).collect();
 
-        let assignments: Vec<String> = quoted_columns
+        let assignments: Vec<String> = columns
             .iter()
-            .enumerate()
-            .filter_map(|(idx, column)| {
-                if idx == 0 {
-                    // Skip aggregate_id
-                    None
-                } else {
-                    Some(format!("{} = EXCLUDED.{}", column, column))
-                }
+            .zip(quoted_columns.iter())
+            .filter_map(|(name, column)| match name.as_str() {
+                "id" | "created_at" | "created_by" => None,
+                _ => Some(format!("{} = EXCLUDED.{}", column, column)),
             })
             .collect();
 
         let insert_sql = format!(
-            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT (aggregate_id, version) DO UPDATE SET {}",
+            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT (id) DO UPDATE SET {}",
             table,
             quoted_columns.join(", "),
             placeholders.join(", "),

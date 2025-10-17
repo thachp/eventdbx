@@ -28,6 +28,7 @@ use crate::{
         Config, ConfigUpdate, PluginConfig, PluginDefinition, PluginKind, PostgresColumnConfig,
         PostgresPluginConfig, load_or_default,
     },
+    error::EventfulError,
     plugin::PluginManager,
     schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
     store::{AppendEvent, EventStore},
@@ -239,6 +240,8 @@ struct TokenRefreshArgs {
 enum SchemaCommands {
     /// Create a new schema definition
     Create(SchemaCreateArgs),
+    /// Add events to an existing schema definition
+    Add(SchemaAddEventArgs),
     /// Alter an existing schema definition
     Alter(SchemaAlterArgs),
     /// Remove an event definition from an aggregate
@@ -301,6 +304,16 @@ struct SchemaRemoveEventArgs {
 
     /// Event name to remove
     event: String,
+}
+
+#[derive(Args)]
+struct SchemaAddEventArgs {
+    /// Aggregate name to modify
+    aggregate: String,
+
+    /// Event names to add (comma-delimited or repeated)
+    #[arg(required = true, value_delimiter = ',')]
+    events: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -1021,6 +1034,34 @@ fn schema_command(config_path: Option<PathBuf>, command: SchemaCommands) -> Resu
                 schema.snapshot_threshold
             );
         }
+        SchemaCommands::Add(args) => match manager.get(&args.aggregate) {
+            Ok(_) => {
+                let mut update = SchemaUpdate::default();
+                for event in &args.events {
+                    update.event_add_fields.entry(event.clone()).or_default();
+                }
+                let schema = manager.update(&args.aggregate, update)?;
+                println!(
+                    "schema={} added_events={} total_events={}",
+                    schema.aggregate,
+                    args.events.join(","),
+                    schema.events.len()
+                );
+            }
+            Err(EventfulError::SchemaNotFound) => {
+                let schema = manager.create(CreateSchemaInput {
+                    aggregate: args.aggregate.clone(),
+                    events: args.events.clone(),
+                    snapshot_threshold: None,
+                })?;
+                println!(
+                    "schema={} created events={}",
+                    schema.aggregate,
+                    schema.events.len()
+                );
+            }
+            Err(err) => return Err(err.into()),
+        },
         SchemaCommands::Alter(args) => {
             let mut update = SchemaUpdate::default();
 
@@ -1135,14 +1176,14 @@ fn plugin_command(config_path: Option<PathBuf>, command: PluginCommands) -> Resu
         PluginCommands::Map(args) => match PluginKind::from(args.plugin) {
             PluginKind::Postgres => {
                 let definition = config
-                        .plugins
-                        .iter_mut()
-                        .find(|def| matches!(def.config, PluginConfig::Postgres(_)))
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "configure postgres plugin before mapping fields with `eventful plugin postgres --connection=...`"
-                            )
-                        })?;
+                    .plugins
+                    .iter_mut()
+                    .find(|def| matches!(def.config, PluginConfig::Postgres(_)))
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "configure postgres plugin before mapping fields with `eventful plugin postgres --connection=...`"
+                        )
+                    })?;
 
                 let PluginConfig::Postgres(settings) = &mut definition.config;
 
