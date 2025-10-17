@@ -1,11 +1,10 @@
 [package]
 name = "eventdbx"
-description="An event-sourced, key-value, write-side database system."
+description = "An event-sourced, key-value, write-side database system."
 version = "1.1.0"
 edition = "2024"
 repository = "https://github.com/thachp/eventdbx"
-license  = "MIT"
-
+license = "MIT"
 
 [lib]
 path = "src/lib/mod.rs"
