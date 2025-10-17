@@ -1039,10 +1039,9 @@ fn schema_command(config_path: Option<PathBuf>, command: SchemaCommands) -> Resu
 
 fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
-    let store = EventStore::open(config.event_store_path())?;
-
     match command {
         AggregateCommands::List => {
+            let store = EventStore::open_read_only(config.event_store_path())?;
             for aggregate in store.aggregates() {
                 println!(
                     "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
@@ -1055,6 +1054,7 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             }
         }
         AggregateCommands::Get(args) => {
+            let store = EventStore::open_read_only(config.event_store_path())?;
             let mut state = store.get_aggregate_state(&args.aggregate, &args.aggregate_id)?;
             let mut events_cache = None;
 
@@ -1104,6 +1104,7 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
                 schema_manager.validate_event(&args.aggregate, &args.event, &payload)?;
             }
 
+            let store = EventStore::open(config.event_store_path())?;
             let record = store.append(AppendEvent {
                 aggregate_type: args.aggregate,
                 aggregate_id: args.aggregate_id,
@@ -1115,6 +1116,7 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             println!("{}", serde_json::to_string_pretty(&record)?);
         }
         AggregateCommands::Replay(args) => {
+            let store = EventStore::open_read_only(config.event_store_path())?;
             let events = store.list_events(&args.aggregate, &args.aggregate_id)?;
             let iter = events.into_iter().skip(args.skip);
             let events: Vec<_> = if let Some(limit) = args.take {
@@ -1128,6 +1130,7 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             }
         }
         AggregateCommands::Verify(args) => {
+            let store = EventStore::open_read_only(config.event_store_path())?;
             let merkle_root = store.verify(&args.aggregate, &args.aggregate_id)?;
             println!(
                 "aggregate_type={} aggregate_id={} merkle_root={}",
@@ -1135,11 +1138,13 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             );
         }
         AggregateCommands::Snapshot(args) => {
+            let store = EventStore::open(config.event_store_path())?;
             let snapshot =
                 store.create_snapshot(&args.aggregate, &args.aggregate_id, args.comment.clone())?;
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
         }
         AggregateCommands::Archive(args) => {
+            let store = EventStore::open(config.event_store_path())?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
@@ -1155,6 +1160,7 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             );
         }
         AggregateCommands::Restore(args) => {
+            let store = EventStore::open(config.event_store_path())?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
