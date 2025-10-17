@@ -5,20 +5,66 @@ mod server;
 mod store;
 mod token;
 
-use std::{collections::BTreeMap, path::PathBuf};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, anyhow};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::json;
 use tracing::info;
 
 use crate::{
-    config::{ConfigUpdate, load_or_default},
-    error::EventfulError,
+    config::{Config, ConfigUpdate, load_or_default},
     schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
     store::{AppendEvent, EventStore},
     token::{IssueTokenInput, TokenManager},
 };
+
+const RUN_MODE_ENV: &str = "EVENTFUL_RUN_MODE";
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RunMode {
+    /// Unrestricted development mode (no schema enforcement)
+    Dev,
+    /// Restricted production mode (schema required)
+    Prod,
+}
+
+impl RunMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dev => "dev",
+            Self::Prod => "prod",
+        }
+    }
+
+    fn requires_schema(self) -> bool {
+        matches!(self, Self::Prod)
+    }
+
+    fn from_env() -> Self {
+        std::env::var(RUN_MODE_ENV)
+            .ok()
+            .and_then(|value| RunMode::from_str(&value, true).ok())
+            .unwrap_or(RunMode::Prod)
+    }
+}
+
+fn set_run_mode_env(mode: RunMode) {
+    unsafe {
+        std::env::set_var(RUN_MODE_ENV, mode.as_str());
+    }
+}
 
 #[derive(Parser)]
 #[command(author, version, about = "EventfulDB server CLI")]
@@ -35,6 +81,14 @@ struct Cli {
 enum Commands {
     /// Start the EventfulDB server
     Start(StartArgs),
+    /// Stop the EventfulDB server
+    Stop,
+    /// Display EventfulDB server status
+    Status,
+    /// Restart the EventfulDB server
+    Restart(StartArgs),
+    /// Destroy all EventfulDB data and configuration
+    Destroy(DestroyArgs),
     /// Update system configuration
     Config(ConfigArgs),
     /// Manage access tokens
@@ -52,9 +106,12 @@ enum Commands {
         #[command(subcommand)]
         command: AggregateCommands,
     },
+    /// Internal command used for daemonized server execution
+    #[command(name = "__internal:server", hide = true)]
+    InternalServer,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct StartArgs {
     /// Override the configured server port
     #[arg(long)]
@@ -63,6 +120,32 @@ struct StartArgs {
     /// Override the configured data directory
     #[arg(long)]
     data_dir: Option<PathBuf>,
+
+    /// Run the server in the foreground instead of daemonizing
+    #[arg(long)]
+    foreground: bool,
+
+    /// Run mode (dev = unrestricted, prod = schema-enforced)
+    #[arg(long, value_enum, default_value_t = RunMode::Prod)]
+    mode: RunMode,
+}
+
+#[derive(Args)]
+struct DestroyArgs {
+    /// Skip confirmation prompt
+    #[arg(long)]
+    yes: bool,
+}
+
+impl Default for StartArgs {
+    fn default() -> Self {
+        Self {
+            port: None,
+            data_dir: None,
+            foreground: false,
+            mode: RunMode::from_env(),
+        }
+    }
 }
 
 #[derive(Args)]
@@ -134,6 +217,8 @@ enum SchemaCommands {
     Create(SchemaCreateArgs),
     /// Alter an existing schema definition
     Alter(SchemaAlterArgs),
+    /// Remove an event definition from an aggregate
+    Remove(SchemaRemoveEventArgs),
     /// List available schemas
     List,
     /// Show a specific schema
@@ -161,6 +246,7 @@ struct SchemaAlterArgs {
     aggregate: String,
 
     /// Optional event name to alter
+    #[arg(long, short = 'e')]
     event: Option<String>,
 
     /// Set the snapshot threshold
@@ -182,6 +268,15 @@ struct SchemaAlterArgs {
     /// Remove fields from an event definition
     #[arg(long, short = 'r', value_delimiter = ',')]
     remove: Vec<String>,
+}
+
+#[derive(Args)]
+struct SchemaRemoveEventArgs {
+    /// Aggregate name
+    aggregate: String,
+
+    /// Event name to remove
+    event: String,
 }
 
 #[derive(Subcommand)]
@@ -302,49 +397,446 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Start(args) => start_command(cli.config, args).await?,
+        Commands::Stop => stop_command(cli.config)?,
+        Commands::Status => status_command(cli.config)?,
+        Commands::Restart(args) => restart_command(cli.config, args).await?,
+        Commands::Destroy(args) => destroy_command(cli.config, args)?,
         Commands::Config(args) => config_command(cli.config, args)?,
         Commands::Token { command } => token_command(cli.config, command)?,
         Commands::Schema { command } => schema_command(cli.config, command)?,
         Commands::Aggregate { command } => aggregate_command(cli.config, command)?,
+        Commands::InternalServer => start_foreground(cli.config, StartArgs::default()).await?,
     }
 
     Ok(())
 }
 
 async fn start_command(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
+    if args.foreground {
+        start_foreground(config_path, args).await
+    } else {
+        start_daemon(config_path, args)?;
+        Ok(())
+    }
+}
+
+async fn restart_command(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
+    if let Err(err) = stop_command(config_path.clone()) {
+        tracing::warn!("failed to stop EventfulDB server before restart: {err}");
+    }
+    start_command(config_path, args).await
+}
+
+async fn start_foreground(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
+    set_run_mode_env(args.mode);
+    let (config, _) = load_and_update_config(config_path, &args)?;
+    server::run(config, args.mode).await?;
+    Ok(())
+}
+
+fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
+    set_run_mode_env(args.mode);
+    let (config, path) = load_and_update_config(config_path, &args)?;
+    let pid_path = config.pid_file_path();
+
+    if let Some(existing) = read_pid_record(&pid_path)? {
+        if process_is_running(existing.pid) {
+            return Err(anyhow!(
+                "EventfulDB server already running (pid {})",
+                existing.pid
+            ));
+        }
+        fs::remove_file(&pid_path)?;
+    }
+
+    let mut command = Command::new(env::current_exe()?);
+    command.arg("--config").arg(&path);
+    command.arg("__internal:server");
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    command.env(RUN_MODE_ENV, args.mode.as_str());
+
+    let child = command.spawn()?;
+    let pid = child.id();
+    drop(child);
+
+    let started_at = Utc::now();
+    let record = PidRecord {
+        pid,
+        started_at: Some(started_at),
+    };
+    write_pid_record(&pid_path, &record)?;
+    println!(
+        "EventfulDB server is running on port {} (pid {}) since {}",
+        config.port,
+        pid,
+        started_at.to_rfc3339()
+    );
+    Ok(())
+}
+
+fn load_and_update_config(
+    config_path: Option<PathBuf>,
+    args: &StartArgs,
+) -> Result<(Config, PathBuf)> {
     let (mut config, path) = load_or_default(config_path)?;
-
-    if let Some(port) = args.port {
-        config.apply_update(ConfigUpdate {
-            port: Some(port),
-            ..ConfigUpdate::default()
-        });
-    }
-
-    if let Some(dir) = args.data_dir {
-        config.apply_update(ConfigUpdate {
-            data_dir: Some(dir),
-            ..ConfigUpdate::default()
-        });
-    }
-
+    apply_start_overrides(&mut config, args);
+    ensure_secrets_configured(&config)?;
     config.ensure_data_dir()?;
     config.save(&path)?;
+    Ok((config, path))
+}
 
-    server::run(config).await?;
+fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
+    config.apply_update(ConfigUpdate {
+        port: args.port,
+        data_dir: args.data_dir.clone(),
+        run_mode: Some(args.mode),
+        ..ConfigUpdate::default()
+    });
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PidRecord {
+    pid: u32,
+    #[serde(default)]
+    started_at: Option<DateTime<Utc>>,
+}
+
+fn stop_command(config_path: Option<PathBuf>) -> Result<()> {
+    let (config, _) = load_or_default(config_path)?;
+    let pid_path = config.pid_file_path();
+
+    let Some(record) = read_pid_record(&pid_path)? else {
+        println!("No running EventfulDB server found.");
+        return Ok(());
+    };
+    let pid = record.pid;
+
+    if !process_is_running(pid) {
+        fs::remove_file(&pid_path)?;
+        println!("Removed stale EventfulDB server pid file.");
+        return Ok(());
+    }
+
+    terminate_process(pid)?;
+    if !wait_for_exit(pid, Duration::from_secs(5)) {
+        #[cfg(unix)]
+        {
+            force_kill_process(pid)?;
+            if !wait_for_exit(pid, Duration::from_secs(2)) {
+                return Err(anyhow!(
+                    "failed to stop EventfulDB server (pid {pid}); process is still running"
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(anyhow!(
+                "failed to stop EventfulDB server (pid {pid}); process is still running"
+            ));
+        }
+    }
+
+    fs::remove_file(&pid_path)?;
+    if let Some(started_at) = record.started_at {
+        println!(
+            "EventfulDB server stopped (pid {}) after {} (started {})",
+            pid,
+            describe_uptime(started_at),
+            started_at.to_rfc3339()
+        );
+    } else {
+        println!("EventfulDB server stopped (pid {})", pid);
+    }
     Ok(())
+}
+
+fn status_command(config_path: Option<PathBuf>) -> Result<()> {
+    let (config, _) = load_or_default(config_path)?;
+    let pid_path = config.pid_file_path();
+
+    match read_pid_record(&pid_path)? {
+        Some(record) => {
+            let pid = record.pid;
+            if process_is_running(pid) {
+                if let Some(started_at) = record.started_at {
+                    println!(
+                        "EventfulDB server is running on port {} (pid {}) — mode={} — up for {} (since {})",
+                        config.port,
+                        pid,
+                        config.run_mode.as_str(),
+                        describe_uptime(started_at),
+                        started_at.to_rfc3339()
+                    );
+                } else {
+                    println!(
+                        "EventfulDB server is running on port {} (pid {}) — mode={}",
+                        config.port,
+                        pid,
+                        config.run_mode.as_str()
+                    );
+                }
+            } else {
+                let _ = fs::remove_file(&pid_path);
+                println!("EventfulDB server is not running (removed stale pid file).");
+            }
+        }
+        None => println!("EventfulDB server is not running."),
+    }
+
+    Ok(())
+}
+
+fn destroy_command(config_path: Option<PathBuf>, args: DestroyArgs) -> Result<()> {
+    let (config, path) = load_or_default(config_path)?;
+
+    if !args.yes {
+        eprint!(
+            "This will permanently delete all EventfulDB data under {} and remove the config file at {}.\nType \"destroy\" to continue: ",
+            config.data_dir.display(),
+            path.display()
+        );
+        io::stderr().flush()?;
+        let mut confirmation = String::new();
+        io::stdin().read_line(&mut confirmation)?;
+        if confirmation.trim() != "destroy" {
+            println!("Destroy command cancelled.");
+            return Ok(());
+        }
+    }
+
+    if let Err(err) = stop_command(Some(path.clone())) {
+        tracing::warn!("failed to stop running server before destroy: {err}");
+    }
+
+    if config.data_dir.exists() {
+        fs::remove_dir_all(&config.data_dir)?;
+    }
+
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+
+    println!(
+        "All EventfulDB data and configuration removed from {}",
+        config.data_dir.display()
+    );
+    Ok(())
+}
+
+fn write_pid_record(path: &Path, record: &PidRecord) -> Result<()> {
+    let contents = serde_json::to_string(record)?;
+    fs::write(path, contents)?;
+    Ok(())
+}
+
+fn read_pid_record(path: &Path) -> Result<Option<PidRecord>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(path)?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if let Ok(record) = serde_json::from_str::<PidRecord>(trimmed) {
+        return Ok(Some(record));
+    }
+
+    if let Ok(pid) = trimmed.parse::<u32>() {
+        return Ok(Some(PidRecord {
+            pid,
+            started_at: None,
+        }));
+    }
+
+    Err(anyhow!("invalid pid file at {}", path.display()))
+}
+
+fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !process_is_running(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return !process_is_running(pid);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    unsafe {
+        if libc::kill(pid as libc::pid_t, 0) == 0 {
+            true
+        } else {
+            let err = io::Error::last_os_error();
+            !matches!(err.raw_os_error(), Some(libc::ESRCH))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            false
+        } else {
+            CloseHandle(handle);
+            true
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_running(_pid: u32) -> bool {
+    false
+}
+
+fn describe_uptime(started_at: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let elapsed = now.signed_duration_since(started_at);
+    match elapsed.to_std() {
+        Ok(duration) => format_human_duration(duration),
+        Err(_) => "unknown duration".to_string(),
+    }
+}
+
+fn format_human_duration(duration: Duration) -> String {
+    let mut secs = duration.as_secs();
+    if secs == 0 {
+        return "under 1s".to_string();
+    }
+
+    let days = secs / 86_400;
+    secs %= 86_400;
+    let hours = secs / 3_600;
+    secs %= 3_600;
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{}d", days));
+    }
+    if hours > 0 {
+        parts.push(format!("{}h", hours));
+    }
+    if minutes > 0 {
+        parts.push(format!("{}m", minutes));
+    }
+    if seconds > 0 && parts.len() < 3 {
+        parts.push(format!("{}s", seconds));
+    }
+
+    if parts.is_empty() {
+        "under 1s".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process(pid: u32) -> Result<()> {
+    unsafe {
+        if libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 {
+            Ok(())
+        } else {
+            let err = io::Error::last_os_error();
+            if matches!(err.raw_os_error(), Some(libc::ESRCH)) {
+                Ok(())
+            } else {
+                Err(anyhow!("failed to send SIGTERM to pid {pid}: {err}"))
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn terminate_process(pid: u32) -> Result<()> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle == 0 {
+            return Err(anyhow!("failed to open process {pid} for termination"));
+        }
+        let result = TerminateProcess(handle, 0);
+        CloseHandle(handle);
+        if result == 0 {
+            return Err(anyhow!("failed to terminate process {pid}"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process(pid: u32) -> Result<()> {
+    Err(anyhow!(
+        "process control is not supported on this platform (pid {pid})"
+    ))
+}
+
+#[cfg(unix)]
+fn force_kill_process(pid: u32) -> Result<()> {
+    unsafe {
+        if libc::kill(pid as libc::pid_t, libc::SIGKILL) == 0 {
+            Ok(())
+        } else {
+            let err = io::Error::last_os_error();
+            if matches!(err.raw_os_error(), Some(libc::ESRCH)) {
+                Ok(())
+            } else {
+                Err(anyhow!("failed to send SIGKILL to pid {pid}: {err}"))
+            }
+        }
+    }
 }
 
 fn config_command(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
     let (mut config, path) = load_or_default(config_path)?;
+    let was_initialized = config.is_initialized();
+
+    let ConfigArgs {
+        port,
+        data_dir,
+        master_key,
+        memory_threshold,
+        data_encryption_key,
+    } = args;
+
+    let master_key = normalize_secret(master_key);
+    let data_encryption_key = normalize_secret(data_encryption_key);
 
     config.apply_update(ConfigUpdate {
-        port: args.port,
-        data_dir: args.data_dir,
-        master_key: args.master_key,
-        memory_threshold: args.memory_threshold,
-        data_encryption_key: args.data_encryption_key,
+        port,
+        data_dir,
+        master_key,
+        memory_threshold,
+        data_encryption_key,
+        run_mode: None,
     });
+
+    if !was_initialized && !config.is_initialized() {
+        return Err(anyhow!(
+            "initial setup requires both --master-key and --dek to be provided"
+        ));
+    }
 
     config.ensure_data_dir()?;
     config.save(&path)?;
@@ -353,12 +845,34 @@ fn config_command(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> 
     Ok(())
 }
 
+fn normalize_secret(input: Option<String>) -> Option<String> {
+    input.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn ensure_secrets_configured(config: &Config) -> Result<()> {
+    if config.is_initialized() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "master key and data encryption key must be configured.\nRun `eventful config --master-key <value> --dek <value>` during initial setup."
+        ))
+    }
+}
+
 fn token_command(config_path: Option<PathBuf>, command: TokenCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let manager = TokenManager::load(config.tokens_path())?;
 
     match command {
         TokenCommands::Generate(args) => {
+            ensure_secrets_configured(&config)?;
             let record = manager.issue(IssueTokenInput {
                 identifier_type: args.identifier_type,
                 identifier_id: args.identifier_id,
@@ -494,6 +1008,15 @@ fn schema_command(config_path: Option<PathBuf>, command: SchemaCommands) -> Resu
                 schema.events.len()
             );
         }
+        SchemaCommands::Remove(args) => {
+            let schema = manager.remove_event(&args.aggregate, &args.event)?;
+            println!(
+                "schema={} removed_event={} remaining_events={}",
+                schema.aggregate,
+                args.event,
+                schema.events.len()
+            );
+        }
         SchemaCommands::List => {
             for schema in manager.list() {
                 println!(
@@ -516,10 +1039,9 @@ fn schema_command(config_path: Option<PathBuf>, command: SchemaCommands) -> Resu
 
 fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
-    let store = EventStore::open(config.event_store_path())?;
-
     match command {
         AggregateCommands::List => {
+            let store = EventStore::open_read_only(config.event_store_path())?;
             for aggregate in store.aggregates() {
                 println!(
                     "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
@@ -532,6 +1054,7 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             }
         }
         AggregateCommands::Get(args) => {
+            let store = EventStore::open_read_only(config.event_store_path())?;
             let mut state = store.get_aggregate_state(&args.aggregate, &args.aggregate_id)?;
             let mut events_cache = None;
 
@@ -577,51 +1100,11 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
         AggregateCommands::Apply(args) => {
             let payload = collect_payload(args.fields);
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
-            let schema = match schema_manager.get(&args.aggregate) {
-                Ok(schema) => Some(schema),
-                Err(EventfulError::SchemaNotFound) => None,
-                Err(err) => return Err(err.into()),
-            };
-
-            if let Some(schema) = schema {
-                if schema.locked {
-                    return Err(anyhow!(
-                        "aggregate {} is locked for updates",
-                        schema.aggregate
-                    ));
-                }
-
-                for key in payload.keys() {
-                    if schema.field_locks.contains(key) {
-                        return Err(anyhow!(
-                            "field {} is locked for aggregate {}",
-                            key,
-                            schema.aggregate
-                        ));
-                    }
-                }
-
-                let event_schema = schema.events.get(&args.event).ok_or_else(|| {
-                    anyhow!(
-                        "event {} is not defined for aggregate {}",
-                        args.event,
-                        schema.aggregate
-                    )
-                })?;
-
-                if !event_schema.fields.is_empty() {
-                    for key in payload.keys() {
-                        if !event_schema.fields.contains(key) {
-                            return Err(anyhow!(
-                                "field {} is not permitted for event {}",
-                                key,
-                                args.event
-                            ));
-                        }
-                    }
-                }
+            if config.run_mode.requires_schema() {
+                schema_manager.validate_event(&args.aggregate, &args.event, &payload)?;
             }
 
+            let store = EventStore::open(config.event_store_path())?;
             let record = store.append(AppendEvent {
                 aggregate_type: args.aggregate,
                 aggregate_id: args.aggregate_id,
@@ -633,6 +1116,7 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             println!("{}", serde_json::to_string_pretty(&record)?);
         }
         AggregateCommands::Replay(args) => {
+            let store = EventStore::open_read_only(config.event_store_path())?;
             let events = store.list_events(&args.aggregate, &args.aggregate_id)?;
             let iter = events.into_iter().skip(args.skip);
             let events: Vec<_> = if let Some(limit) = args.take {
@@ -646,6 +1130,7 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             }
         }
         AggregateCommands::Verify(args) => {
+            let store = EventStore::open_read_only(config.event_store_path())?;
             let merkle_root = store.verify(&args.aggregate, &args.aggregate_id)?;
             println!(
                 "aggregate_type={} aggregate_id={} merkle_root={}",
@@ -653,11 +1138,13 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             );
         }
         AggregateCommands::Snapshot(args) => {
+            let store = EventStore::open(config.event_store_path())?;
             let snapshot =
                 store.create_snapshot(&args.aggregate, &args.aggregate_id, args.comment.clone())?;
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
         }
         AggregateCommands::Archive(args) => {
+            let store = EventStore::open(config.event_store_path())?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
@@ -673,6 +1160,7 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             );
         }
         AggregateCommands::Restore(args) => {
+            let store = EventStore::open(config.event_store_path())?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,

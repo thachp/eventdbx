@@ -44,11 +44,17 @@ My drive to create this immutable system was inspired by three key scenarios I'v
 
   eventful config --master-key=xxx --memory-threshold=10000 --dek=xxxx-xxx-xxx
   ```
+- You must supply both `--master-key` and `--dek` the first time you configure EventfulDB; the CLI will refuse to start the server or issue tokens until both secrets are present. The master key governs token derivation, while the `--dek` value enables transparent data encryption (TDE-style) so persisted storage cannot be read without the configured key.
+- By default, EventfulDB stores its data under `./.eventful` inside the application directory (with configuration persisted at `./.eventful/config.toml`). You can point `--data-dir` elsewhere if you prefer a custom location.
 - **`start`**: Launches the EventualDB server, making it ready to accept and process requests.
   ```toml
   # start eventful service on port 9595 (default)
   eventful start --port 9595
+
+  # start in development (unrestricted) mode where schemas are optional
+  eventful start --mode dev
   ```
+  Development mode skips schema enforcement, while the default production mode requires every event to satisfy its schema definition.
 - **`stop`**: Gracefully shuts down the EventfulDB server, ensuring that all processes are correctly terminated.
   ```toml
   # stop eventful service gracefully (end all connections and services)
@@ -59,6 +65,22 @@ My drive to create this immutable system was inspired by three key scenarios I'v
 
   # stop eventful service immediate, ending all services
   evenful stop --force
+  ```
+- **`restart`**: Stops the running EventfulDB server (if any) and launches a fresh instance, ensuring schemas and tokens are reloaded from disk.
+  ```toml
+  # restart the daemonized server
+  eventful restart
+
+  # restart and run in the foreground
+  eventful restart --foreground
+  ```
+- **`destroy`**: Removes all EventfulDB data, configuration, and metadata, returning the environment to a pristine, first-install state.
+  ```toml
+  # destroy all EventfulDB state (prompts for confirmation)
+  eventful destroy
+
+  # destroy without prompt
+  eventful destroy --yes
   ```
 - **`version`**: Displays the current version of the EventfulDB system, helping users identify the installed version.
   ```toml
@@ -165,10 +187,15 @@ A schema in EventfulDB is a formal definition that outlines the structure, const
   eventful schema:alter patient --field=birthdate --lock=false
 
   # add field for <event>
-  eventful schema:alter patient <event> -add=fieldname
+  eventful schema:alter patient --event=<event> -a fieldname
 
   # remove field for <event>
-  eventful schema:alter patient <event> -remove=fieldname
+  eventful schema:alter patient -e <event> -r fieldname
+  ```
+- **`schema:remove`**: Deletes an event definition from an aggregate while leaving the remaining events untouched.
+  ```toml
+  # remove the person_updated event from the person aggregate
+  eventful schema:remove person person_updated
   ```
 - **`schema:list`**: Displays all defined schemas, allowing users to review the existing data models.
   ```toml

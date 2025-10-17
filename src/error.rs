@@ -32,6 +32,8 @@ pub enum EventfulError {
     SchemaNotFound,
     #[error("invalid schema: {0}")]
     InvalidSchema(String),
+    #[error("schema violation: {0}")]
+    SchemaViolation(String),
     #[error("storage error: {0}")]
     Storage(String),
     #[error("io error: {0}")]
@@ -72,6 +74,7 @@ impl IntoResponse for EventfulError {
             Self::TokenLimitReached | Self::AggregateArchived => StatusCode::FORBIDDEN,
             Self::AggregateNotFound | Self::SchemaNotFound => StatusCode::NOT_FOUND,
             Self::SchemaExists => StatusCode::CONFLICT,
+            Self::SchemaViolation(_) => StatusCode::BAD_REQUEST,
             Self::Storage(_) | Self::Serialization(_) | Self::Io(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

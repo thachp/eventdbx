@@ -107,6 +107,7 @@ impl AggregateMeta {
 pub struct EventStore {
     db: DBWithThreadMode<MultiThreaded>,
     write_lock: Mutex<()>,
+    read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,10 +131,25 @@ impl EventStore {
         Ok(Self {
             db,
             write_lock: Mutex::new(()),
+            read_only: false,
+        })
+    }
+
+    pub fn open_read_only(path: PathBuf) -> Result<Self> {
+        let mut options = Options::default();
+        options.create_if_missing(false);
+        let db = DBWithThreadMode::<MultiThreaded>::open_for_read_only(&options, path, false)
+            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+
+        Ok(Self {
+            db,
+            write_lock: Mutex::new(()),
+            read_only: true,
         })
     }
 
     pub fn append(&self, input: AppendEvent) -> Result<EventRecord> {
+        self.ensure_writable()?;
         let _guard = self.write_lock.lock();
 
         let mut meta = self
@@ -266,6 +282,8 @@ impl EventStore {
         aggregate_id: &str,
         comment: Option<String>,
     ) -> Result<SnapshotRecord> {
+        self.ensure_writable()?;
+        let _guard = self.write_lock.lock();
         let state = self.get_aggregate_state(aggregate_type, aggregate_id)?;
         let created_at = Utc::now();
         let record = SnapshotRecord {
@@ -293,6 +311,7 @@ impl EventStore {
         archived: bool,
         comment: Option<String>,
     ) -> Result<AggregateState> {
+        self.ensure_writable()?;
         let _guard = self.write_lock.lock();
         let mut meta = self
             .load_meta(aggregate_type, aggregate_id)?
@@ -316,6 +335,16 @@ impl EventStore {
 
         drop(meta);
         self.get_aggregate_state(aggregate_type, aggregate_id)
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        if self.read_only {
+            Err(EventfulError::Storage(
+                "event store opened in read-only mode".into(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     pub fn aggregates(&self) -> Vec<AggregateState> {

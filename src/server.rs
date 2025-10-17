@@ -13,6 +13,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use crate::{
+    RunMode,
     config::Config,
     error::{EventfulError, Result},
     schema::{AggregateSchema, SchemaManager},
@@ -25,9 +26,10 @@ struct AppState {
     store: Arc<EventStore>,
     tokens: Arc<TokenManager>,
     schemas: Arc<SchemaManager>,
+    mode: RunMode,
 }
 
-pub async fn run(config: Config) -> Result<()> {
+pub async fn run(config: Config, mode: RunMode) -> Result<()> {
     let store = Arc::new(EventStore::open(config.event_store_path())?);
     let tokens = Arc::new(TokenManager::load(config.tokens_path())?);
     let schemas = Arc::new(SchemaManager::load(config.schema_store_path())?);
@@ -35,6 +37,7 @@ pub async fn run(config: Config) -> Result<()> {
         store,
         tokens,
         schemas,
+        mode,
     };
 
     let app = Router::new()
@@ -62,7 +65,7 @@ pub async fn run(config: Config) -> Result<()> {
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    info!("Starting EventfulDB server on {addr}");
+    info!("Starting EventfulDB server on {addr} in {:?} mode", mode);
 
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app)
@@ -144,6 +147,12 @@ async fn append_event(
 ) -> Result<Json<EventRecord>> {
     let token = extract_bearer_token(&headers).ok_or(EventfulError::Unauthorized)?;
     let claims = state.tokens.authorize(&token, AccessKind::Write)?.into();
+
+    if state.mode.requires_schema() {
+        state
+            .schemas
+            .validate_event(&aggregate_type, &request.event_type, &request.payload)?;
+    }
 
     let record = state.store.append(AppendEvent {
         aggregate_type,

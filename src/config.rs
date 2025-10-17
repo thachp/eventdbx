@@ -6,7 +6,10 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{EventfulError, Result};
+use crate::{
+    RunMode,
+    error::{EventfulError, Result},
+};
 
 pub const DEFAULT_PORT: u16 = 7070;
 pub const DEFAULT_MEMORY_THRESHOLD: usize = 10_000;
@@ -20,6 +23,8 @@ pub struct Config {
     pub data_encryption_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default = "default_run_mode")]
+    pub run_mode: RunMode,
 }
 
 impl Default for Config {
@@ -33,6 +38,7 @@ impl Default for Config {
             data_encryption_key: None,
             created_at: now,
             updated_at: now,
+            run_mode: default_run_mode(),
         }
     }
 }
@@ -44,10 +50,12 @@ pub struct ConfigUpdate {
     pub master_key: Option<String>,
     pub memory_threshold: Option<usize>,
     pub data_encryption_key: Option<String>,
+    pub run_mode: Option<RunMode>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
     let mut path = env::current_dir().map_err(|err| EventfulError::Config(err.to_string()))?;
+    path.push(".eventful");
     path.push("config.toml");
     Ok(path)
 }
@@ -98,6 +106,9 @@ impl Config {
         if let Some(dek) = update.data_encryption_key {
             self.data_encryption_key = Some(dek);
         }
+        if let Some(mode) = update.run_mode {
+            self.run_mode = mode;
+        }
         self.updated_at = Utc::now();
     }
 
@@ -117,10 +128,31 @@ impl Config {
     pub fn schema_store_path(&self) -> PathBuf {
         self.data_dir.join("schemas.json")
     }
+
+    pub fn pid_file_path(&self) -> PathBuf {
+        self.data_dir.join("eventful.pid")
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        self.master_key
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+            && self
+                .data_encryption_key
+                .as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+    }
 }
 
 fn default_data_dir() -> PathBuf {
-    let mut dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    dir.push("eventful");
-    dir
+    let Ok(current_dir) = env::current_dir() else {
+        return PathBuf::from(".eventful");
+    };
+    current_dir.join(".eventful")
+}
+
+fn default_run_mode() -> RunMode {
+    RunMode::Prod
 }
