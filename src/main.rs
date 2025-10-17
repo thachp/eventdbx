@@ -31,7 +31,8 @@ use crate::{
 
 const RUN_MODE_ENV: &str = "EVENTFUL_RUN_MODE";
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum RunMode {
     /// Unrestricted development mode (no schema enforcement)
     Dev,
@@ -491,6 +492,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
     config.apply_update(ConfigUpdate {
         port: args.port,
         data_dir: args.data_dir.clone(),
+        run_mode: Some(args.mode),
         ..ConfigUpdate::default()
     });
 }
@@ -561,16 +563,19 @@ fn status_command(config_path: Option<PathBuf>) -> Result<()> {
             if process_is_running(pid) {
                 if let Some(started_at) = record.started_at {
                     println!(
-                        "EventfulDB server is running on port {} (pid {}) — up for {} (since {})",
+                        "EventfulDB server is running on port {} (pid {}) — mode={} — up for {} (since {})",
                         config.port,
                         pid,
+                        config.run_mode.as_str(),
                         describe_uptime(started_at),
                         started_at.to_rfc3339()
                     );
                 } else {
                     println!(
-                        "EventfulDB server is running on port {} (pid {})",
-                        config.port, pid
+                        "EventfulDB server is running on port {} (pid {}) — mode={}",
+                        config.port,
+                        pid,
+                        config.run_mode.as_str()
                     );
                 }
             } else {
@@ -824,6 +829,7 @@ fn config_command(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> 
         master_key,
         memory_threshold,
         data_encryption_key,
+        run_mode: None,
     });
 
     if !was_initialized && !config.is_initialized() {
@@ -1094,7 +1100,7 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
         AggregateCommands::Apply(args) => {
             let payload = collect_payload(args.fields);
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
-            if RunMode::from_env().requires_schema() {
+            if config.run_mode.requires_schema() {
                 schema_manager.validate_event(&args.aggregate, &args.event, &payload)?;
             }
 

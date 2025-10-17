@@ -6,7 +6,10 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{EventfulError, Result};
+use crate::{
+    RunMode,
+    error::{EventfulError, Result},
+};
 
 pub const DEFAULT_PORT: u16 = 7070;
 pub const DEFAULT_MEMORY_THRESHOLD: usize = 10_000;
@@ -20,6 +23,8 @@ pub struct Config {
     pub data_encryption_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default = "default_run_mode")]
+    pub run_mode: RunMode,
 }
 
 impl Default for Config {
@@ -33,6 +38,7 @@ impl Default for Config {
             data_encryption_key: None,
             created_at: now,
             updated_at: now,
+            run_mode: default_run_mode(),
         }
     }
 }
@@ -44,6 +50,7 @@ pub struct ConfigUpdate {
     pub master_key: Option<String>,
     pub memory_threshold: Option<usize>,
     pub data_encryption_key: Option<String>,
+    pub run_mode: Option<RunMode>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -99,6 +106,9 @@ impl Config {
         if let Some(dek) = update.data_encryption_key {
             self.data_encryption_key = Some(dek);
         }
+        if let Some(mode) = update.run_mode {
+            self.run_mode = mode;
+        }
         self.updated_at = Utc::now();
     }
 
@@ -141,4 +151,8 @@ fn default_data_dir() -> PathBuf {
         return PathBuf::from(".eventful");
     };
     current_dir.join(".eventful")
+}
+
+fn default_run_mode() -> RunMode {
+    RunMode::Prod
 }
