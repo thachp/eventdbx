@@ -166,6 +166,60 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 
 Plugins are notified after each committed event so downstream systems stay synchronized.
 
+## REST API
+
+The server exposes a small HTTP API (served on port `7070` by default). All endpoints require a bearer token unless otherwise noted.
+
+| Method & Path | Description |
+| ------------- | ----------- |
+| `GET /health` | Liveness probe (unauthenticated). |
+| `GET /v1/aggregates` | Lists all aggregates. |
+| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}` | Returns the current state for a specific aggregate. |
+| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events` | Lists every event for an aggregate. |
+| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events/recent?take=<n>` | Returns the `n` most recent events (defaults to 10). |
+| `POST /v1/aggregates/{aggregate_type}/{aggregate_id}/events` | Appends an event (payload must include `event_type` and `payload`). |
+| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/verify` | Computes and returns the Merkle root for integrity verification. |
+| `GET /v1/schemas` | Lists all schema definitions. |
+| `GET /v1/schemas/{aggregate}` | Returns the schema for a specific aggregate. |
+
+All authenticated requests must include `Authorization: Bearer <token>` with a token issued via the CLI.
+
+### cURL examples
+
+```bash
+# Health check
+curl http://localhost:7070/health
+
+# List aggregates (replace TOKEN with an active value)
+curl \
+  -H "Authorization: Bearer TOKEN" \
+  http://localhost:7070/v1/aggregates
+
+# Append an event
+curl \
+  -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "event_type": "patient-updated",
+        "payload": {
+          "status": "inactive",
+          "comment": "Archived via API"
+        }
+      }' \
+  http://localhost:7070/v1/aggregates/patient/p-001/events
+
+# Fetch the latest five events for an aggregate
+curl \
+  -H "Authorization: Bearer TOKEN" \
+  "http://localhost:7070/v1/aggregates/patient/p-001/events/recent?take=5"
+
+# Retrieve a schema definition
+curl \
+  -H "Authorization: Bearer TOKEN" \
+  http://localhost:7070/v1/schemas/patient | jq
+```
+
 ## Contributing
 
 ### **Quick Start**
