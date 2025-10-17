@@ -18,7 +18,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::json;
 use tracing::info;
 
@@ -28,6 +28,42 @@ use crate::{
     store::{AppendEvent, EventStore},
     token::{IssueTokenInput, TokenManager},
 };
+
+const RUN_MODE_ENV: &str = "EVENTFUL_RUN_MODE";
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum RunMode {
+    /// Unrestricted development mode (no schema enforcement)
+    Dev,
+    /// Restricted production mode (schema required)
+    Prod,
+}
+
+impl RunMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dev => "dev",
+            Self::Prod => "prod",
+        }
+    }
+
+    fn requires_schema(self) -> bool {
+        matches!(self, Self::Prod)
+    }
+
+    fn from_env() -> Self {
+        std::env::var(RUN_MODE_ENV)
+            .ok()
+            .and_then(|value| RunMode::from_str(&value, true).ok())
+            .unwrap_or(RunMode::Prod)
+    }
+}
+
+fn set_run_mode_env(mode: RunMode) {
+    unsafe {
+        std::env::set_var(RUN_MODE_ENV, mode.as_str());
+    }
+}
 
 #[derive(Parser)]
 #[command(author, version, about = "EventfulDB server CLI")]
@@ -87,6 +123,10 @@ struct StartArgs {
     /// Run the server in the foreground instead of daemonizing
     #[arg(long)]
     foreground: bool,
+
+    /// Run mode (dev = unrestricted, prod = schema-enforced)
+    #[arg(long, value_enum, default_value_t = RunMode::Prod)]
+    mode: RunMode,
 }
 
 #[derive(Args)]
@@ -102,6 +142,7 @@ impl Default for StartArgs {
             port: None,
             data_dir: None,
             foreground: false,
+            mode: RunMode::from_env(),
         }
     }
 }
@@ -386,12 +427,14 @@ async fn restart_command(config_path: Option<PathBuf>, args: StartArgs) -> Resul
 }
 
 async fn start_foreground(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
+    set_run_mode_env(args.mode);
     let (config, _) = load_and_update_config(config_path, &args)?;
-    server::run(config).await?;
+    server::run(config, args.mode).await?;
     Ok(())
 }
 
 fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
+    set_run_mode_env(args.mode);
     let (config, path) = load_and_update_config(config_path, &args)?;
     let pid_path = config.pid_file_path();
 
@@ -411,6 +454,7 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());
+    command.env(RUN_MODE_ENV, args.mode.as_str());
 
     let child = command.spawn()?;
     let pid = child.id();
@@ -1050,7 +1094,9 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
         AggregateCommands::Apply(args) => {
             let payload = collect_payload(args.fields);
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
-            schema_manager.validate_event(&args.aggregate, &args.event, &payload)?;
+            if RunMode::from_env().requires_schema() {
+                schema_manager.validate_event(&args.aggregate, &args.event, &payload)?;
+            }
 
             let record = store.append(AppendEvent {
                 aggregate_type: args.aggregate,

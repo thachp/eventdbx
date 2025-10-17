@@ -50,7 +50,11 @@ My drive to create this immutable system was inspired by three key scenarios I'v
   ```toml
   # start eventful service on port 9595 (default)
   eventful start --port 9595
+
+  # start in development (unrestricted) mode where schemas are optional
+  eventful start --mode dev
   ```
+  Development mode skips schema enforcement, while the default production mode requires every event to satisfy its schema definition.
 - **`stop`**: Gracefully shuts down the EventfulDB server, ensuring that all processes are correctly terminated.
   ```toml
   # stop eventful service gracefully (end all connections and services)
