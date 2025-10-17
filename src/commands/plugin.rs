@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand, ValueEnum};
 
-use eventful::config::{
+use eventdb::config::{
     CsvPluginConfig, PluginConfig, PluginDefinition, PluginKind, PostgresColumnConfig,
     PostgresPluginConfig, SqlitePluginConfig, load_or_default,
 };
@@ -164,7 +164,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                     .find(|def| matches!(def.config, PluginConfig::Postgres(_)))
                     .ok_or_else(|| {
                         anyhow!(
-                            "configure postgres plugin before mapping fields with `eventful plugin postgres --connection=...`"
+                            "configure postgres plugin before mapping fields with `eventdb plugin postgres --connection=...`"
                         )
                     })?;
 

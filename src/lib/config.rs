@@ -60,7 +60,7 @@ pub struct ConfigUpdate {
 
 pub fn default_config_path() -> Result<PathBuf> {
     let mut path = env::current_dir().map_err(|err| EventfulError::Config(err.to_string()))?;
-    path.push(".eventful");
+    path.push(".eventdb");
     path.push("config.toml");
     Ok(path)
 }
@@ -135,7 +135,7 @@ impl Config {
     }
 
     pub fn pid_file_path(&self) -> PathBuf {
-        self.data_dir.join("eventful.pid")
+        self.data_dir.join("eventdb.pid")
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -165,9 +165,9 @@ impl Config {
 
 fn default_data_dir() -> PathBuf {
     let Ok(current_dir) = env::current_dir() else {
-        return PathBuf::from(".eventful");
+        return PathBuf::from(".eventdb");
     };
-    current_dir.join(".eventful")
+    current_dir.join(".eventdb")
 }
 
 fn default_restrict() -> bool {

@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 
 use crate::commands::config::ensure_secrets_configured;
-use eventful::{
+use eventdb::{
     config::load_or_default,
     token::{IssueTokenInput, TokenManager},
 };

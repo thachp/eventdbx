@@ -68,7 +68,7 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!(
-        "Starting EventfulDB server on {addr} (restrict={})",
+        "Starting EventDB server on {addr} (restrict={})",
         config.restrict
     );
 

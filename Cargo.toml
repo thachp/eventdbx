@@ -1,9 +1,9 @@
 [package]
-name = "eventful"
+name = "eventdb"
 description="Worry less about how you structure your data and focus more on your business logic."
 version = "1.1.0"
 edition = "2024"
-repository = "https://github.com/thachp/eventful"
+repository = "https://github.com/thachp/eventdb"
 license  = "MIT"
 
 [dependencies]

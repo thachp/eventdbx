@@ -1,6 +1,7 @@
 use std::env;
 
-pub const RESTRICT_ENV: &str = "EVENTFUL_RESTRICT";
+pub const RESTRICT_ENV: &str = "EVENTDB_RESTRICT";
+const LEGACY_RESTRICT_ENV: &str = "EVENTFUL_RESTRICT";
 
 pub fn as_str(enabled: bool) -> &'static str {
     if enabled { "true" } else { "false" }
@@ -8,6 +9,7 @@ pub fn as_str(enabled: bool) -> &'static str {
 
 pub fn from_env() -> bool {
     env::var(RESTRICT_ENV)
+        .or_else(|_| env::var(LEGACY_RESTRICT_ENV))
         .ok()
         .and_then(|value| {
             let normalized = value.trim().to_ascii_lowercase();

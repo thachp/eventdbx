@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use eventful::{
+use eventdb::{
     config::load_or_default,
     error::EventfulError,
     schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
