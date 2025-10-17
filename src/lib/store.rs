@@ -1,5 +1,3 @@
-mod merkle;
-
 use std::{collections::BTreeMap, path::PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -8,12 +6,11 @@ use rocksdb::{DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options}
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{
+use super::{
     error::{EventfulError, Result},
+    merkle::{compute_merkle_root, empty_root},
     token::TokenGrant,
 };
-
-pub use merkle::compute_merkle_root;
 
 const SEP: u8 = 0x1F;
 const PREFIX_EVENT: &str = "evt";
@@ -96,7 +93,7 @@ impl AggregateMeta {
             aggregate_id,
             version: 0,
             event_hashes: Vec::new(),
-            merkle_root: merkle::empty_root(),
+            merkle_root: empty_root(),
             archived: false,
             archived_at: None,
             archive_comment: None,
@@ -493,7 +490,7 @@ mod tests {
     #[test]
     fn computes_consistent_merkle_root() {
         let root = compute_merkle_root(&[]);
-        assert_eq!(root, merkle::empty_root());
+        assert_eq!(root, empty_root());
 
         let root = compute_merkle_root(&["abc".into()]);
         let root2 = compute_merkle_root(&["abc".into()]);

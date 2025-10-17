@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{EventfulError, Result};
+use super::error::{EventfulError, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

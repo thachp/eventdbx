@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{EventfulError, Result};
+use super::error::{EventfulError, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventSchema {

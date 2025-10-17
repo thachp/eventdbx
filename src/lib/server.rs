@@ -12,10 +12,11 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use crate::{
-    RunMode,
+use super::{
     config::Config,
     error::{EventfulError, Result},
+    plugin::PluginManager,
+    run_mode::RunMode,
     schema::{AggregateSchema, SchemaManager},
     store::{AggregateState, AppendEvent, EventRecord, EventStore},
     token::{AccessKind, TokenManager},
@@ -26,10 +27,11 @@ struct AppState {
     store: Arc<EventStore>,
     tokens: Arc<TokenManager>,
     schemas: Arc<SchemaManager>,
-    mode: RunMode,
+    run_mode: RunMode,
+    plugins: PluginManager,
 }
 
-pub async fn run(config: Config, mode: RunMode) -> Result<()> {
+pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
     let store = Arc::new(EventStore::open(config.event_store_path())?);
     let tokens = Arc::new(TokenManager::load(config.tokens_path())?);
     let schemas = Arc::new(SchemaManager::load(config.schema_store_path())?);
@@ -37,7 +39,8 @@ pub async fn run(config: Config, mode: RunMode) -> Result<()> {
         store,
         tokens,
         schemas,
-        mode,
+        run_mode: config.run_mode,
+        plugins,
     };
 
     let app = Router::new()
@@ -65,7 +68,10 @@ pub async fn run(config: Config, mode: RunMode) -> Result<()> {
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    info!("Starting EventfulDB server on {addr} in {:?} mode", mode);
+    info!(
+        "Starting EventfulDB server on {addr} in {:?} mode",
+        config.run_mode
+    );
 
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app)
@@ -148,7 +154,7 @@ async fn append_event(
     let token = extract_bearer_token(&headers).ok_or(EventfulError::Unauthorized)?;
     let claims = state.tokens.authorize(&token, AccessKind::Write)?.into();
 
-    if state.mode.requires_schema() {
+    if state.run_mode.requires_schema() {
         state
             .schemas
             .validate_event(&aggregate_type, &request.event_type, &request.payload)?;
@@ -161,6 +167,40 @@ async fn append_event(
         payload: request.payload,
         issued_by: Some(claims),
     })?;
+
+    let plugins = state.plugins.clone();
+    if !plugins.is_empty() {
+        match state
+            .store
+            .get_aggregate_state(&record.aggregate_type, &record.aggregate_id)
+        {
+            Ok(current_state) => {
+                let schema = state.schemas.get(&record.aggregate_type).ok();
+                let record_clone = record.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let schema_ref = schema.as_ref();
+                        if let Err(err) =
+                            plugins.notify_event(&record_clone, &current_state, schema_ref)
+                        {
+                            tracing::error!("plugin notification failed: {}", err);
+                        }
+                    })
+                    .await;
+
+                    if let Err(err) = result {
+                        tracing::error!("plugin task join error: {}", err);
+                    }
+                });
+            }
+            Err(err) => {
+                tracing::error!(
+                    "failed to load aggregate state for plugin notification: {}",
+                    err
+                );
+            }
+        }
+    }
 
     Ok(Json(record))
 }
