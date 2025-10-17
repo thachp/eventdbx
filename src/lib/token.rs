@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::error::{EventfulError, Result};
+use super::error::{EventError, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -94,7 +94,7 @@ impl TokenManager {
             let record = records
                 .iter_mut()
                 .find(|record| record.token == token && record.is_active())
-                .ok_or(EventfulError::InvalidToken)?;
+                .ok_or(EventError::InvalidToken)?;
 
             if let Some(exp) = record.expires_at {
                 if exp < now {
@@ -107,7 +107,7 @@ impl TokenManager {
                 if matches!(access, AccessKind::Write) {
                     if let Some(remaining) = record.remaining_writes {
                         if remaining == 0 {
-                            return Err(EventfulError::TokenLimitReached);
+                            return Err(EventError::TokenLimitReached);
                         }
                         record.remaining_writes = Some(remaining - 1);
                     }
@@ -122,10 +122,10 @@ impl TokenManager {
         self.persist(&records)?;
 
         if expired {
-            return Err(EventfulError::TokenExpired);
+            return Err(EventError::TokenExpired);
         }
 
-        grant.ok_or(EventfulError::InvalidToken)
+        grant.ok_or(EventError::InvalidToken)
     }
 
     pub fn issue(&self, input: IssueTokenInput) -> Result<TokenRecord> {
@@ -164,7 +164,7 @@ impl TokenManager {
             .iter_mut()
             .find(|record| record.token == token_or_id && record.is_active())
         else {
-            return Err(EventfulError::InvalidToken);
+            return Err(EventError::InvalidToken);
         };
         record.status = TokenStatus::Revoked;
         self.persist(&records)?;
@@ -183,7 +183,7 @@ impl TokenManager {
             let record = records
                 .iter_mut()
                 .find(|record| record.token == token && record.is_active())
-                .ok_or(EventfulError::InvalidToken)?;
+                .ok_or(EventError::InvalidToken)?;
 
             if let Some(secs) = expiration_secs {
                 record.expires_at = Some(Utc::now() + Duration::seconds(secs as i64));
@@ -218,7 +218,7 @@ impl TokenManager {
                 fs::write(&self.path, "[]")?;
                 String::new()
             }
-            Err(err) => return Err(EventfulError::Io(err)),
+            Err(err) => return Err(EventError::Io(err)),
         };
 
         let parsed: Vec<TokenRecord> = if contents.trim().is_empty() {

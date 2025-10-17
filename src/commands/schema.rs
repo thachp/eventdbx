@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use eventdb::{
+use eventdbx::{
     config::load_or_default,
-    error::EventfulError,
+    error::EventError,
     schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
 };
 
@@ -120,7 +120,7 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                     schema.events.len()
                 );
             }
-            Err(EventfulError::SchemaNotFound) => {
+            Err(EventError::SchemaNotFound) => {
                 let schema = manager.create(CreateSchemaInput {
                     aggregate: args.aggregate.clone(),
                     events: args.events.clone(),

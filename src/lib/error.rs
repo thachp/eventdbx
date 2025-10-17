@@ -8,10 +8,10 @@ use axum::{
 use serde::Serialize;
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, EventfulError>;
+pub type Result<T> = std::result::Result<T, EventError>;
 
 #[derive(Debug, Error)]
-pub enum EventfulError {
+pub enum EventError {
     #[error("configuration error: {0}")]
     Config(String),
     #[error("token not found or inactive")]
@@ -42,19 +42,19 @@ pub enum EventfulError {
     Serialization(String),
 }
 
-impl From<toml::de::Error> for EventfulError {
+impl From<toml::de::Error> for EventError {
     fn from(err: toml::de::Error) -> Self {
         Self::Serialization(err.to_string())
     }
 }
 
-impl From<toml::ser::Error> for EventfulError {
+impl From<toml::ser::Error> for EventError {
     fn from(err: toml::ser::Error) -> Self {
         Self::Serialization(err.to_string())
     }
 }
 
-impl From<serde_json::Error> for EventfulError {
+impl From<serde_json::Error> for EventError {
     fn from(err: serde_json::Error) -> Self {
         Self::Serialization(err.to_string())
     }
@@ -65,7 +65,7 @@ struct ErrorBody<'a> {
     message: &'a str,
 }
 
-impl IntoResponse for EventfulError {
+impl IntoResponse for EventError {
     fn into_response(self) -> Response {
         let status = match self {
             Self::Config(_) => StatusCode::BAD_REQUEST,

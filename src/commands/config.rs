@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use clap::Args;
 
-use eventdb::config::{Config, ConfigUpdate, load_or_default};
+use eventdbx::config::{Config, ConfigUpdate, load_or_default};
 
 #[derive(Args)]
 pub struct ConfigArgs {
@@ -65,7 +65,7 @@ pub fn ensure_secrets_configured(config: &Config) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow!(
-            "master key and data encryption key must be configured.\nRun `eventdb config --master-key <value> --dek <value>` during initial setup."
+            "master key and data encryption key must be configured.\nRun `eventdbx config --master-key <value> --dek <value>` during initial setup."
         ))
     }
 }

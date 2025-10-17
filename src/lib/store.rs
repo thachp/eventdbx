@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    error::{EventfulError, Result},
+    error::{EventError, Result},
     merkle::{compute_merkle_root, empty_root},
     token::TokenGrant,
 };
@@ -123,7 +123,7 @@ impl EventStore {
         let mut options = Options::default();
         options.create_if_missing(true);
         let db = DBWithThreadMode::<MultiThreaded>::open(&options, path)
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         Ok(Self {
             db,
@@ -136,7 +136,7 @@ impl EventStore {
         let mut options = Options::default();
         options.create_if_missing(false);
         let db = DBWithThreadMode::<MultiThreaded>::open_for_read_only(&options, path, false)
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         Ok(Self {
             db,
@@ -156,7 +156,7 @@ impl EventStore {
             });
 
         if meta.archived {
-            return Err(EventfulError::AggregateArchived);
+            return Err(EventError::AggregateArchived);
         }
         let mut state = self.load_state_map(&input.aggregate_type, &input.aggregate_id)?;
 
@@ -199,21 +199,21 @@ impl EventStore {
                 event_key(&record.aggregate_type, &record.aggregate_id, version),
                 serde_json::to_vec(&record)?,
             )
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         self.db
             .put(
                 meta_key(&record.aggregate_type, &record.aggregate_id),
                 serde_json::to_vec(&meta)?,
             )
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         self.db
             .put(
                 state_key(&record.aggregate_type, &record.aggregate_id),
                 serde_json::to_vec(&state)?,
             )
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         Ok(record)
     }
@@ -225,7 +225,7 @@ impl EventStore {
     ) -> Result<AggregateState> {
         let meta = self
             .load_meta(aggregate_type, aggregate_id)?
-            .ok_or(EventfulError::AggregateNotFound)?;
+            .ok_or(EventError::AggregateNotFound)?;
         let state = self.load_state_map(aggregate_type, aggregate_id)?;
 
         Ok(AggregateState {
@@ -245,7 +245,7 @@ impl EventStore {
     ) -> Result<Vec<EventRecord>> {
         // Ensure aggregate exists
         if self.load_meta(aggregate_type, aggregate_id)?.is_none() {
-            return Err(EventfulError::AggregateNotFound);
+            return Err(EventError::AggregateNotFound);
         }
 
         let prefix = event_prefix(aggregate_type, aggregate_id);
@@ -255,7 +255,7 @@ impl EventStore {
 
         let mut events = Vec::new();
         for item in iter {
-            let (key, value) = item.map_err(|err| EventfulError::Storage(err.to_string()))?;
+            let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
             if !key.starts_with(prefix.as_slice()) {
                 break;
             }
@@ -269,7 +269,7 @@ impl EventStore {
     pub fn verify(&self, aggregate_type: &str, aggregate_id: &str) -> Result<String> {
         let meta = self
             .load_meta(aggregate_type, aggregate_id)?
-            .ok_or(EventfulError::AggregateNotFound)?;
+            .ok_or(EventError::AggregateNotFound)?;
         Ok(meta.merkle_root)
     }
 
@@ -296,7 +296,7 @@ impl EventStore {
         let key = snapshot_key(aggregate_type, aggregate_id, created_at);
         self.db
             .put(key, serde_json::to_vec(&record)?)
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         Ok(record)
     }
@@ -312,7 +312,7 @@ impl EventStore {
         let _guard = self.write_lock.lock();
         let mut meta = self
             .load_meta(aggregate_type, aggregate_id)?
-            .ok_or(EventfulError::AggregateNotFound)?;
+            .ok_or(EventError::AggregateNotFound)?;
 
         meta.archived = archived;
         if archived {
@@ -328,7 +328,7 @@ impl EventStore {
                 meta_key(aggregate_type, aggregate_id),
                 serde_json::to_vec(&meta)?,
             )
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         drop(meta);
         self.get_aggregate_state(aggregate_type, aggregate_id)
@@ -336,7 +336,7 @@ impl EventStore {
 
     fn ensure_writable(&self) -> Result<()> {
         if self.read_only {
-            Err(EventfulError::Storage(
+            Err(EventError::Storage(
                 "event store opened in read-only mode".into(),
             ))
         } else {
@@ -390,7 +390,7 @@ impl EventStore {
         let value = self
             .db
             .get(key)
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
         if let Some(value) = value {
             Ok(Some(serde_json::from_slice(&value)?))
         } else {
@@ -407,7 +407,7 @@ impl EventStore {
         let value = self
             .db
             .get(key)
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
         if let Some(value) = value {
             Ok(serde_json::from_slice(&value)?)
         } else {
@@ -570,10 +570,7 @@ mod tests {
                 issued_by: None,
             })
             .unwrap_err();
-        assert!(matches!(
-            err,
-            crate::error::EventfulError::AggregateArchived
-        ));
+        assert!(matches!(err, crate::error::EventError::AggregateArchived));
 
         let state = store.set_archive("order", "order-1", false, None).unwrap();
         assert!(!state.archived);

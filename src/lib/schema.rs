@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use super::error::{EventfulError, Result};
+use super::error::{EventError, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventSchema {
@@ -85,12 +85,12 @@ impl SchemaManager {
 
     pub fn create(&self, input: CreateSchemaInput) -> Result<AggregateSchema> {
         if input.aggregate.trim().is_empty() {
-            return Err(EventfulError::InvalidSchema(
+            return Err(EventError::InvalidSchema(
                 "aggregate name must be provided".into(),
             ));
         }
         if input.events.is_empty() {
-            return Err(EventfulError::InvalidSchema(
+            return Err(EventError::InvalidSchema(
                 "at least one event must be provided".into(),
             ));
         }
@@ -98,14 +98,14 @@ impl SchemaManager {
         let mut items = self.items.write();
         let aggregate_key = input.aggregate.clone();
         if items.contains_key(&aggregate_key) {
-            return Err(EventfulError::SchemaExists);
+            return Err(EventError::SchemaExists);
         }
 
         let now = Utc::now();
         let mut events = BTreeMap::new();
         for event in input.events {
             if event.trim().is_empty() {
-                return Err(EventfulError::InvalidSchema(
+                return Err(EventError::InvalidSchema(
                     "event names cannot be empty".into(),
                 ));
             }
@@ -132,9 +132,7 @@ impl SchemaManager {
     pub fn update(&self, aggregate: &str, update: SchemaUpdate) -> Result<AggregateSchema> {
         let mut items = self.items.write();
         {
-            let schema = items
-                .get_mut(aggregate)
-                .ok_or(EventfulError::SchemaNotFound)?;
+            let schema = items.get_mut(aggregate).ok_or(EventError::SchemaNotFound)?;
 
             if let Some(snapshot) = update.snapshot_threshold {
                 schema.snapshot_threshold = snapshot;
@@ -144,7 +142,7 @@ impl SchemaManager {
             }
             if let Some((field, lock)) = update.field_lock {
                 if field.trim().is_empty() {
-                    return Err(EventfulError::InvalidSchema(
+                    return Err(EventError::InvalidSchema(
                         "field name cannot be empty".into(),
                     ));
                 }
@@ -164,7 +162,7 @@ impl SchemaManager {
                     .or_insert(EventSchema { fields: Vec::new() });
                 for field in fields {
                     if field.trim().is_empty() {
-                        return Err(EventfulError::InvalidSchema(
+                        return Err(EventError::InvalidSchema(
                             "field names cannot be empty".into(),
                         ));
                     }
@@ -187,7 +185,7 @@ impl SchemaManager {
         let result = items
             .get(aggregate)
             .cloned()
-            .ok_or(EventfulError::SchemaNotFound)?;
+            .ok_or(EventError::SchemaNotFound)?;
         self.persist(&items)?;
 
         Ok(result)
@@ -202,7 +200,7 @@ impl SchemaManager {
             .read()
             .get(aggregate)
             .cloned()
-            .ok_or(EventfulError::SchemaNotFound)
+            .ok_or(EventError::SchemaNotFound)
     }
 
     pub fn validate_event(
@@ -217,7 +215,7 @@ impl SchemaManager {
         };
 
         if schema.locked {
-            return Err(EventfulError::SchemaViolation(format!(
+            return Err(EventError::SchemaViolation(format!(
                 "aggregate {} is locked for updates",
                 aggregate
             )));
@@ -225,7 +223,7 @@ impl SchemaManager {
 
         for key in payload.keys() {
             if schema.field_locks.contains(key) {
-                return Err(EventfulError::SchemaViolation(format!(
+                return Err(EventError::SchemaViolation(format!(
                     "field {} is locked for aggregate {}",
                     key, aggregate
                 )));
@@ -233,7 +231,7 @@ impl SchemaManager {
         }
 
         let event_schema = schema.events.get(event_type).ok_or_else(|| {
-            EventfulError::SchemaViolation(format!(
+            EventError::SchemaViolation(format!(
                 "event {} is not defined for aggregate {}",
                 event_type, aggregate
             ))
@@ -242,7 +240,7 @@ impl SchemaManager {
         if !event_schema.fields.is_empty() {
             for required in &event_schema.fields {
                 if !payload.contains_key(required) {
-                    return Err(EventfulError::SchemaViolation(format!(
+                    return Err(EventError::SchemaViolation(format!(
                         "missing required field {} for event {}",
                         required, event_type
                     )));
@@ -251,7 +249,7 @@ impl SchemaManager {
 
             for key in payload.keys() {
                 if !event_schema.fields.contains(key) {
-                    return Err(EventfulError::SchemaViolation(format!(
+                    return Err(EventError::SchemaViolation(format!(
                         "field {} is not permitted for event {}",
                         key, event_type
                     )));
@@ -265,19 +263,17 @@ impl SchemaManager {
     pub fn remove_event(&self, aggregate: &str, event: &str) -> Result<AggregateSchema> {
         let mut items = self.items.write();
         let result = {
-            let schema = items
-                .get_mut(aggregate)
-                .ok_or(EventfulError::SchemaNotFound)?;
+            let schema = items.get_mut(aggregate).ok_or(EventError::SchemaNotFound)?;
 
             if !schema.events.contains_key(event) {
-                return Err(EventfulError::SchemaViolation(format!(
+                return Err(EventError::SchemaViolation(format!(
                     "event {} is not defined for aggregate {}",
                     event, aggregate
                 )));
             }
 
             if schema.events.len() == 1 {
-                return Err(EventfulError::SchemaViolation(format!(
+                return Err(EventError::SchemaViolation(format!(
                     "aggregate {} must define at least one event",
                     aggregate
                 )));
@@ -370,12 +366,12 @@ mod tests {
         assert!(!updated.events.contains_key("person_updated"));
 
         let err = manager.remove_event("person", "missing").unwrap_err();
-        assert!(matches!(err, EventfulError::SchemaViolation(_)));
+        assert!(matches!(err, EventError::SchemaViolation(_)));
 
         let err = manager
             .remove_event("person", "person_created")
             .unwrap_err();
-        assert!(matches!(err, EventfulError::SchemaViolation(_)));
+        assert!(matches!(err, EventError::SchemaViolation(_)));
     }
 
     #[test]
@@ -408,6 +404,6 @@ mod tests {
         let err = manager
             .validate_event("person", "person_created", &payload)
             .unwrap_err();
-        assert!(matches!(err, EventfulError::SchemaViolation(_)));
+        assert!(matches!(err, EventError::SchemaViolation(_)));
     }
 }

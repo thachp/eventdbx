@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use eventdb::{
+use eventdbx::{
     config::load_or_default,
     merkle::compute_merkle_root,
     plugin::PluginManager,

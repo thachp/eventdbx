@@ -1,9 +1,9 @@
 [package]
-name = "eventdb"
+name = "eventdbx"
 description="An event-sourced, key-value, write-side database system."
 version = "1.1.0"
 edition = "2024"
-repository = "https://github.com/thachp/eventdb"
+repository = "https://github.com/thachp/eventdbx"
 license  = "MIT"
 
 [lib]

@@ -2,7 +2,7 @@ use tracing::{Level, debug, error, info, trace, warn};
 
 use crate::{
     config::LogPluginConfig,
-    error::{EventfulError, Result},
+    error::{EventError, Result},
     schema::AggregateSchema,
     store::{AggregateState, EventRecord},
 };
@@ -25,7 +25,7 @@ impl LogPlugin {
             "info" => Ok(Level::INFO),
             "warn" => Ok(Level::WARN),
             "error" => Ok(Level::ERROR),
-            other => Err(EventfulError::Config(format!(
+            other => Err(EventError::Config(format!(
                 "unsupported log level '{}'",
                 other
             ))),
@@ -51,11 +51,11 @@ impl LogPlugin {
 
     fn log(&self, level: Level, message: String) {
         match level {
-            Level::TRACE => trace!(target: "eventdb.plugin.log", "{}", message),
-            Level::DEBUG => debug!(target: "eventdb.plugin.log", "{}", message),
-            Level::INFO => info!(target: "eventdb.plugin.log", "{}", message),
-            Level::WARN => warn!(target: "eventdb.plugin.log", "{}", message),
-            Level::ERROR => error!(target: "eventdb.plugin.log", "{}", message),
+            Level::TRACE => trace!(target: "eventdbx.plugin.log", "{}", message),
+            Level::DEBUG => debug!(target: "eventdbx.plugin.log", "{}", message),
+            Level::INFO => info!(target: "eventdbx.plugin.log", "{}", message),
+            Level::WARN => warn!(target: "eventdbx.plugin.log", "{}", message),
+            Level::ERROR => error!(target: "eventdbx.plugin.log", "{}", message),
         }
     }
 }

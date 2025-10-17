@@ -8,7 +8,7 @@ use csv::{ReaderBuilder, Writer, WriterBuilder};
 
 use crate::{
     config::CsvPluginConfig,
-    error::{EventfulError, Result},
+    error::{EventError, Result},
     schema::AggregateSchema,
     store::{AggregateState, EventRecord},
 };
@@ -27,7 +27,7 @@ impl CsvPlugin {
     fn ensure_output_dir(&self) -> Result<()> {
         if !self.config.output_dir.exists() {
             fs::create_dir_all(&self.config.output_dir)
-                .map_err(|err| EventfulError::Storage(err.to_string()))?;
+                .map_err(|err| EventError::Storage(err.to_string()))?;
         }
         Ok(())
     }
@@ -87,17 +87,17 @@ impl CsvPlugin {
         let mut reader = ReaderBuilder::new()
             .has_headers(true)
             .from_path(path)
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
         let headers = reader
             .headers()
-            .map_err(|err| EventfulError::Storage(err.to_string()))?
+            .map_err(|err| EventError::Storage(err.to_string()))?
             .iter()
             .map(|value| value.to_string())
             .collect::<Vec<_>>();
 
         let mut rows = Vec::new();
         for result in reader.records() {
-            let record = result.map_err(|err| EventfulError::Storage(err.to_string()))?;
+            let record = result.map_err(|err| EventError::Storage(err.to_string()))?;
             let mut map = HashMap::new();
             for (idx, value) in record.iter().enumerate() {
                 if let Some(column) = headers.get(idx) {
@@ -116,21 +116,21 @@ impl CsvPlugin {
         rows: &[HashMap<String, String>],
     ) -> Result<()> {
         let mut writer =
-            Writer::from_path(path).map_err(|err| EventfulError::Storage(err.to_string()))?;
+            Writer::from_path(path).map_err(|err| EventError::Storage(err.to_string()))?;
         writer
             .write_record(columns)
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
         for row in rows {
             let record = columns
                 .iter()
                 .map(|column| row.get(column).cloned().unwrap_or_default());
             writer
                 .write_record(record)
-                .map_err(|err| EventfulError::Storage(err.to_string()))?;
+                .map_err(|err| EventError::Storage(err.to_string()))?;
         }
         writer
             .flush()
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
         Ok(())
     }
 
@@ -224,17 +224,17 @@ impl Plugin for CsvPlugin {
                         OpenOptions::new()
                             .append(true)
                             .open(&path)
-                            .map_err(|err| EventfulError::Storage(err.to_string()))?,
+                            .map_err(|err| EventError::Storage(err.to_string()))?,
                     );
                     let record = final_columns
                         .iter()
                         .map(|column| row_map.get(column).cloned().unwrap_or_default());
                     writer
                         .write_record(record)
-                        .map_err(|err| EventfulError::Storage(err.to_string()))?;
+                        .map_err(|err| EventError::Storage(err.to_string()))?;
                     writer
                         .flush()
-                        .map_err(|err| EventfulError::Storage(err.to_string()))?;
+                        .map_err(|err| EventError::Storage(err.to_string()))?;
                 }
             }
         }

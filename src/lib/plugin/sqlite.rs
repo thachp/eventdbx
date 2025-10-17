@@ -5,7 +5,7 @@ use rusqlite::{Connection, params_from_iter};
 
 use crate::{
     config::SqlitePluginConfig,
-    error::{EventfulError, Result},
+    error::{EventError, Result},
     schema::AggregateSchema,
     store::{AggregateState, EventRecord},
 };
@@ -27,12 +27,11 @@ impl SqlitePlugin {
     fn ensure_database(&self) -> Result<Connection> {
         if let Some(parent) = self.config.path.parent() {
             if !parent.exists() {
-                fs::create_dir_all(parent)
-                    .map_err(|err| EventfulError::Storage(err.to_string()))?;
+                fs::create_dir_all(parent).map_err(|err| EventError::Storage(err.to_string()))?;
             }
         }
 
-        Connection::open(&self.config.path).map_err(|err| EventfulError::Storage(err.to_string()))
+        Connection::open(&self.config.path).map_err(|err| EventError::Storage(err.to_string()))
     }
 
     fn ensure_table(
@@ -56,7 +55,7 @@ impl SqlitePlugin {
             table = quoted_table
         );
         conn.execute(&create_sql, [])
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         for (column, ty) in [
             ("created_at", "TEXT"),
@@ -71,7 +70,7 @@ impl SqlitePlugin {
                 ty = ty
             );
             conn.execute(&alter_sql, [])
-                .map_err(|err| EventfulError::Storage(err.to_string()))?;
+                .map_err(|err| EventError::Storage(err.to_string()))?;
         }
 
         let mut fields = BTreeMap::new();
@@ -96,7 +95,7 @@ impl SqlitePlugin {
                 column = quoted_column
             );
             conn.execute(&alter_sql, [])
-                .map_err(|err| EventfulError::Storage(err.to_string()))?;
+                .map_err(|err| EventError::Storage(err.to_string()))?;
             column_names.push((column, field.clone()));
         }
 
@@ -182,7 +181,7 @@ impl Plugin for SqlitePlugin {
         );
 
         conn.execute(&insert_sql, params_from_iter(params))
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         Ok(())
     }

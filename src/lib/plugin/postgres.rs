@@ -4,7 +4,7 @@ use postgres::{Client, NoTls};
 
 use crate::{
     config::{PostgresColumnConfig, PostgresPluginConfig},
-    error::{EventfulError, Result},
+    error::{EventError, Result},
     schema::AggregateSchema,
     store::{AggregateState, EventRecord},
 };
@@ -48,7 +48,7 @@ impl PostgresPlugin {
         );
         client
             .batch_execute(&create_sql)
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         for (column, ty) in [
             ("created_at", "TIMESTAMPTZ"),
@@ -64,7 +64,7 @@ impl PostgresPlugin {
             );
             client
                 .batch_execute(&alter_sql)
-                .map_err(|err| EventfulError::Storage(err.to_string()))?;
+                .map_err(|err| EventError::Storage(err.to_string()))?;
         }
 
         let mut fields = BTreeMap::new();
@@ -101,7 +101,7 @@ impl PostgresPlugin {
             );
             client
                 .batch_execute(&alter_sql)
-                .map_err(|err| EventfulError::Storage(err.to_string()))?;
+                .map_err(|err| EventError::Storage(err.to_string()))?;
             column_names.push((column, field.clone()));
         }
 
@@ -121,7 +121,7 @@ impl Plugin for PostgresPlugin {
         schema: Option<&AggregateSchema>,
     ) -> Result<()> {
         let mut client = Client::connect(&self.config.connection_string, NoTls)
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         let (table, field_columns) =
             self.ensure_table(&mut client, &record.aggregate_type, schema, &state.state)?;
@@ -184,7 +184,7 @@ impl Plugin for PostgresPlugin {
 
         client
             .execute(&insert_sql, &param_refs)
-            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()))?;
 
         Ok(())
     }

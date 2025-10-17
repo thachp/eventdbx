@@ -11,7 +11,7 @@ use anyhow::{Result, anyhow};
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-use eventdb::{
+use eventdbx::{
     config::{Config, ConfigUpdate, load_or_default},
     plugin::PluginManager,
     restrict::{self, RESTRICT_ENV},
@@ -76,14 +76,14 @@ pub fn stop(config_path: Option<PathBuf>) -> Result<()> {
     let pid_path = config.pid_file_path();
 
     let Some(record) = read_pid_record(&pid_path)? else {
-        println!("No running EventDB server found.");
+        println!("No running EventDBX server found.");
         return Ok(());
     };
     let pid = record.pid;
 
     if !process_is_running(pid) {
         fs::remove_file(&pid_path)?;
-        println!("Removed stale EventDB server pid file.");
+        println!("Removed stale EventDBX server pid file.");
         return Ok(());
     }
 
@@ -94,14 +94,14 @@ pub fn stop(config_path: Option<PathBuf>) -> Result<()> {
             force_kill_process(pid)?;
             if !wait_for_exit(pid, Duration::from_secs(2)) {
                 return Err(anyhow!(
-                    "failed to stop EventDB server (pid {pid}); process is still running"
+                    "failed to stop EventDBX server (pid {pid}); process is still running"
                 ));
             }
         }
         #[cfg(not(unix))]
         {
             return Err(anyhow!(
-                "failed to stop EventDB server (pid {pid}); process is still running"
+                "failed to stop EventDBX server (pid {pid}); process is still running"
             ));
         }
     }
@@ -109,13 +109,13 @@ pub fn stop(config_path: Option<PathBuf>) -> Result<()> {
     fs::remove_file(&pid_path)?;
     if let Some(started_at) = record.started_at {
         println!(
-            "EventDB server stopped (pid {}) after {} (started {})",
+            "EventDBX server stopped (pid {}) after {} (started {})",
             pid,
             describe_uptime(started_at),
             started_at.to_rfc3339()
         );
     } else {
-        println!("EventDB server stopped (pid {})", pid);
+        println!("EventDBX server stopped (pid {})", pid);
     }
     Ok(())
 }
@@ -130,7 +130,7 @@ pub fn status(config_path: Option<PathBuf>) -> Result<()> {
             if process_is_running(pid) {
                 if let Some(started_at) = record.started_at {
                     println!(
-                        "EventDB server is running on port {} (pid {}) — restrict={} — up for {} (since {})",
+                        "EventDBX server is running on port {} (pid {}) — restrict={} — up for {} (since {})",
                         config.port,
                         pid,
                         config.restrict,
@@ -139,16 +139,16 @@ pub fn status(config_path: Option<PathBuf>) -> Result<()> {
                     );
                 } else {
                     println!(
-                        "EventDB server is running on port {} (pid {}) — restrict={}",
+                        "EventDBX server is running on port {} (pid {}) — restrict={}",
                         config.port, pid, config.restrict
                     );
                 }
             } else {
                 let _ = fs::remove_file(&pid_path);
-                println!("EventDB server is not running (removed stale pid file).");
+                println!("EventDBX server is not running (removed stale pid file).");
             }
         }
-        None => println!("EventDB server is not running."),
+        None => println!("EventDBX server is not running."),
     }
 
     Ok(())
@@ -159,7 +159,7 @@ pub fn destroy(config_path: Option<PathBuf>, args: DestroyArgs) -> Result<()> {
 
     if !args.yes {
         eprint!(
-            "This will permanently delete all EventDB data under {} and remove the config file at {}.\nType \"destroy\" to continue: ",
+            "This will permanently delete all EventDBX data under {} and remove the config file at {}.\nType \"destroy\" to continue: ",
             config.data_dir.display(),
             path.display()
         );
@@ -185,7 +185,7 @@ pub fn destroy(config_path: Option<PathBuf>, args: DestroyArgs) -> Result<()> {
     }
 
     println!(
-        "All EventDB data and configuration removed from {}",
+        "All EventDBX data and configuration removed from {}",
         config.data_dir.display()
     );
     Ok(())
@@ -205,7 +205,7 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     if let Some(existing) = read_pid_record(&pid_path)? {
         if process_is_running(existing.pid) {
             return Err(anyhow!(
-                "EventDB server already running (pid {})",
+                "EventDBX server already running (pid {})",
                 existing.pid
             ));
         }
@@ -231,7 +231,7 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     };
     write_pid_record(&pid_path, &record)?;
     println!(
-        "EventDB server is running on port {} (pid {}) since {} (restrict={})",
+        "EventDBX server is running on port {} (pid {}) since {} (restrict={})",
         config.port,
         pid,
         started_at.to_rfc3339(),
