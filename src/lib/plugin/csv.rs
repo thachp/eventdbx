@@ -150,7 +150,7 @@ impl CsvPlugin {
             .metadata
             .issued_by
             .as_ref()
-            .map(|claims| claims.identifier_id.clone())
+            .map(|claims| claims.user.clone())
             .unwrap_or_default();
         row.insert("created_by".into(), actor.clone());
         row.insert("updated_by".into(), actor);

@@ -137,7 +137,7 @@ impl Plugin for PostgresPlugin {
             .metadata
             .issued_by
             .as_ref()
-            .map(|claims| claims.identifier_id.clone());
+            .map(|claims| claims.user.clone());
         let created_at = record.metadata.created_at;
         let updated_at = record.metadata.created_at;
 

@@ -16,6 +16,14 @@ mod postgres;
 use postgres::PostgresPlugin;
 mod csv;
 use csv::CsvPlugin;
+mod tcp;
+use tcp::TcpPlugin;
+mod http;
+use http::HttpPlugin;
+mod json;
+use json::JsonPlugin;
+mod log;
+use log::LogPlugin;
 
 pub trait Plugin: Send + Sync {
     fn name(&self) -> &'static str;
@@ -48,6 +56,18 @@ impl PluginManager {
                 }
                 PluginConfig::Csv(settings) => {
                     plugins.push(Box::new(CsvPlugin::new(settings.clone())));
+                }
+                PluginConfig::Tcp(settings) => {
+                    plugins.push(Box::new(TcpPlugin::new(settings.clone())));
+                }
+                PluginConfig::Http(settings) => {
+                    plugins.push(Box::new(HttpPlugin::new(settings.clone())));
+                }
+                PluginConfig::Json(settings) => {
+                    plugins.push(Box::new(JsonPlugin::new(settings.clone())));
+                }
+                PluginConfig::Log(settings) => {
+                    plugins.push(Box::new(LogPlugin::new(settings.clone())));
                 }
             }
         }

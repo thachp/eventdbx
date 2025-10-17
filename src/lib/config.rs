@@ -209,6 +209,10 @@ pub enum PluginConfig {
     Postgres(PostgresPluginConfig),
     Sqlite(SqlitePluginConfig),
     Csv(CsvPluginConfig),
+    Tcp(TcpPluginConfig),
+    Http(HttpPluginConfig),
+    Json(JsonPluginConfig),
+    Log(LogPluginConfig),
 }
 
 impl PluginConfig {
@@ -217,6 +221,10 @@ impl PluginConfig {
             PluginConfig::Postgres(_) => PluginKind::Postgres,
             PluginConfig::Sqlite(_) => PluginKind::Sqlite,
             PluginConfig::Csv(_) => PluginKind::Csv,
+            PluginConfig::Tcp(_) => PluginKind::Tcp,
+            PluginConfig::Http(_) => PluginKind::Http,
+            PluginConfig::Json(_) => PluginKind::Json,
+            PluginConfig::Log(_) => PluginKind::Log,
         }
     }
 }
@@ -227,6 +235,10 @@ pub enum PluginKind {
     Postgres,
     Sqlite,
     Csv,
+    Tcp,
+    Http,
+    Json,
+    Log,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,4 +261,36 @@ pub struct SqlitePluginConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CsvPluginConfig {
     pub output_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TcpPluginConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpPluginConfig {
+    pub endpoint: String,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonPluginConfig {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub pretty: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogPluginConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+fn default_log_level() -> String {
+    "info".into()
 }

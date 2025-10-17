@@ -61,8 +61,8 @@ Follow the steps below to spin up EventDB locally. All commands are expected to 
 
    ```bash
    cargo run -- token generate \
-     --identifier-type user \
-     --identifier-id admin \
+     --group admin \
+     --user jane \
      --expiration 3600
    ```
 
@@ -125,8 +125,8 @@ EventDB ships a single `eventdb` binary. Every command accepts an optional `--co
 
 ### Tokens
 
-- `eventdb token generate --identifier-type <type> --identifier-id <id> [--expiration <secs>] [--limit <writes>] [--keep-alive]`  
-  Issues a new token tied to an identifier.
+- `eventdb token generate --group <name> --user <name> [--expiration <secs>] [--limit <writes>] [--keep-alive]`  
+  Issues a new token tied to a Unix-style group and user.
 - `eventdb token list`  
   Lists all tokens with status, expiry, and remaining writes.
 - `eventdb token revoke --token <value>`  
@@ -165,6 +165,10 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 - `eventdb plugin postgres --connection <connection-string> [--disable]`
 - `eventdb plugin sqlite --path <file> [--disable]`
 - `eventdb plugin csv --output-dir <dir> [--disable]`
+- `eventdb plugin log --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
+- `eventdb plugin tcp --host <hostname> --port <u16> [--disable]`
+- `eventdb plugin http --endpoint <url> [--header KEY=VALUE]... [--disable]`
+- `eventdb plugin json --path <file> [--pretty] [--disable]`
 - `eventdb plugin map --plugin postgres --aggregate <name> --field <field> --datatype <sql-type>`  
   Registers Postgres column overrides; other plugin kinds reject mapping requests.
 

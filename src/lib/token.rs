@@ -17,8 +17,10 @@ pub enum TokenStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenRecord {
     pub token: String,
-    pub identifier_type: String,
-    pub identifier_id: String,
+    #[serde(alias = "identifier_type")]
+    pub group: String,
+    #[serde(alias = "identifier_id")]
+    pub user: String,
     pub expires_at: Option<DateTime<Utc>>,
     pub issued_at: DateTime<Utc>,
     pub limit: Option<u64>,
@@ -35,8 +37,8 @@ impl TokenRecord {
 
 #[derive(Debug, Clone)]
 pub struct TokenGrant {
-    pub identifier_type: String,
-    pub identifier_id: String,
+    pub group: String,
+    pub user: String,
 }
 
 pub enum AccessKind {
@@ -45,8 +47,8 @@ pub enum AccessKind {
 
 #[derive(Debug, Clone)]
 pub struct IssueTokenInput {
-    pub identifier_type: String,
-    pub identifier_id: String,
+    pub group: String,
+    pub user: String,
     pub expiration_secs: Option<u64>,
     pub limit: Option<u64>,
     pub keep_alive: bool,
@@ -111,8 +113,8 @@ impl TokenManager {
                     }
                 }
                 grant = Some(TokenGrant {
-                    identifier_type: record.identifier_type.clone(),
-                    identifier_id: record.identifier_id.clone(),
+                    group: record.group.clone(),
+                    user: record.user.clone(),
                 });
             }
         }
@@ -136,8 +138,8 @@ impl TokenManager {
             .map(|secs| issued_at + Duration::seconds(secs as i64));
         let record = TokenRecord {
             token,
-            identifier_type: input.identifier_type,
-            identifier_id: input.identifier_id,
+            group: input.group,
+            user: input.user,
             expires_at,
             issued_at,
             limit: input.limit,
