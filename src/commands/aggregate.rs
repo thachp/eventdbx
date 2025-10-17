@@ -187,7 +187,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
         AggregateCommands::Apply(args) => {
             let payload = collect_payload(args.fields);
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
-            if config.run_mode.requires_schema() {
+            if config.restrict {
                 schema_manager.validate_event(&args.aggregate, &args.event, &payload)?;
             }
 

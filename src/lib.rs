@@ -6,8 +6,8 @@ pub mod error;
 pub mod merkle;
 #[path = "plugin/mod.rs"]
 pub mod plugin;
-#[path = "lib/run_mode.rs"]
-pub mod run_mode;
+#[path = "lib/restrict.rs"]
+pub mod restrict;
 #[path = "lib/schema.rs"]
 pub mod schema;
 #[path = "lib/server.rs"]

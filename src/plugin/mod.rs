@@ -10,6 +10,7 @@ use crate::{
 };
 
 mod sqlite;
+mod util;
 use sqlite::SqlitePlugin;
 mod postgres;
 use postgres::PostgresPlugin;

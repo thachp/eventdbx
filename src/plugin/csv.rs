@@ -13,7 +13,7 @@ use crate::{
     store::{AggregateState, EventRecord},
 };
 
-use super::Plugin;
+use super::{Plugin, util::sanitize_identifier};
 
 pub(super) struct CsvPlugin {
     config: CsvPluginConfig,
@@ -56,16 +56,23 @@ impl CsvPlugin {
         schema: Option<&AggregateSchema>,
         state: &BTreeMap<String, String>,
     ) -> BTreeSet<String> {
+        let base = Self::base_column_set();
         let mut fields = BTreeSet::new();
         if let Some(schema) = schema {
             for event_schema in schema.events.values() {
                 for field in &event_schema.fields {
-                    fields.insert(sanitize_identifier(field));
+                    let column = sanitize_identifier(field);
+                    if !base.contains(&column) {
+                        fields.insert(column);
+                    }
                 }
             }
         }
         for key in state.keys() {
-            fields.insert(sanitize_identifier(key));
+            let column = sanitize_identifier(key);
+            if !base.contains(&column) {
+                fields.insert(column);
+            }
         }
         fields
     }
@@ -133,7 +140,6 @@ impl CsvPlugin {
         sanitized_state: &HashMap<String, String>,
     ) -> HashMap<String, String> {
         let mut row = HashMap::new();
-        let base_columns = Self::base_column_set();
         row.insert("id".into(), state.aggregate_id.clone());
         row.insert("version".into(), state.version.to_string());
         let timestamp = record.metadata.created_at.to_rfc3339();
@@ -150,9 +156,7 @@ impl CsvPlugin {
         row.insert("updated_by".into(), actor);
 
         for (column, value) in sanitized_state {
-            if !base_columns.contains(column) {
-                row.insert(column.clone(), value.clone());
-            }
+            row.insert(column.clone(), value.clone());
         }
         row
     }
@@ -177,11 +181,17 @@ impl Plugin for CsvPlugin {
         let existing = Self::read_existing(&path)?;
         let base_columns = Self::base_columns();
         let base_set = Self::base_column_set();
-
         let sanitized_state = state
             .state
             .iter()
-            .map(|(key, value)| (sanitize_identifier(key), value.clone()))
+            .filter_map(|(key, value)| {
+                let column = sanitize_identifier(key);
+                if base_set.contains(&column) {
+                    None
+                } else {
+                    Some((column, value.clone()))
+                }
+            })
             .collect::<HashMap<_, _>>();
 
         let row_map = Self::build_row_map(state, record, &sanitized_state);
@@ -230,24 +240,5 @@ impl Plugin for CsvPlugin {
         }
 
         Ok(())
-    }
-}
-
-fn sanitize_identifier(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    for (idx, ch) in input.chars().enumerate() {
-        if ch.is_ascii_alphanumeric() {
-            if idx == 0 && ch.is_ascii_digit() {
-                result.push('_');
-            }
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push('_');
-        }
-    }
-    if result.is_empty() {
-        "_".into()
-    } else {
-        result
     }
 }

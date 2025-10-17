@@ -10,7 +10,10 @@ use crate::{
     store::{AggregateState, EventRecord},
 };
 
-use super::Plugin;
+use super::{
+    Plugin,
+    util::{quote_identifier, sanitize_identifier},
+};
 
 pub(super) struct SqlitePlugin {
     config: SqlitePluginConfig,
@@ -183,27 +186,4 @@ impl Plugin for SqlitePlugin {
 
         Ok(())
     }
-}
-
-fn sanitize_identifier(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    for (idx, ch) in input.chars().enumerate() {
-        if ch.is_ascii_alphanumeric() {
-            if idx == 0 && ch.is_ascii_digit() {
-                result.push('_');
-            }
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push('_');
-        }
-    }
-    if result.is_empty() {
-        "_".into()
-    } else {
-        result
-    }
-}
-
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }

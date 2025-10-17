@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use eventful::{
     config::{Config, ConfigUpdate, load_or_default},
     plugin::PluginManager,
-    run_mode::{self, RUN_MODE_ENV, RunMode},
+    restrict::{self, RESTRICT_ENV},
     server,
 };
 
@@ -32,9 +32,9 @@ pub struct StartArgs {
     #[arg(long)]
     pub foreground: bool,
 
-    /// Run mode (dev = unrestricted, prod = schema-enforced)
-    #[arg(long, value_enum, default_value_t = RunMode::Prod)]
-    pub mode: RunMode,
+    /// Require schema enforcement (use `--restrict=false` to disable)
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub restrict: bool,
 }
 
 impl Default for StartArgs {
@@ -43,7 +43,7 @@ impl Default for StartArgs {
             port: None,
             data_dir: None,
             foreground: false,
-            mode: RunMode::from_env(),
+            restrict: restrict::from_env(),
         }
     }
 }
@@ -56,7 +56,7 @@ pub struct DestroyArgs {
 }
 
 pub async fn execute(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
-    run_mode::set_run_mode_env(args.mode);
+    restrict::set_env(args.restrict);
     if args.foreground {
         start_foreground(config_path, args).await
     } else {
@@ -67,7 +67,7 @@ pub async fn execute(config_path: Option<PathBuf>, args: StartArgs) -> Result<()
 
 pub async fn run_internal(config_path: Option<PathBuf>) -> Result<()> {
     let args = StartArgs::default();
-    run_mode::set_run_mode_env(args.mode);
+    restrict::set_env(args.restrict);
     start_foreground(config_path, args).await
 }
 
@@ -130,19 +130,17 @@ pub fn status(config_path: Option<PathBuf>) -> Result<()> {
             if process_is_running(pid) {
                 if let Some(started_at) = record.started_at {
                     println!(
-                        "EventfulDB server is running on port {} (pid {}) — mode={} — up for {} (since {})",
+                        "EventfulDB server is running on port {} (pid {}) — restrict={} — up for {} (since {})",
                         config.port,
                         pid,
-                        config.run_mode.as_str(),
+                        config.restrict,
                         describe_uptime(started_at),
                         started_at.to_rfc3339()
                     );
                 } else {
                     println!(
-                        "EventfulDB server is running on port {} (pid {}) — mode={}",
-                        config.port,
-                        pid,
-                        config.run_mode.as_str()
+                        "EventfulDB server is running on port {} (pid {}) — restrict={}",
+                        config.port, pid, config.restrict
                     );
                 }
             } else {
@@ -220,7 +218,7 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());
-    command.env(RUN_MODE_ENV, args.mode.as_str());
+    command.env(RESTRICT_ENV, restrict::as_str(args.restrict));
 
     let child = command.spawn()?;
     let pid = child.id();
@@ -233,10 +231,11 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     };
     write_pid_record(&pid_path, &record)?;
     println!(
-        "EventfulDB server is running on port {} (pid {}) since {}",
+        "EventfulDB server is running on port {} (pid {}) since {} (restrict={})",
         config.port,
         pid,
-        started_at.to_rfc3339()
+        started_at.to_rfc3339(),
+        args.restrict
     );
     Ok(())
 }
@@ -259,7 +258,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         master_key: None,
         memory_threshold: None,
         data_encryption_key: None,
-        run_mode: Some(args.mode),
+        restrict: Some(args.restrict),
     });
 }
 
