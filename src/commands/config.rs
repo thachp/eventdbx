@@ -44,7 +44,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         master_key,
         memory_threshold,
         data_encryption_key,
-        run_mode: None,
+        restrict: None,
     });
 
     if !was_initialized && !config.is_initialized() {

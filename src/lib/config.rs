@@ -5,12 +5,10 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
-use super::{
-    error::{EventfulError, Result},
-    run_mode::RunMode,
-};
+use super::error::{EventfulError, Result};
 
 pub const DEFAULT_PORT: u16 = 7070;
 pub const DEFAULT_MEMORY_THRESHOLD: usize = 10_000;
@@ -24,8 +22,11 @@ pub struct Config {
     pub data_encryption_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    #[serde(default = "default_run_mode")]
-    pub run_mode: RunMode,
+    #[serde(
+        default = "default_restrict",
+        deserialize_with = "deserialize_restrict"
+    )]
+    pub restrict: bool,
     #[serde(default)]
     pub plugins: Vec<PluginDefinition>,
 }
@@ -41,7 +42,7 @@ impl Default for Config {
             data_encryption_key: None,
             created_at: now,
             updated_at: now,
-            run_mode: default_run_mode(),
+            restrict: default_restrict(),
             plugins: Vec::new(),
         }
     }
@@ -54,7 +55,7 @@ pub struct ConfigUpdate {
     pub master_key: Option<String>,
     pub memory_threshold: Option<usize>,
     pub data_encryption_key: Option<String>,
-    pub run_mode: Option<RunMode>,
+    pub restrict: Option<bool>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -110,8 +111,8 @@ impl Config {
         if let Some(dek) = update.data_encryption_key {
             self.data_encryption_key = Some(dek);
         }
-        if let Some(mode) = update.run_mode {
-            self.run_mode = mode;
+        if let Some(restrict) = update.restrict {
+            self.restrict = restrict;
         }
         self.updated_at = Utc::now();
     }
@@ -169,8 +170,31 @@ fn default_data_dir() -> PathBuf {
     current_dir.join(".eventful")
 }
 
-fn default_run_mode() -> RunMode {
-    RunMode::Prod
+fn default_restrict() -> bool {
+    true
+}
+
+fn deserialize_restrict<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RestrictInput {
+        Bool(bool),
+        String(String),
+    }
+
+    let value = Option::<RestrictInput>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(RestrictInput::Bool(value)) => value,
+        Some(RestrictInput::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
+            "prod" | "restricted" | "true" | "1" | "yes" | "on" => true,
+            "dev" | "unrestricted" | "false" | "0" | "no" | "off" => false,
+            _ => default_restrict(),
+        },
+        None => default_restrict(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

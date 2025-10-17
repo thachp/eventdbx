@@ -16,7 +16,6 @@ use super::{
     config::Config,
     error::{EventfulError, Result},
     plugin::PluginManager,
-    run_mode::RunMode,
     schema::{AggregateSchema, SchemaManager},
     store::{AggregateState, AppendEvent, EventRecord, EventStore},
     token::{AccessKind, TokenManager},
@@ -27,7 +26,7 @@ struct AppState {
     store: Arc<EventStore>,
     tokens: Arc<TokenManager>,
     schemas: Arc<SchemaManager>,
-    run_mode: RunMode,
+    restrict: bool,
     plugins: PluginManager,
 }
 
@@ -39,7 +38,7 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         store,
         tokens,
         schemas,
-        run_mode: config.run_mode,
+        restrict: config.restrict,
         plugins,
     };
 
@@ -69,8 +68,8 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!(
-        "Starting EventfulDB server on {addr} in {:?} mode",
-        config.run_mode
+        "Starting EventfulDB server on {addr} (restrict={})",
+        config.restrict
     );
 
     let listener = TcpListener::bind(addr).await?;
@@ -154,7 +153,7 @@ async fn append_event(
     let token = extract_bearer_token(&headers).ok_or(EventfulError::Unauthorized)?;
     let claims = state.tokens.authorize(&token, AccessKind::Write)?.into();
 
-    if state.run_mode.requires_schema() {
+    if state.restrict {
         state
             .schemas
             .validate_event(&aggregate_type, &request.event_type, &request.payload)?;
