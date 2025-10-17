@@ -12,11 +12,11 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use crate::{
-    RunMode,
+use super::{
     config::Config,
     error::{EventfulError, Result},
     plugin::PluginManager,
+    run_mode::RunMode,
     schema::{AggregateSchema, SchemaManager},
     store::{AggregateState, AppendEvent, EventRecord, EventStore},
     token::{AccessKind, TokenManager},

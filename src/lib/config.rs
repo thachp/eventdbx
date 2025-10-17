@@ -7,9 +7,9 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    RunMode,
+use super::{
     error::{EventfulError, Result},
+    run_mode::RunMode,
 };
 
 pub const DEFAULT_PORT: u16 = 7070;
@@ -183,12 +183,16 @@ pub struct PluginDefinition {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginConfig {
     Postgres(PostgresPluginConfig),
+    Sqlite(SqlitePluginConfig),
+    Csv(CsvPluginConfig),
 }
 
 impl PluginConfig {
     pub fn kind(&self) -> PluginKind {
         match self {
             PluginConfig::Postgres(_) => PluginKind::Postgres,
+            PluginConfig::Sqlite(_) => PluginKind::Sqlite,
+            PluginConfig::Csv(_) => PluginKind::Csv,
         }
     }
 }
@@ -197,6 +201,8 @@ impl PluginConfig {
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
     Postgres,
+    Sqlite,
+    Csv,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,4 +215,14 @@ pub struct PostgresPluginConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PostgresColumnConfig {
     pub data_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SqlitePluginConfig {
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CsvPluginConfig {
+    pub output_dir: PathBuf,
 }
