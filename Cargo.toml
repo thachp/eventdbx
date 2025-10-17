@@ -1,6 +1,6 @@
 [package]
 name = "eventdb"
-description="Worry less about how you structure your data and focus more on your business logic."
+description="An event-sourced, key-value, write-side database system."
 version = "1.1.0"
 edition = "2024"
 repository = "https://github.com/thachp/eventdb"
