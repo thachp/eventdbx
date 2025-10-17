@@ -6,6 +6,7 @@ edition = "2024"
 repository = "https://github.com/thachp/eventdbx"
 license  = "MIT"
 
+
 [lib]
 path = "src/lib/mod.rs"
 
