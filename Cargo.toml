@@ -1,7 +1,10 @@
 [package]
 name = "eventful"
-version = "0.1.0"
+description="Worry less about how you structure your data and focus more on your business logic."
+version = "1.1.0"
 edition = "2024"
+repository = "github.com/thachp/eventful"
+license  = "MIT"
 
 [dependencies]
 anyhow = "1.0"
