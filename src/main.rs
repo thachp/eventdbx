@@ -1,5 +1,6 @@
 mod config;
 mod error;
+mod plugin;
 mod schema;
 mod server;
 mod store;
@@ -23,7 +24,11 @@ use serde_json::json;
 use tracing::info;
 
 use crate::{
-    config::{Config, ConfigUpdate, load_or_default},
+    config::{
+        Config, ConfigUpdate, PluginConfig, PluginDefinition, PluginKind, PostgresColumnConfig,
+        PostgresPluginConfig, load_or_default,
+    },
+    plugin::PluginManager,
     schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
     store::{AppendEvent, EventStore},
     token::{IssueTokenInput, TokenManager},
@@ -33,11 +38,25 @@ const RUN_MODE_ENV: &str = "EVENTFUL_RUN_MODE";
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum RunMode {
+pub enum RunMode {
     /// Unrestricted development mode (no schema enforcement)
     Dev,
     /// Restricted production mode (schema required)
     Prod,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+enum PluginTarget {
+    Postgres,
+}
+
+impl From<PluginTarget> for PluginKind {
+    fn from(value: PluginTarget) -> Self {
+        match value {
+            PluginTarget::Postgres => PluginKind::Postgres,
+        }
+    }
 }
 
 impl RunMode {
@@ -100,6 +119,11 @@ enum Commands {
     Schema {
         #[command(subcommand)]
         command: SchemaCommands,
+    },
+    /// Manage plugins
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
     },
     /// Manage aggregates
     Aggregate {
@@ -280,6 +304,46 @@ struct SchemaRemoveEventArgs {
 }
 
 #[derive(Subcommand)]
+enum PluginCommands {
+    /// Configure the Postgres plugin
+    #[command(name = "postgres")]
+    PostgresConfigure(PluginPostgresConfigureArgs),
+    /// Configure per-plugin field mappings
+    #[command(name = "map")]
+    Map(PluginMapArgs),
+}
+
+#[derive(Args)]
+struct PluginPostgresConfigureArgs {
+    /// Connection string used to reach the Postgres database
+    #[arg(long = "connection")]
+    connection: String,
+
+    /// Disable the plugin after configuring
+    #[arg(long, default_value_t = false)]
+    disable: bool,
+}
+
+#[derive(Args)]
+struct PluginMapArgs {
+    /// Plugin identifier
+    #[arg(long, value_enum)]
+    plugin: PluginTarget,
+
+    /// Aggregate name to configure
+    #[arg(long)]
+    aggregate: String,
+
+    /// Field name to configure
+    #[arg(long)]
+    field: String,
+
+    /// Data type to use for the field (e.g., VARCHAR)
+    #[arg(long = "datatype")]
+    data_type: String,
+}
+
+#[derive(Subcommand)]
 enum AggregateCommands {
     /// Apply an event to an aggregate instance
     Apply(AggregateApplyArgs),
@@ -404,6 +468,7 @@ async fn main() -> Result<()> {
         Commands::Config(args) => config_command(cli.config, args)?,
         Commands::Token { command } => token_command(cli.config, command)?,
         Commands::Schema { command } => schema_command(cli.config, command)?,
+        Commands::Plugin { command } => plugin_command(cli.config, command)?,
         Commands::Aggregate { command } => aggregate_command(cli.config, command)?,
         Commands::InternalServer => start_foreground(cli.config, StartArgs::default()).await?,
     }
@@ -430,7 +495,8 @@ async fn restart_command(config_path: Option<PathBuf>, args: StartArgs) -> Resul
 async fn start_foreground(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     set_run_mode_env(args.mode);
     let (config, _) = load_and_update_config(config_path, &args)?;
-    server::run(config, args.mode).await?;
+    let plugins = PluginManager::from_config(&config)?;
+    server::run(config, plugins).await?;
     Ok(())
 }
 
@@ -1037,6 +1103,72 @@ fn schema_command(config_path: Option<PathBuf>, command: SchemaCommands) -> Resu
     Ok(())
 }
 
+fn plugin_command(config_path: Option<PathBuf>, command: PluginCommands) -> Result<()> {
+    let (mut config, path) = load_or_default(config_path)?;
+
+    match command {
+        PluginCommands::PostgresConfigure(args) => {
+            let existing_mapping = config
+                .plugins
+                .iter()
+                .find_map(|def| match &def.config {
+                    PluginConfig::Postgres(settings) => Some(settings.field_mappings.clone()),
+                })
+                .unwrap_or_default();
+
+            let definition = PluginDefinition {
+                enabled: !args.disable,
+                config: PluginConfig::Postgres(PostgresPluginConfig {
+                    connection_string: args.connection,
+                    field_mappings: existing_mapping,
+                }),
+            };
+            config.set_plugin(definition);
+            config.ensure_data_dir()?;
+            config.save(&path)?;
+            if args.disable {
+                println!("Postgres plugin disabled");
+            } else {
+                println!("Postgres plugin configured");
+            }
+        }
+        PluginCommands::Map(args) => match PluginKind::from(args.plugin) {
+            PluginKind::Postgres => {
+                let definition = config
+                        .plugins
+                        .iter_mut()
+                        .find(|def| matches!(def.config, PluginConfig::Postgres(_)))
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "configure postgres plugin before mapping fields with `eventful plugin postgres --connection=...`"
+                            )
+                        })?;
+
+                let PluginConfig::Postgres(settings) = &mut definition.config;
+
+                let mut field_config = PostgresColumnConfig::default();
+                field_config.data_type = Some(args.data_type.clone());
+
+                settings
+                    .field_mappings
+                    .entry(args.aggregate.clone())
+                    .or_default()
+                    .insert(args.field.clone(), field_config);
+
+                config.ensure_data_dir()?;
+                config.save(&path)?;
+
+                println!(
+                    "Mapped {}.{} as {}",
+                    args.aggregate, args.field, args.data_type
+                );
+            }
+        },
+    }
+
+    Ok(())
+}
+
 fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     match command {
@@ -1105,6 +1237,7 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             }
 
             let store = EventStore::open(config.event_store_path())?;
+            let plugins = PluginManager::from_config(&config)?;
             let record = store.append(AppendEvent {
                 aggregate_type: args.aggregate,
                 aggregate_id: args.aggregate_id,
@@ -1114,6 +1247,25 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
             })?;
 
             println!("{}", serde_json::to_string_pretty(&record)?);
+
+            if !plugins.is_empty() {
+                let schema = schema_manager.get(&record.aggregate_type).ok();
+                match store.get_aggregate_state(&record.aggregate_type, &record.aggregate_id) {
+                    Ok(current_state) => {
+                        if let Err(err) =
+                            plugins.notify_event(&record, &current_state, schema.as_ref())
+                        {
+                            eprintln!("plugin notification failed: {}", err);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "plugin notification skipped (failed to load state): {}",
+                            err
+                        );
+                    }
+                }
+            }
         }
         AggregateCommands::Replay(args) => {
             let store = EventStore::open_read_only(config.event_store_path())?;

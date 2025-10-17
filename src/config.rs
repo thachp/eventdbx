@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
 };
@@ -25,6 +26,8 @@ pub struct Config {
     pub updated_at: DateTime<Utc>,
     #[serde(default = "default_run_mode")]
     pub run_mode: RunMode,
+    #[serde(default)]
+    pub plugins: Vec<PluginDefinition>,
 }
 
 impl Default for Config {
@@ -39,6 +42,7 @@ impl Default for Config {
             created_at: now,
             updated_at: now,
             run_mode: default_run_mode(),
+            plugins: Vec::new(),
         }
     }
 }
@@ -144,6 +148,18 @@ impl Config {
                 .map(|value| !value.trim().is_empty())
                 .unwrap_or(false)
     }
+
+    pub fn set_plugin(&mut self, plugin: PluginDefinition) {
+        if let Some(existing) = self
+            .plugins
+            .iter_mut()
+            .find(|item| item.config.kind() == plugin.config.kind())
+        {
+            *existing = plugin;
+        } else {
+            self.plugins.push(plugin);
+        }
+    }
 }
 
 fn default_data_dir() -> PathBuf {
@@ -155,4 +171,42 @@ fn default_data_dir() -> PathBuf {
 
 fn default_run_mode() -> RunMode {
     RunMode::Prod
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginDefinition {
+    pub enabled: bool,
+    pub config: PluginConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum PluginConfig {
+    Postgres(PostgresPluginConfig),
+}
+
+impl PluginConfig {
+    pub fn kind(&self) -> PluginKind {
+        match self {
+            PluginConfig::Postgres(_) => PluginKind::Postgres,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginKind {
+    Postgres,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostgresPluginConfig {
+    pub connection_string: String,
+    #[serde(default)]
+    pub field_mappings: BTreeMap<String, BTreeMap<String, PostgresColumnConfig>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PostgresColumnConfig {
+    pub data_type: Option<String>,
 }

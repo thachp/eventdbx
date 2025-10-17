@@ -55,6 +55,25 @@ My drive to create this immutable system was inspired by three key scenarios I'v
   eventful start --mode dev
   ```
   Development mode skips schema enforcement, while the default production mode requires every event to satisfy its schema definition.
+- **`plugin:postgres`**: Configure the Postgres notification plugin so persisted events are mirrored to an external Postgres database. (Future releases will add `plugin:mssql` and `plugin:sqlite` commands following the same pattern.)
+  ```toml
+  # configure the plugin with a connection string (auto-enables by default)
+  eventful plugin postgres --connection="postgres://user:pass@host/db"
+
+  # configure but leave the plugin disabled
+  eventful plugin postgres --connection="postgres://..." --disable
+  ```
+- **`plugin:map`**: Define column metadata for a specific plugin so fields are created with the correct database types.
+  ```toml
+  # store person.first_name as VARCHAR(255) in Postgres
+  eventful plugin map --plugin=postgres --aggregate=person --field=first_name --datatype="VARCHAR(255)"
+
+  # store person.age as INTEGER
+  eventful plugin map --plugin=postgres --aggregate=person --field=age --datatype=INTEGER
+
+  # store person.balance as NUMERIC(12,2)
+  eventful plugin map --plugin=postgres --aggregate=person --field=balance --datatype="NUMERIC(12,2)"
+  ```
 - **`stop`**: Gracefully shuts down the EventfulDB server, ensuring that all processes are correctly terminated.
   ```toml
   # stop eventful service gracefully (end all connections and services)
