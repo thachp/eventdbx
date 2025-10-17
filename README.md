@@ -1,10 +1,6 @@
 # EventfulDB
 
-Owner: Patrick Thach
-Tags: Infrastructure
-Author: Patrick Thach
-Port: 7070
-Status: In progress
+You'll likely enjoy this database system. Worry less about how you structure your data and focus more on your business logic.
 
 ## Overview
 
@@ -15,10 +11,12 @@ EventfulDB is an event-sourced, key-value, write-side database system designed t
 Follow the steps below to spin up EventfulDB locally. All commands are expected to run from the repository root unless stated otherwise.
 
 1. **Install prerequisites**
+
    - Rust toolchain (edition 2024) via [`rustup`](https://rustup.rs/)
    - `rocksdb` is vendored through the Rust crate, so no extra native packages are required.
 
 2. **Clone and build**
+
    ```bash
    git clone https://github.com/thachp/eventful.git
    cd eventful
@@ -26,6 +24,7 @@ Follow the steps below to spin up EventfulDB locally. All commands are expected 
    ```
 
 3. **(Optional) Run checks**
+
    ```bash
    cargo fmt -- --check
    cargo check
@@ -34,19 +33,23 @@ Follow the steps below to spin up EventfulDB locally. All commands are expected 
 
 4. **Create the initial configuration**
    The first configuration must include both a master key and a data-encryption key. These values can be any non-empty strings in development.
+
    ```bash
    cargo run -- config --master-key dev-master --dek dev-dek
    ```
 
 5. **Start the server**
+
    ```bash
    cargo run -- start --foreground
    ```
+
    - Omit `--foreground` to daemonise the process.
    - Use `--data-dir <path>` to override the default `./.eventful` directory.
    - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
 
 6. **Define a schema (recommended when running in restricted mode)**
+
    ```bash
    cargo run -- schema create \
      --aggregate patient \
@@ -55,6 +58,7 @@ Follow the steps below to spin up EventfulDB locally. All commands are expected 
    ```
 
 7. **Issue a token for CLI access**
+
    ```bash
    cargo run -- token generate \
      --identifier-type user \
@@ -165,6 +169,60 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
   Registers Postgres column overrides; other plugin kinds reject mapping requests.
 
 Plugins are notified after each committed event so downstream systems stay synchronized.
+
+## REST API
+
+The server exposes a small HTTP API (served on port `7070` by default). All endpoints require a bearer token unless otherwise noted.
+
+| Method & Path                                                               | Description                                                         |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `GET /health`                                                               | Liveness probe (unauthenticated).                                   |
+| `GET /v1/aggregates`                                                        | Lists all aggregates.                                               |
+| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}`                        | Returns the current state for a specific aggregate.                 |
+| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                 | Lists every event for an aggregate.                                 |
+| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events/recent?take=<n>` | Returns the `n` most recent events (defaults to 10).                |
+| `POST /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                | Appends an event (payload must include `event_type` and `payload`). |
+| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/verify`                 | Computes and returns the Merkle root for integrity verification.    |
+| `GET /v1/schemas`                                                           | Lists all schema definitions.                                       |
+| `GET /v1/schemas/{aggregate}`                                               | Returns the schema for a specific aggregate.                        |
+
+All authenticated requests must include `Authorization: Bearer <token>` with a token issued via the CLI.
+
+### cURL examples
+
+```bash
+# Health check
+curl http://localhost:7070/health
+
+# List aggregates (replace TOKEN with an active value)
+curl \
+  -H "Authorization: Bearer TOKEN" \
+  http://localhost:7070/v1/aggregates
+
+# Append an event
+curl \
+  -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "event_type": "patient-updated",
+        "payload": {
+          "status": "inactive",
+          "comment": "Archived via API"
+        }
+      }' \
+  http://localhost:7070/v1/aggregates/patient/p-001/events
+
+# Fetch the latest five events for an aggregate
+curl \
+  -H "Authorization: Bearer TOKEN" \
+  "http://localhost:7070/v1/aggregates/patient/p-001/events/recent?take=5"
+
+# Retrieve a schema definition
+curl \
+  -H "Authorization: Bearer TOKEN" \
+  http://localhost:7070/v1/schemas/patient | jq
+```
 
 ## Contributing
 
