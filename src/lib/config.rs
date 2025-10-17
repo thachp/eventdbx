@@ -29,6 +29,8 @@ pub struct Config {
     pub restrict: bool,
     #[serde(default)]
     pub plugins: Vec<PluginDefinition>,
+    #[serde(default)]
+    pub column_types: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Default for Config {
@@ -44,6 +46,7 @@ impl Default for Config {
             updated_at: now,
             restrict: default_restrict(),
             plugins: Vec::new(),
+            column_types: BTreeMap::new(),
         }
     }
 }
@@ -115,6 +118,19 @@ impl Config {
             self.restrict = restrict;
         }
         self.updated_at = Utc::now();
+    }
+
+    pub fn set_column_type(&mut self, aggregate: &str, field: &str, data_type: String) {
+        self.column_types
+            .entry(aggregate.to_string())
+            .or_default()
+            .insert(field.to_string(), data_type);
+    }
+
+    pub fn column_type(&self, aggregate: &str, field: &str) -> Option<&String> {
+        self.column_types
+            .get(aggregate)
+            .and_then(|fields| fields.get(field))
     }
 
     pub fn ensure_data_dir(&self) -> Result<()> {
@@ -209,6 +225,10 @@ pub enum PluginConfig {
     Postgres(PostgresPluginConfig),
     Sqlite(SqlitePluginConfig),
     Csv(CsvPluginConfig),
+    Tcp(TcpPluginConfig),
+    Http(HttpPluginConfig),
+    Json(JsonPluginConfig),
+    Log(LogPluginConfig),
 }
 
 impl PluginConfig {
@@ -217,6 +237,10 @@ impl PluginConfig {
             PluginConfig::Postgres(_) => PluginKind::Postgres,
             PluginConfig::Sqlite(_) => PluginKind::Sqlite,
             PluginConfig::Csv(_) => PluginKind::Csv,
+            PluginConfig::Tcp(_) => PluginKind::Tcp,
+            PluginConfig::Http(_) => PluginKind::Http,
+            PluginConfig::Json(_) => PluginKind::Json,
+            PluginConfig::Log(_) => PluginKind::Log,
         }
     }
 }
@@ -227,6 +251,10 @@ pub enum PluginKind {
     Postgres,
     Sqlite,
     Csv,
+    Tcp,
+    Http,
+    Json,
+    Log,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,4 +277,36 @@ pub struct SqlitePluginConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CsvPluginConfig {
     pub output_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TcpPluginConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpPluginConfig {
+    pub endpoint: String,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonPluginConfig {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub pretty: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogPluginConfig {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+fn default_log_level() -> String {
+    "info".into()
 }

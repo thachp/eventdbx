@@ -125,7 +125,7 @@ impl Plugin for SqlitePlugin {
             .metadata
             .issued_by
             .as_ref()
-            .map(|claims| claims.identifier_id.clone());
+            .map(|claims| claims.user.clone());
         let actor_value = actor_id.clone().map(Value::from).unwrap_or(Value::Null);
 
         let mut columns = vec![

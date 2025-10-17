@@ -1,11 +1,12 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand, ValueEnum};
 
 use eventdb::config::{
-    CsvPluginConfig, PluginConfig, PluginDefinition, PluginKind, PostgresColumnConfig,
-    PostgresPluginConfig, SqlitePluginConfig, load_or_default,
+    CsvPluginConfig, HttpPluginConfig, JsonPluginConfig, LogPluginConfig, PluginConfig,
+    PluginDefinition, PluginKind, PostgresColumnConfig, PostgresPluginConfig, SqlitePluginConfig,
+    TcpPluginConfig, load_or_default,
 };
 
 #[derive(Subcommand)]
@@ -19,6 +20,18 @@ pub enum PluginCommands {
     /// Configure the CSV plugin
     #[command(name = "csv")]
     CsvConfigure(PluginCsvConfigureArgs),
+    /// Configure the TCP plugin
+    #[command(name = "tcp")]
+    TcpConfigure(PluginTcpConfigureArgs),
+    /// Configure the HTTP plugin
+    #[command(name = "http")]
+    HttpConfigure(PluginHttpConfigureArgs),
+    /// Configure the JSON file plugin
+    #[command(name = "json")]
+    JsonConfigure(PluginJsonConfigureArgs),
+    /// Configure the logging plugin
+    #[command(name = "log")]
+    LogConfigure(PluginLogConfigureArgs),
     /// Configure per-plugin field mappings
     #[command(name = "map")]
     Map(PluginMapArgs),
@@ -58,10 +71,76 @@ pub struct PluginCsvConfigureArgs {
 }
 
 #[derive(Args)]
+pub struct PluginTcpConfigureArgs {
+    /// Hostname or IP of the TCP service
+    #[arg(long)]
+    pub host: String,
+
+    /// Port of the TCP service
+    #[arg(long)]
+    pub port: u16,
+
+    /// Disable the plugin after configuring
+    #[arg(long, default_value_t = false)]
+    pub disable: bool,
+}
+
+#[derive(Args)]
+pub struct PluginHttpConfigureArgs {
+    /// HTTP endpoint to POST aggregate updates to
+    #[arg(long)]
+    pub endpoint: String,
+
+    /// Additional headers to send (key=value)
+    #[arg(long = "header", value_parser = parse_key_value, value_name = "KEY=VALUE")]
+    pub headers: Vec<KeyValue>,
+
+    /// Disable the plugin after configuring
+    #[arg(long, default_value_t = false)]
+    pub disable: bool,
+}
+
+#[derive(Args)]
+pub struct PluginJsonConfigureArgs {
+    /// File path to append JSON snapshots into
+    #[arg(long)]
+    pub path: PathBuf,
+
+    /// Pretty-print JSON
+    #[arg(long, default_value_t = false)]
+    pub pretty: bool,
+
+    /// Disable the plugin after configuring
+    #[arg(long, default_value_t = false)]
+    pub disable: bool,
+}
+
+#[derive(Args)]
+pub struct PluginLogConfigureArgs {
+    /// Log level to use (trace, debug, info, warn, error)
+    #[arg(long, default_value = "info")]
+    pub level: String,
+
+    /// Optional template using {aggregate}, {id}, {event}
+    #[arg(long)]
+    pub template: Option<String>,
+
+    /// Disable the plugin after configuring
+    #[arg(long, default_value_t = false)]
+    pub disable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyValue {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Args)]
 pub struct PluginMapArgs {
     /// Plugin identifier
     #[arg(long, value_enum)]
-    pub plugin: PluginTarget,
+    pub plugin: Option<PluginTarget>,
 
     /// Aggregate name to configure
     #[arg(long)]
@@ -82,6 +161,10 @@ pub enum PluginTarget {
     Postgres,
     Sqlite,
     Csv,
+    Tcp,
+    Http,
+    Json,
+    Log,
 }
 
 impl From<PluginTarget> for PluginKind {
@@ -90,6 +173,10 @@ impl From<PluginTarget> for PluginKind {
             PluginTarget::Postgres => PluginKind::Postgres,
             PluginTarget::Sqlite => PluginKind::Sqlite,
             PluginTarget::Csv => PluginKind::Csv,
+            PluginTarget::Tcp => PluginKind::Tcp,
+            PluginTarget::Http => PluginKind::Http,
+            PluginTarget::Json => PluginKind::Json,
+            PluginTarget::Log => PluginKind::Log,
         }
     }
 }
@@ -156,54 +243,161 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 println!("CSV plugin configured");
             }
         }
-        PluginCommands::Map(args) => match PluginKind::from(args.plugin) {
-            PluginKind::Postgres => {
-                let definition = config
-                    .plugins
-                    .iter_mut()
-                    .find(|def| matches!(def.config, PluginConfig::Postgres(_)))
-                    .ok_or_else(|| {
+        PluginCommands::TcpConfigure(args) => {
+            let definition = PluginDefinition {
+                enabled: !args.disable,
+                config: PluginConfig::Tcp(TcpPluginConfig {
+                    host: args.host,
+                    port: args.port,
+                }),
+            };
+            config.set_plugin(definition);
+            config.ensure_data_dir()?;
+            config.save(&path)?;
+            if args.disable {
+                println!("TCP plugin disabled");
+            } else {
+                println!("TCP plugin configured");
+            }
+        }
+        PluginCommands::HttpConfigure(args) => {
+            let mut headers = BTreeMap::new();
+            for entry in args.headers {
+                headers.insert(entry.key, entry.value);
+            }
+            let definition = PluginDefinition {
+                enabled: !args.disable,
+                config: PluginConfig::Http(HttpPluginConfig {
+                    endpoint: args.endpoint,
+                    headers,
+                }),
+            };
+            config.set_plugin(definition);
+            config.ensure_data_dir()?;
+            config.save(&path)?;
+            if args.disable {
+                println!("HTTP plugin disabled");
+            } else {
+                println!("HTTP plugin configured");
+            }
+        }
+        PluginCommands::JsonConfigure(args) => {
+            let definition = PluginDefinition {
+                enabled: !args.disable,
+                config: PluginConfig::Json(JsonPluginConfig {
+                    path: args.path,
+                    pretty: args.pretty,
+                }),
+            };
+            config.set_plugin(definition);
+            config.ensure_data_dir()?;
+            config.save(&path)?;
+            if args.disable {
+                println!("JSON plugin disabled");
+            } else {
+                println!("JSON plugin configured");
+            }
+        }
+        PluginCommands::LogConfigure(args) => {
+            let definition = PluginDefinition {
+                enabled: !args.disable,
+                config: PluginConfig::Log(LogPluginConfig {
+                    level: args.level.clone(),
+                    template: args.template.clone(),
+                }),
+            };
+            config.set_plugin(definition);
+            config.ensure_data_dir()?;
+            config.save(&path)?;
+            if args.disable {
+                println!("Log plugin disabled");
+            } else {
+                println!("Log plugin configured");
+            }
+        }
+        PluginCommands::Map(args) => match args.plugin {
+            None => {
+                config.set_column_type(&args.aggregate, &args.field, args.data_type.clone());
+                config.ensure_data_dir()?;
+                config.save(&path)?;
+                println!(
+                    "Mapped base {}.{} as {}",
+                    args.aggregate, args.field, args.data_type
+                );
+            }
+            Some(plugin) => match PluginKind::from(plugin) {
+                PluginKind::Postgres => {
+                    let definition = config
+                        .plugins
+                        .iter_mut()
+                        .find(|def| matches!(def.config, PluginConfig::Postgres(_)))
+                        .ok_or_else(|| {
                         anyhow!(
                             "configure postgres plugin before mapping fields with `eventdb plugin postgres --connection=...`"
                         )
                     })?;
 
-                match &mut definition.config {
-                    PluginConfig::Postgres(settings) => {
-                        let mut field_config = PostgresColumnConfig::default();
-                        field_config.data_type = Some(args.data_type.clone());
+                    match &mut definition.config {
+                        PluginConfig::Postgres(settings) => {
+                            let mut field_config = PostgresColumnConfig::default();
+                            field_config.data_type = Some(args.data_type.clone());
 
-                        settings
-                            .field_mappings
-                            .entry(args.aggregate.clone())
-                            .or_default()
-                            .insert(args.field.clone(), field_config);
+                            settings
+                                .field_mappings
+                                .entry(args.aggregate.clone())
+                                .or_default()
+                                .insert(args.field.clone(), field_config);
 
-                        config.ensure_data_dir()?;
-                        config.save(&path)?;
+                            config.ensure_data_dir()?;
+                            config.save(&path)?;
 
-                        println!(
-                            "Mapped {}.{} as {}",
-                            args.aggregate, args.field, args.data_type
-                        );
-                    }
-                    _ => {
-                        return Err(anyhow!(
-                            "unexpected plugin configuration variant; reconfigure the postgres plugin and try again"
-                        ));
+                            println!(
+                                "Mapped {}.{} as {}",
+                                args.aggregate, args.field, args.data_type
+                            );
+                        }
+                        _ => {
+                            return Err(anyhow!(
+                                "unexpected plugin configuration variant; reconfigure the postgres plugin and try again"
+                            ));
+                        }
                     }
                 }
-            }
-            PluginKind::Sqlite => {
-                return Err(anyhow!(
-                    "field mapping is not supported for the SQLite plugin"
-                ));
-            }
-            PluginKind::Csv => {
-                return Err(anyhow!("field mapping is not supported for the CSV plugin"));
-            }
+                PluginKind::Sqlite => {
+                    return Err(anyhow!(
+                        "field mapping is not supported for the SQLite plugin"
+                    ));
+                }
+                PluginKind::Csv => {
+                    return Err(anyhow!("field mapping is not supported for the CSV plugin"));
+                }
+                PluginKind::Tcp | PluginKind::Http | PluginKind::Json | PluginKind::Log => {
+                    return Err(anyhow!(
+                        "field mapping is only supported for the Postgres plugin"
+                    ));
+                }
+            },
         },
     }
 
     Ok(())
+}
+fn parse_key_value(raw: &str) -> Result<KeyValue, String> {
+    let mut parts = raw.splitn(2, '=');
+    let key = parts
+        .next()
+        .ok_or_else(|| "missing key".to_string())?
+        .trim()
+        .to_string();
+    let value = parts
+        .next()
+        .ok_or_else(|| "missing value".to_string())?
+        .trim()
+        .to_string();
+
+    if key.is_empty() {
+        return Err("header key cannot be empty".to_string());
+    }
+
+    Ok(KeyValue { key, value })
 }

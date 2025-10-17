@@ -39,15 +39,15 @@ pub struct EventMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActorClaims {
-    pub identifier_type: String,
-    pub identifier_id: String,
+    pub group: String,
+    pub user: String,
 }
 
 impl From<TokenGrant> for ActorClaims {
     fn from(value: TokenGrant) -> Self {
         Self {
-            identifier_type: value.identifier_type,
-            identifier_id: value.identifier_id,
+            group: value.group,
+            user: value.user,
         }
     }
 }

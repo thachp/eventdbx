@@ -27,10 +27,10 @@ pub enum TokenCommands {
 #[derive(Args)]
 pub struct TokenGenerateArgs {
     #[arg(long)]
-    pub identifier_type: String,
+    pub group: String,
 
     #[arg(long)]
-    pub identifier_id: String,
+    pub user: String,
 
     #[arg(long)]
     pub expiration: Option<u64>,
@@ -62,17 +62,17 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
         TokenCommands::Generate(args) => {
             ensure_secrets_configured(&config)?;
             let record = manager.issue(IssueTokenInput {
-                identifier_type: args.identifier_type,
-                identifier_id: args.identifier_id,
+                group: args.group,
+                user: args.user,
                 expiration_secs: args.expiration,
                 limit: args.limit,
                 keep_alive: args.keep_alive,
             })?;
             println!(
-                "token={} identifier_type={} identifier_id={} expires_at={} remaining_writes={}",
+                "token={} group={} user={} expires_at={} remaining_writes={}",
                 record.token,
-                record.identifier_type,
-                record.identifier_id,
+                record.group,
+                record.user,
                 record
                     .expires_at
                     .map(|ts| ts.to_rfc3339())
@@ -86,8 +86,10 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
         TokenCommands::List => {
             for record in manager.list() {
                 println!(
-                    "token={} status={:?} issued_at={} expires_at={} remaining_writes={}",
+                    "token={} group={} user={} status={:?} issued_at={} expires_at={} remaining_writes={}",
                     record.token,
+                    record.group,
+                    record.user,
                     record.status,
                     record.issued_at.to_rfc3339(),
                     record
