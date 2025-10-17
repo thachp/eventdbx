@@ -19,6 +19,7 @@ const SEP: u8 = 0x1F;
 const PREFIX_EVENT: &str = "evt";
 const PREFIX_META: &str = "meta";
 const PREFIX_STATE: &str = "state";
+const PREFIX_SNAPSHOT: &str = "snapshot";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventRecord {
@@ -70,6 +71,7 @@ pub struct AggregateState {
     pub version: u64,
     pub state: BTreeMap<String, String>,
     pub merkle_root: String,
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +81,12 @@ struct AggregateMeta {
     version: u64,
     event_hashes: Vec<String>,
     merkle_root: String,
+    #[serde(default)]
+    archived: bool,
+    #[serde(default)]
+    archived_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    archive_comment: Option<String>,
 }
 
 impl AggregateMeta {
@@ -89,6 +97,9 @@ impl AggregateMeta {
             version: 0,
             event_hashes: Vec::new(),
             merkle_root: merkle::empty_root(),
+            archived: false,
+            archived_at: None,
+            archive_comment: None,
         }
     }
 }
@@ -96,6 +107,17 @@ impl AggregateMeta {
 pub struct EventStore {
     db: DBWithThreadMode<MultiThreaded>,
     write_lock: Mutex<()>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotRecord {
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    pub version: u64,
+    pub state: BTreeMap<String, String>,
+    pub merkle_root: String,
+    pub created_at: DateTime<Utc>,
+    pub comment: Option<String>,
 }
 
 impl EventStore {
@@ -119,6 +141,10 @@ impl EventStore {
             .unwrap_or_else(|| {
                 AggregateMeta::new(input.aggregate_type.clone(), input.aggregate_id.clone())
             });
+
+        if meta.archived {
+            return Err(EventfulError::AggregateArchived);
+        }
         let mut state = self.load_state_map(&input.aggregate_type, &input.aggregate_id)?;
 
         let version = meta.version + 1;
@@ -195,6 +221,7 @@ impl EventStore {
             version: meta.version,
             state,
             merkle_root: meta.merkle_root,
+            archived: meta.archived,
         })
     }
 
@@ -233,6 +260,64 @@ impl EventStore {
         Ok(meta.merkle_root)
     }
 
+    pub fn create_snapshot(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        comment: Option<String>,
+    ) -> Result<SnapshotRecord> {
+        let state = self.get_aggregate_state(aggregate_type, aggregate_id)?;
+        let created_at = Utc::now();
+        let record = SnapshotRecord {
+            aggregate_type: state.aggregate_type.clone(),
+            aggregate_id: state.aggregate_id.clone(),
+            version: state.version,
+            state: state.state.clone(),
+            merkle_root: state.merkle_root.clone(),
+            created_at,
+            comment,
+        };
+
+        let key = snapshot_key(aggregate_type, aggregate_id, created_at);
+        self.db
+            .put(key, serde_json::to_vec(&record)?)
+            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+
+        Ok(record)
+    }
+
+    pub fn set_archive(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        archived: bool,
+        comment: Option<String>,
+    ) -> Result<AggregateState> {
+        let _guard = self.write_lock.lock();
+        let mut meta = self
+            .load_meta(aggregate_type, aggregate_id)?
+            .ok_or(EventfulError::AggregateNotFound)?;
+
+        meta.archived = archived;
+        if archived {
+            meta.archived_at = Some(Utc::now());
+            meta.archive_comment = comment;
+        } else {
+            meta.archived_at = None;
+            meta.archive_comment = None;
+        }
+
+        self.db
+            .put(
+                meta_key(aggregate_type, aggregate_id),
+                serde_json::to_vec(&meta)?,
+            )
+            .map_err(|err| EventfulError::Storage(err.to_string()))?;
+
+        drop(meta);
+        self.get_aggregate_state(aggregate_type, aggregate_id)
+    }
+
     pub fn aggregates(&self) -> Vec<AggregateState> {
         let prefix = meta_prefix();
         let iter = self
@@ -267,6 +352,7 @@ impl EventStore {
                 version: meta.version,
                 state,
                 merkle_root: meta.merkle_root,
+                archived: meta.archived,
             });
         }
 
@@ -325,6 +411,13 @@ fn event_prefix(aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
 fn event_key(aggregate_type: &str, aggregate_id: &str, version: u64) -> Vec<u8> {
     let mut key = event_prefix(aggregate_type, aggregate_id);
     key.extend_from_slice(&version.to_be_bytes());
+    key
+}
+
+fn snapshot_key(aggregate_type: &str, aggregate_id: &str, created_at: DateTime<Utc>) -> Vec<u8> {
+    let mut key = key_with_segments(&[PREFIX_SNAPSHOT, aggregate_type, aggregate_id]);
+    key.push(SEP);
+    key.extend_from_slice(&created_at.timestamp_millis().to_be_bytes());
     key
 }
 
@@ -405,9 +498,58 @@ mod tests {
             let state = store.get_aggregate_state("patient", "patient-1").unwrap();
             assert_eq!(state.version, 1);
             assert_eq!(state.state["name"], "Alice");
+            assert!(!state.archived);
 
             let events = store.list_events("patient", "patient-1").unwrap();
             assert_eq!(events.len(), 1);
         }
+    }
+
+    #[test]
+    fn snapshots_and_archive_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path).unwrap();
+
+        let mut payload = BTreeMap::new();
+        payload.insert("status".into(), "active".into());
+
+        store
+            .append(AppendEvent {
+                aggregate_type: "order".into(),
+                aggregate_id: "order-1".into(),
+                event_type: "order-created".into(),
+                payload,
+                issued_by: None,
+            })
+            .unwrap();
+
+        let snapshot = store
+            .create_snapshot("order", "order-1", Some("initial".into()))
+            .unwrap();
+        assert_eq!(snapshot.version, 1);
+        assert_eq!(snapshot.comment.as_deref(), Some("initial"));
+
+        let state = store
+            .set_archive("order", "order-1", true, Some("closed".into()))
+            .unwrap();
+        assert!(state.archived);
+
+        let err = store
+            .append(AppendEvent {
+                aggregate_type: "order".into(),
+                aggregate_id: "order-1".into(),
+                event_type: "order-updated".into(),
+                payload: BTreeMap::new(),
+                issued_by: None,
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::EventfulError::AggregateArchived
+        ));
+
+        let state = store.set_archive("order", "order-1", false, None).unwrap();
+        assert!(!state.archived);
     }
 }

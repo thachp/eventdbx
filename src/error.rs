@@ -24,6 +24,8 @@ pub enum EventfulError {
     Unauthorized,
     #[error("aggregate not found")]
     AggregateNotFound,
+    #[error("aggregate is archived and cannot accept new events")]
+    AggregateArchived,
     #[error("schema already exists")]
     SchemaExists,
     #[error("schema not found")]
@@ -67,7 +69,7 @@ impl IntoResponse for EventfulError {
             Self::Config(_) => StatusCode::BAD_REQUEST,
             Self::InvalidToken | Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::TokenExpired => StatusCode::UNAUTHORIZED,
-            Self::TokenLimitReached => StatusCode::FORBIDDEN,
+            Self::TokenLimitReached | Self::AggregateArchived => StatusCode::FORBIDDEN,
             Self::AggregateNotFound | Self::SchemaNotFound => StatusCode::NOT_FOUND,
             Self::SchemaExists => StatusCode::CONFLICT,
             Self::Storage(_) | Self::Serialization(_) | Self::Io(_) => {

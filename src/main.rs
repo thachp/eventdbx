@@ -14,6 +14,7 @@ use tracing::info;
 
 use crate::{
     config::{ConfigUpdate, load_or_default},
+    error::EventfulError,
     schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
     store::{AppendEvent, EventStore},
     token::{IssueTokenInput, TokenManager},
@@ -195,6 +196,40 @@ enum AggregateCommands {
     Replay(AggregateReplayArgs),
     /// Verify an aggregate's Merkle root
     Verify(AggregateVerifyArgs),
+    /// Create a snapshot of the aggregate state
+    Snapshot(AggregateSnapshotArgs),
+    /// Archive an aggregate instance
+    Archive(AggregateArchiveArgs),
+    /// Restore an archived aggregate instance
+    Restore(AggregateArchiveArgs),
+    /// Commit staged events (no-op placeholder)
+    Commit,
+}
+
+#[derive(Args)]
+struct AggregateSnapshotArgs {
+    /// Aggregate type
+    aggregate: String,
+
+    /// Aggregate identifier
+    aggregate_id: String,
+
+    /// Optional comment to record with the snapshot
+    #[arg(long)]
+    comment: Option<String>,
+}
+
+#[derive(Args)]
+struct AggregateArchiveArgs {
+    /// Aggregate type
+    aggregate: String,
+
+    /// Aggregate identifier
+    aggregate_id: String,
+
+    /// Optional comment recorded with the action
+    #[arg(long)]
+    comment: Option<String>,
 }
 
 #[derive(Args)]
@@ -487,11 +522,12 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
         AggregateCommands::List => {
             for aggregate in store.aggregates() {
                 println!(
-                    "aggregate_type={} aggregate_id={} version={} merkle_root={}",
+                    "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
                     aggregate.aggregate_type,
                     aggregate.aggregate_id,
                     aggregate.version,
-                    aggregate.merkle_root
+                    aggregate.merkle_root,
+                    aggregate.archived
                 );
             }
         }
@@ -541,7 +577,11 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
         AggregateCommands::Apply(args) => {
             let payload = collect_payload(args.fields);
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
-            let schema = schema_manager.get(&args.aggregate).ok();
+            let schema = match schema_manager.get(&args.aggregate) {
+                Ok(schema) => Some(schema),
+                Err(EventfulError::SchemaNotFound) => None,
+                Err(err) => return Err(err.into()),
+            };
 
             if let Some(schema) = schema {
                 if schema.locked {
@@ -611,6 +651,44 @@ fn aggregate_command(config_path: Option<PathBuf>, command: AggregateCommands) -
                 "aggregate_type={} aggregate_id={} merkle_root={}",
                 args.aggregate, args.aggregate_id, merkle_root
             );
+        }
+        AggregateCommands::Snapshot(args) => {
+            let snapshot =
+                store.create_snapshot(&args.aggregate, &args.aggregate_id, args.comment.clone())?;
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        }
+        AggregateCommands::Archive(args) => {
+            let meta = store.set_archive(
+                &args.aggregate,
+                &args.aggregate_id,
+                true,
+                args.comment.clone(),
+            )?;
+            println!(
+                "aggregate_type={} aggregate_id={} archived={} comment={}",
+                meta.aggregate_type,
+                meta.aggregate_id,
+                meta.archived,
+                args.comment.unwrap_or_default()
+            );
+        }
+        AggregateCommands::Restore(args) => {
+            let meta = store.set_archive(
+                &args.aggregate,
+                &args.aggregate_id,
+                false,
+                args.comment.clone(),
+            )?;
+            println!(
+                "aggregate_type={} aggregate_id={} archived={} comment={}",
+                meta.aggregate_type,
+                meta.aggregate_id,
+                meta.archived,
+                args.comment.unwrap_or_default()
+            );
+        }
+        AggregateCommands::Commit => {
+            println!("all events are already committed");
         }
     }
 
