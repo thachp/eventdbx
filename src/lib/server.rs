@@ -29,6 +29,7 @@ struct AppState {
     schemas: Arc<SchemaManager>,
     restrict: bool,
     plugins: PluginManager,
+    list_page_size: usize,
 }
 
 pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
@@ -41,6 +42,7 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         schemas,
         restrict: config.restrict,
         plugins,
+        list_page_size: config.list_page_size,
     };
 
     let app = Router::new()
@@ -92,8 +94,22 @@ struct HealthResponse<'a> {
     status: &'a str,
 }
 
-async fn list_aggregates(State(state): State<AppState>) -> Result<Json<Vec<AggregateState>>> {
-    Ok(Json(state.store.aggregates()))
+#[derive(Deserialize, Default)]
+struct AggregatesQuery {
+    #[serde(default)]
+    skip: Option<usize>,
+    #[serde(default)]
+    take: Option<usize>,
+}
+
+async fn list_aggregates(
+    State(state): State<AppState>,
+    Query(params): Query<AggregatesQuery>,
+) -> Result<Json<Vec<AggregateState>>> {
+    let skip = params.skip.unwrap_or(0);
+    let take = params.take.or(Some(state.list_page_size));
+    let aggregates = state.store.aggregates_paginated(skip, take);
+    Ok(Json(aggregates))
 }
 
 async fn get_aggregate(

@@ -107,8 +107,8 @@ EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--
 
 ### Configuration
 
-- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>]`  
-  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`.
+- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>]`  
+  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. Use `--list-page-size` (default 10) to control pagination for aggregate listings.
 
 ### Tokens
 
@@ -136,8 +136,8 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 
 - `eventdbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE...`  
   Appends an event to the store (validated against the schema when restricted).
-- `eventdbx aggregate list`  
-  Lists aggregates with version, Merkle root, and archive status.
+- `eventdbx aggregate list [--skip <n>] [--take <n>]`  
+  Lists aggregates with version, Merkle root, and archive status; supports pagination via `--skip`/`--take`.
 - `eventdbx aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
 - `eventdbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
 - `eventdbx aggregate verify --aggregate <type> --aggregate-id <id>`
@@ -201,7 +201,7 @@ The server exposes a small HTTP API (served on port `7070` by default). All endp
 | Method & Path                                                               | Description                                                         |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | `GET /health`                                                               | Liveness probe (unauthenticated).                                   |
-| `GET /v1/aggregates`                                                        | Lists all aggregates.                                               |
+| `GET /v1/aggregates`                                                        | Lists aggregates; supports `skip`/`take` query parameters.          |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}`                        | Returns the current state for a specific aggregate.                 |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                 | Lists every event for an aggregate.                                 |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events/recent?take=<n>` | Returns the `n` most recent events (defaults to 10).                |

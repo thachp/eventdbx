@@ -21,6 +21,9 @@ pub struct ConfigArgs {
 
     #[arg(long, alias = "dek")]
     pub data_encryption_key: Option<String>,
+
+    #[arg(long)]
+    pub list_page_size: Option<usize>,
 }
 
 pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
@@ -33,6 +36,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         master_key,
         memory_threshold,
         data_encryption_key,
+        list_page_size,
     } = args;
 
     let master_key = normalize_secret(master_key);
@@ -45,6 +49,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         memory_threshold,
         data_encryption_key,
         restrict: None,
+        list_page_size,
     });
 
     if !was_initialized && !config.is_initialized() {

@@ -347,11 +347,16 @@ impl EventStore {
     }
 
     pub fn aggregates(&self) -> Vec<AggregateState> {
+        self.aggregates_paginated(0, None)
+    }
+
+    pub fn aggregates_paginated(&self, skip: usize, take: Option<usize>) -> Vec<AggregateState> {
         let prefix = meta_prefix();
         let iter = self
             .db
             .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
         let mut items = Vec::new();
+        let mut skipped = 0usize;
 
         for item in iter {
             let Ok((key, value)) = item else {
@@ -374,6 +379,11 @@ impl EventStore {
                 Err(_) => continue,
             };
 
+            if skipped < skip {
+                skipped += 1;
+                continue;
+            }
+
             items.push(AggregateState {
                 aggregate_type: meta.aggregate_type.clone(),
                 aggregate_id: meta.aggregate_id.clone(),
@@ -382,6 +392,12 @@ impl EventStore {
                 merkle_root: meta.merkle_root,
                 archived: meta.archived,
             });
+
+            if let Some(limit) = take {
+                if items.len() >= limit {
+                    break;
+                }
+            }
         }
 
         items

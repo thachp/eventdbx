@@ -17,7 +17,7 @@ pub enum AggregateCommands {
     /// Apply an event to an aggregate instance
     Apply(AggregateApplyArgs),
     /// List aggregates in the store
-    List,
+    List(AggregateListArgs),
     /// Retrieve the state of an aggregate
     Get(AggregateGetArgs),
     /// Replay events for an aggregate instance
@@ -125,12 +125,24 @@ pub struct KeyValue {
     pub value: String,
 }
 
+#[derive(Args)]
+pub struct AggregateListArgs {
+    /// Number of aggregates to skip
+    #[arg(long, default_value_t = 0)]
+    pub skip: usize,
+
+    /// Maximum number of aggregates to return
+    #[arg(long)]
+    pub take: Option<usize>,
+}
+
 pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     match command {
-        AggregateCommands::List => {
+        AggregateCommands::List(args) => {
             let store = EventStore::open_read_only(config.event_store_path())?;
-            for aggregate in store.aggregates() {
+            let take = args.take.or(Some(config.list_page_size));
+            for aggregate in store.aggregates_paginated(args.skip, take) {
                 println!(
                     "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
                     aggregate.aggregate_type,
