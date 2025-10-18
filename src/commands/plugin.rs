@@ -5,15 +5,19 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::Utc;
 use clap::{Args, Subcommand};
 use serde::Deserialize;
+use serde_json::json;
 use uuid::Uuid;
 
 use eventdbx::config::{
     CsvPluginConfig, HttpPluginConfig, JsonPluginConfig, LogPluginConfig, PluginConfig,
     PluginDefinition, PluginKind, TcpPluginConfig, load_or_default,
 };
-use eventdbx::plugin::establish_connection;
+use eventdbx::plugin::{establish_connection, instantiate_plugin};
+use eventdbx::store::{ActorClaims, AggregateState, EventMetadata, EventRecord};
+use tokio::{runtime::Handle, task::spawn_blocking};
 
 #[derive(Subcommand)]
 pub enum PluginCommands {
@@ -32,6 +36,9 @@ pub enum PluginCommands {
     /// Remove a configured plugin
     #[command(name = "remove")]
     Remove(PluginRemoveArgs),
+    /// Send a sample event to all enabled plugins
+    #[command(name = "test")]
+    Test,
     /// Show plugin retry queue statistics
     #[command(name = "queue")]
     Queue,
@@ -439,8 +446,11 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 .find(|definition| definition.name.as_deref() == Some(name))
                 .ok_or_else(|| anyhow!("no plugin named '{}' is configured", name))?;
 
-            establish_connection(plugin)
-                .with_context(|| format!("failed to establish connection for '{}'", name))?;
+            let connection_definition = plugin.clone();
+            run_blocking(move || {
+                establish_connection(&connection_definition).map_err(anyhow::Error::from)
+            })
+            .with_context(|| format!("failed to establish connection for '{}'", name))?;
 
             let mut changed = false;
             if !plugin.enabled {
@@ -499,6 +509,105 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
             config.ensure_data_dir()?;
             config.save_plugins(&plugins)?;
             println!("Plugin '{}' removed", name);
+        }
+        PluginCommands::Test => {
+            let enabled: Vec<PluginDefinition> = plugins
+                .iter()
+                .filter(|definition| definition.enabled)
+                .cloned()
+                .collect();
+
+            if enabled.is_empty() {
+                println!("(no plugins enabled)");
+                return Ok(());
+            }
+
+            let now = Utc::now();
+            let aggregate_type = "plugin-test".to_string();
+            let aggregate_id = format!("sample-{}", now.timestamp());
+
+            let mut state_values = BTreeMap::new();
+            state_values.insert("status".to_string(), "ok".to_string());
+            state_values.insert("tested_at".to_string(), now.to_rfc3339());
+            state_values.insert("plugin_count".to_string(), enabled.len().to_string());
+
+            let aggregate_state = AggregateState {
+                aggregate_type: aggregate_type.clone(),
+                aggregate_id: aggregate_id.clone(),
+                version: 1,
+                state: state_values.clone(),
+                merkle_root: "plugin-test-merkle".to_string(),
+                archived: false,
+            };
+
+            let record = EventRecord {
+                aggregate_type: aggregate_type.clone(),
+                aggregate_id: aggregate_id.clone(),
+                event_type: "plugin-test-event".to_string(),
+                payload: json!({
+                    "message": "Plugin connectivity check",
+                    "status": "ok",
+                    "tested_at": now.to_rfc3339(),
+                    "aggregate_state": state_values,
+                }),
+                metadata: EventMetadata {
+                    event_id: Uuid::new_v4(),
+                    created_at: now,
+                    issued_by: Some(ActorClaims {
+                        group: "system".to_string(),
+                        user: "plugin-test".to_string(),
+                    }),
+                },
+                version: 1,
+                hash: "plugin-test-hash".to_string(),
+                merkle_root: "plugin-test-merkle".to_string(),
+            };
+
+            let mut successes = 0;
+            let mut failures = 0;
+
+            for definition in enabled {
+                let label = match &definition.name {
+                    Some(name) => {
+                        format!("{} ({})", plugin_kind_name(definition.config.kind()), name)
+                    }
+                    None => plugin_kind_name(definition.config.kind()).to_string(),
+                };
+
+                let definition_clone = definition.clone();
+                let record_clone = record.clone();
+                let state_clone = aggregate_state.clone();
+
+                let result = run_blocking(move || {
+                    establish_connection(&definition_clone).map_err(anyhow::Error::from)?;
+                    let plugin = instantiate_plugin(&definition_clone);
+                    plugin
+                        .notify_event(&record_clone, &state_clone, None)
+                        .map_err(anyhow::Error::from)
+                });
+
+                match result {
+                    Ok(()) => {
+                        println!("{} - ok", label);
+                        successes += 1;
+                    }
+                    Err(err) => {
+                        println!("{} - FAILED ({})", label, err);
+                        failures += 1;
+                    }
+                }
+            }
+
+            println!(
+                "Tested {} plugin(s): {} succeeded, {} failed",
+                successes + failures,
+                successes,
+                failures
+            );
+
+            if failures > 0 {
+                return Err(anyhow!("plugin test failed for {} plugin(s)", failures));
+            }
         }
         PluginCommands::Map(args) => {
             config.set_column_type(&args.aggregate, &args.field, args.data_type.clone());
@@ -595,6 +704,19 @@ fn list_plugins(plugins: &[PluginDefinition]) {
                 None => println!("{} - {}", kind, status),
             }
         }
+    }
+}
+
+fn run_blocking<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    match Handle::try_current() {
+        Ok(handle) => handle
+            .block_on(spawn_blocking(f))
+            .map_err(|err| anyhow!(err))?,
+        Err(_) => f(),
     }
 }
 

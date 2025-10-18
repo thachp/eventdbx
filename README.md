@@ -160,6 +160,7 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `eventdbx plugin enable <label>`
 - `eventdbx plugin disable <label>`
 - `eventdbx plugin remove <label>`
+- `eventdbx plugin test`
 - `eventdbx plugin list`
 - `eventdbx plugin queue`
 

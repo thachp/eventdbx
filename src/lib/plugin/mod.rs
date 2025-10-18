@@ -48,23 +48,7 @@ impl PluginManager {
             if !definition.enabled {
                 continue;
             }
-            match &definition.config {
-                PluginConfig::Csv(settings) => {
-                    plugins.push(Box::new(CsvPlugin::new(settings.clone())));
-                }
-                PluginConfig::Tcp(settings) => {
-                    plugins.push(Box::new(TcpPlugin::new(settings.clone())));
-                }
-                PluginConfig::Http(settings) => {
-                    plugins.push(Box::new(HttpPlugin::new(settings.clone())));
-                }
-                PluginConfig::Json(settings) => {
-                    plugins.push(Box::new(JsonPlugin::new(settings.clone())));
-                }
-                PluginConfig::Log(settings) => {
-                    plugins.push(Box::new(LogPlugin::new(settings.clone())));
-                }
-            }
+            plugins.push(instantiate_plugin(&definition));
         }
 
         Ok(Self {
@@ -113,5 +97,15 @@ pub fn establish_connection(definition: &PluginDefinition) -> Result<()> {
             let plugin = LogPlugin::new(settings.clone());
             plugin.ensure_ready()
         }
+    }
+}
+
+pub fn instantiate_plugin(definition: &PluginDefinition) -> Box<dyn Plugin> {
+    match &definition.config {
+        PluginConfig::Csv(settings) => Box::new(CsvPlugin::new(settings.clone())),
+        PluginConfig::Tcp(settings) => Box::new(TcpPlugin::new(settings.clone())),
+        PluginConfig::Http(settings) => Box::new(HttpPlugin::new(settings.clone())),
+        PluginConfig::Json(settings) => Box::new(JsonPlugin::new(settings.clone())),
+        PluginConfig::Log(settings) => Box::new(LogPlugin::new(settings.clone())),
     }
 }
