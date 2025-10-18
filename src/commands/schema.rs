@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::{Args, Parser as ClapParser, Subcommand};
 
 use eventdbx::{
     config::load_or_default,
@@ -86,6 +86,33 @@ pub struct SchemaRemoveEventArgs {
     pub event: String,
 }
 
+#[derive(ClapParser, Default, Debug)]
+struct SchemaInlineArgs {
+    /// Event name to target when adding/removing fields
+    #[arg(long)]
+    event: Option<String>,
+
+    /// Add fields to the event definition (comma separated)
+    #[arg(long, value_delimiter = ',', default_value = "")]
+    add: Vec<String>,
+
+    /// Remove fields from the event definition (comma separated)
+    #[arg(long, value_delimiter = ',', default_value = "")]
+    remove: Vec<String>,
+
+    /// Lock or unlock the aggregate (or specific field when --field is set)
+    #[arg(long)]
+    lock: Option<bool>,
+
+    /// Field name to lock/unlock
+    #[arg(long)]
+    field: Option<String>,
+
+    /// Snapshot threshold to set
+    #[arg(long)]
+    snapshot_threshold: Option<u64>,
+}
+
 pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let manager = SchemaManager::load(config.schema_store_path())?;
@@ -133,59 +160,7 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
             Err(err) => return Err(err.into()),
         },
         SchemaCommands::Alter(args) => {
-            let mut update = SchemaUpdate::default();
-
-            if let Some(value) = args.snapshot_threshold {
-                update.snapshot_threshold = Some(Some(value));
-            }
-
-            if args.event.is_none() && args.field.is_none() {
-                if let Some(lock) = args.lock {
-                    update.locked = Some(lock);
-                }
-            }
-
-            if let Some(field) = args.field {
-                if let Some(lock) = args.lock {
-                    update.field_lock = Some((field, lock));
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "--lock must be provided when using --field"
-                    ));
-                }
-            }
-
-            if let Some(event) = args.event {
-                if !args.add.is_empty() {
-                    update
-                        .event_add_fields
-                        .entry(event.clone())
-                        .or_default()
-                        .extend(args.add.clone());
-                }
-                if !args.remove.is_empty() {
-                    update
-                        .event_remove_fields
-                        .insert(event.clone(), args.remove.clone());
-                }
-                if args.add.is_empty() && args.remove.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "provide --add or --remove when specifying an event"
-                    ));
-                }
-            } else if (!args.add.is_empty() || !args.remove.is_empty()) && args.event.is_none() {
-                return Err(anyhow::anyhow!(
-                    "--event must be provided when adding or removing fields"
-                ));
-            }
-
-            let schema = manager.update(&args.aggregate, update)?;
-            println!(
-                "schema={} updated_at={} version_events={}",
-                schema.aggregate,
-                schema.updated_at.to_rfc3339(),
-                schema.events.len()
-            );
+            apply_schema_update(&manager, args)?;
         }
         SchemaCommands::Remove(args) => {
             let schema = manager.remove_event(&args.aggregate, &args.event)?;
@@ -208,6 +183,11 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
             }
         }
         SchemaCommands::External(args) => match args.as_slice() {
+            [] => {
+                return Err(anyhow::anyhow!(
+                    "missing aggregate name; try `eventdbx schema <aggregate>`"
+                ));
+            }
             [aggregate] => {
                 let schema = manager.get(aggregate)?;
                 println!("{}", serde_json::to_string_pretty(&schema)?);
@@ -216,13 +196,80 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                 let schema = manager.get(aggregate)?;
                 println!("{}", serde_json::to_string_pretty(&schema)?);
             }
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "unknown schema command; try `eventdbx schema list` or `eventdbx schema <aggregate>`"
-                ));
+            [aggregate, rest @ ..] => {
+                let mut argv = vec!["schema-inline".to_string()];
+                argv.extend(rest.iter().cloned());
+                let inline = SchemaInlineArgs::try_parse_from(argv.iter().map(String::as_str))?;
+                let alter_args = SchemaAlterArgs {
+                    aggregate: aggregate.clone(),
+                    event: inline.event,
+                    snapshot_threshold: inline.snapshot_threshold,
+                    lock: inline.lock,
+                    field: inline.field,
+                    add: inline.add,
+                    remove: inline.remove,
+                };
+                apply_schema_update(&manager, alter_args)?;
             }
         },
     }
 
+    Ok(())
+}
+
+fn apply_schema_update(manager: &SchemaManager, args: SchemaAlterArgs) -> Result<()> {
+    let mut update = SchemaUpdate::default();
+
+    if let Some(value) = args.snapshot_threshold {
+        update.snapshot_threshold = Some(Some(value));
+    }
+
+    if args.event.is_none() && args.field.is_none() {
+        if let Some(lock) = args.lock {
+            update.locked = Some(lock);
+        }
+    }
+
+    if let Some(field) = args.field.clone() {
+        if let Some(lock) = args.lock {
+            update.field_lock = Some((field, lock));
+        } else {
+            return Err(anyhow::anyhow!(
+                "--lock must be provided when using --field"
+            ));
+        }
+    }
+
+    if let Some(event) = args.event.clone() {
+        if !args.add.is_empty() {
+            update
+                .event_add_fields
+                .entry(event.clone())
+                .or_default()
+                .extend(args.add.clone());
+        }
+        if !args.remove.is_empty() {
+            update
+                .event_remove_fields
+                .insert(event.clone(), args.remove.clone());
+        }
+        if args.add.is_empty() && args.remove.is_empty() {
+            return Err(anyhow::anyhow!(
+                "provide --add or --remove when specifying an event"
+            ));
+        }
+    } else if (!args.add.is_empty() || !args.remove.is_empty()) && args.event.is_none() {
+        return Err(anyhow::anyhow!(
+            "--event must be provided when adding or removing fields"
+        ));
+    }
+
+    let schema = manager.update(&args.aggregate, update)?;
+    println!(
+        "schema={} updated_at={} version_events={}",
+        schema.aggregate,
+        schema.updated_at.to_rfc3339(),
+        schema.events.len()
+    );
     Ok(())
 }

@@ -128,7 +128,6 @@ EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--
 - `eventdbx schema alter <aggregate> [--event <name>] [--snapshot-threshold <u64>] [--lock <true|false>] [--field <name>] [--add <field1,field2,...>] [--remove <field1,field2,...>]`
 - `eventdbx schema remove --aggregate <name> --event <name>`
 - `eventdbx schema list`
-- `eventdbx schema show --aggregate <name>`
 
 Schemas are stored on disk; when the server runs with restriction enabled, incoming events must satisfy the recorded schema.
 
