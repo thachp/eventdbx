@@ -13,7 +13,7 @@ keywords = [
   "cqrs",
   "api"
 ]
-categories = "database"
+categories = ["database"]
 
 [lib]
 path = "src/lib/mod.rs"
