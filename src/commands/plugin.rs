@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand, ValueEnum};
+use serde::Deserialize;
 
 use eventdbx::config::{
     CsvPluginConfig, HttpPluginConfig, JsonPluginConfig, LogPluginConfig, PluginConfig,
@@ -35,6 +36,9 @@ pub enum PluginCommands {
     /// Configure per-plugin field mappings
     #[command(name = "map")]
     Map(PluginMapArgs),
+    /// Show plugin retry queue statistics
+    #[command(name = "queue")]
+    Queue,
 }
 
 #[derive(Args)]
@@ -185,6 +189,9 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
     let (mut config, path) = load_or_default(config_path)?;
 
     match command {
+        PluginCommands::Queue => {
+            print_plugin_queue_status(config.plugin_queue_path())?;
+        }
         PluginCommands::PostgresConfigure(args) => {
             let existing_mapping = config
                 .plugins
@@ -381,6 +388,74 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
     }
 
     Ok(())
+}
+
+fn print_plugin_queue_status(path: PathBuf) -> Result<()> {
+    if !path.exists() {
+        println!("pending=0 dead=0");
+        return Ok(());
+    }
+
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read queue file at {}", path.display()))?;
+
+    if contents.trim().is_empty() {
+        println!("pending=0 dead=0");
+        return Ok(());
+    }
+
+    let status: PluginQueueStatus = serde_json::from_str(&contents)
+        .with_context(|| "failed to decode queue status JSON")?;
+
+    println!("pending={} dead={}", status.pending, status.dead);
+
+    if !status.pending_events.is_empty() {
+        println!("\nPending events:");
+        for event in &status.pending_events {
+            println!(
+                "  {} aggregate={}::{} event={} attempts={}",
+                event.event_id,
+                event.aggregate_type,
+                event.aggregate_id,
+                event.event_type,
+                event.attempts
+            );
+        }
+    }
+
+    if !status.dead_events.is_empty() {
+        println!("\nDead events:");
+        for event in &status.dead_events {
+            println!(
+                "  {} aggregate={}::{} event={} attempts={} (no further retries)",
+                event.event_id,
+                event.aggregate_type,
+                event.aggregate_id,
+                event.event_type,
+                event.attempts
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct PluginQueueStatus {
+    pending: usize,
+    dead: usize,
+    #[serde(default)]
+    pending_events: Vec<PluginQueueEvent>,
+    #[serde(default)]
+    dead_events: Vec<PluginQueueEvent>,
+}
+
+#[derive(Deserialize)]
+struct PluginQueueEvent {
+    event_id: String,
+    aggregate_type: String,
+    aggregate_id: String,
+    event_type: String,
+    attempts: u32,
 }
 fn parse_key_value(raw: &str) -> Result<KeyValue, String> {
     let mut parts = raw.splitn(2, '=');

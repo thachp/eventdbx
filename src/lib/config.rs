@@ -35,6 +35,8 @@ pub struct Config {
     pub list_page_size: usize,
     #[serde(default = "default_page_limit")]
     pub page_limit: usize,
+    #[serde(default = "default_plugin_max_attempts")]
+    pub plugin_max_attempts: u32,
 }
 
 impl Default for Config {
@@ -53,6 +55,7 @@ impl Default for Config {
             column_types: BTreeMap::new(),
             list_page_size: default_list_page_size(),
             page_limit: default_page_limit(),
+            plugin_max_attempts: default_plugin_max_attempts(),
         }
     }
 }
@@ -67,6 +70,7 @@ pub struct ConfigUpdate {
     pub restrict: Option<bool>,
     pub list_page_size: Option<usize>,
     pub page_limit: Option<usize>,
+    pub plugin_max_attempts: Option<u32>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -131,6 +135,9 @@ impl Config {
         if let Some(page_limit) = update.page_limit {
             self.page_limit = page_limit;
         }
+        if let Some(max_attempts) = update.plugin_max_attempts {
+            self.plugin_max_attempts = max_attempts.max(1);
+        }
         self.updated_at = Utc::now();
     }
 
@@ -166,6 +173,10 @@ impl Config {
 
     pub fn staging_path(&self) -> PathBuf {
         self.data_dir.join("staged_events.json")
+    }
+
+    pub fn plugin_queue_path(&self) -> PathBuf {
+        self.data_dir.join("plugin_queue.json")
     }
 
     pub fn pid_file_path(&self) -> PathBuf {
@@ -214,6 +225,10 @@ fn default_list_page_size() -> usize {
 
 fn default_page_limit() -> usize {
     1000
+}
+
+fn default_plugin_max_attempts() -> u32 {
+    10
 }
 
 fn deserialize_restrict<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>

@@ -27,6 +27,9 @@ pub struct ConfigArgs {
 
     #[arg(long = "page-limit", alias = "event-page-limit")]
     pub page_limit: Option<usize>,
+
+    #[arg(long = "plugin-max-attempts")]
+    pub plugin_max_attempts: Option<u32>,
 }
 
 pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
@@ -41,6 +44,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         data_encryption_key,
         list_page_size,
         page_limit,
+        plugin_max_attempts,
     } = args;
 
     let master_key = normalize_secret(master_key);
@@ -55,6 +59,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         restrict: None,
         list_page_size,
         page_limit,
+        plugin_max_attempts,
     });
 
     if !was_initialized && !config.is_initialized() {

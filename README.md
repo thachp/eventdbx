@@ -107,8 +107,8 @@ EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--
 
 ### Configuration
 
-- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>] [--page-limit <usize>]`  
-  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10) and `--page-limit` caps any requested page size across list and event endpoints (default 1000, alias `--event-page-limit`).
+- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>]`  
+  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000, alias `--event-page-limit`), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10).
 
 ### Tokens
 
@@ -159,8 +159,12 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `eventdbx plugin http --endpoint <url> [--header KEY=VALUE]... [--disable]`
 - `eventdbx plugin json --path <file> [--pretty] [--disable]`
 - `eventdbx plugin log --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
+- `eventdbx plugin queue`
 
 Plugins fire after every committed event to keep external systems in sync. Each plugin sends or records different data:
+
+Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications.
+Use `eventdbx plugin queue` to inspect pending/dead event IDs.
 
 - **Postgres**: Applies schema/base types to create/alter columns and upsert the aggregate row. Payload is the aggregate state at the time of the event.
 - **SQLite**: Mirrors state into a local SQLite file with the same column set as Postgres.
@@ -235,6 +239,7 @@ curl \
 curl \
   -H "Authorization: Bearer TOKEN" \
   "http://localhost:7070/v1/aggregates/patient/p-001/events?skip=0&take=10"
+
 
 # Health check
 curl http://localhost:7070/health
