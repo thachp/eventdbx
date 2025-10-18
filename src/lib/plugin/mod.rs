@@ -10,8 +10,8 @@ use crate::{
 };
 
 mod csv;
-mod util;
 mod postgres;
+mod util;
 use csv::CsvPlugin;
 use postgres::PostgresPlugin;
 mod tcp;

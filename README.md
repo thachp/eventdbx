@@ -164,13 +164,14 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `eventdbx plugin test`
 - `eventdbx plugin list`
 - `eventdbx plugin queue`
+- `eventdbx plugin replay <plugin-name> <aggregate> [<aggregate_id>]`
 
 Plugins fire after every committed event to keep external systems in sync. Each plugin sends or records different data:
 
 Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications.
 Use `eventdbx plugin queue` to inspect pending/dead event IDs.
 
-Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instance requires a unique `--name` so you can update, enable, disable, or remove it later. `plugin enable` validates connectivity (creating directories, touching files, or checking network access) before marking the plugin active. Remove a plugin only after disabling it with `plugin disable <name>`.
+Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instance requires a unique `--name` so you can update, enable, disable, remove, or replay it later. `plugin enable` validates connectivity (creating directories, touching files, or checking network access) before marking the plugin active. Remove a plugin only after disabling it with `plugin disable <name>`. `plugin replay` resends stored events for a single aggregate instance—or every instance of a type—through the selected plugin.
 
 - **Postgres**: Upserts aggregate state into a Postgres table, expanding columns based on schema mappings or `plugin map --plugin postgres` overrides.
 - **CSV**: Appends state snapshots into `<aggregate>.csv`, expanding columns as new fields appear.

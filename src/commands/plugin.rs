@@ -17,8 +17,14 @@ use eventdbx::config::{
     PluginDefinition, PluginKind, PostgresColumnConfig, PostgresPluginConfig, TcpPluginConfig,
     load_or_default,
 };
-use eventdbx::plugin::{establish_connection, instantiate_plugin, ColumnTypes};
-use eventdbx::store::{ActorClaims, AggregateState, EventMetadata, EventRecord};
+use eventdbx::plugin::{ColumnTypes, Plugin, establish_connection, instantiate_plugin};
+use eventdbx::store::{
+    ActorClaims, AggregateState, EventMetadata, EventRecord, EventStore, payload_to_map,
+};
+use eventdbx::{
+    error::EventError,
+    schema::{AggregateSchema, SchemaManager},
+};
 use std::any::Any;
 use std::thread;
 
@@ -41,6 +47,9 @@ pub enum PluginCommands {
     /// Remove a configured plugin
     #[command(name = "remove")]
     Remove(PluginRemoveArgs),
+    /// Replay stored events through a plugin
+    #[command(name = "replay")]
+    Replay(PluginReplayArgs),
     /// Send a sample event to all enabled plugins
     #[command(name = "test")]
     Test,
@@ -255,6 +264,18 @@ pub struct PluginRemoveArgs {
     pub name: String,
 }
 
+#[derive(Args)]
+pub struct PluginReplayArgs {
+    /// Plugin name or type to target
+    pub plugin: String,
+
+    /// Aggregate type to replay
+    pub aggregate: String,
+
+    /// Specific aggregate instance (omit to replay all instances)
+    pub aggregate_id: Option<String>,
+}
+
 pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<()> {
     let (mut config, path) = load_or_default(config_path)?;
 
@@ -298,11 +319,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
         PluginCommands::Config(config_command) => match config_command {
             PluginConfigureCommands::Postgres(args) => {
                 let label = display_label(args.name.as_deref().unwrap_or("default"));
-                match find_plugin_mut(
-                    &mut plugins,
-                    PluginKind::Postgres,
-                    args.name.as_deref(),
-                )? {
+                match find_plugin_mut(&mut plugins, PluginKind::Postgres, args.name.as_deref())? {
                     Some(plugin) => {
                         let field_mappings = match &plugin.config {
                             PluginConfig::Postgres(settings) => settings.field_mappings.clone(),
@@ -424,29 +441,29 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 }
                 let name_owned = name.to_string();
                 let label = display_label(name);
-                    match find_plugin_mut(&mut plugins, PluginKind::Http, Some(name))? {
-                        Some(plugin) => {
-                            plugin.enabled = !args.disable;
-                            plugin.name = Some(name_owned.clone());
-                            plugin.config = PluginConfig::Http(HttpPluginConfig {
+                match find_plugin_mut(&mut plugins, PluginKind::Http, Some(name))? {
+                    Some(plugin) => {
+                        plugin.enabled = !args.disable;
+                        plugin.name = Some(name_owned.clone());
+                        plugin.config = PluginConfig::Http(HttpPluginConfig {
+                            endpoint: args.endpoint,
+                            headers,
+                            https: args.https,
+                        });
+                    }
+                    None => {
+                        ensure_unique_plugin_name(&plugins, name)?;
+                        plugins.push(PluginDefinition {
+                            enabled: !args.disable,
+                            name: Some(name_owned.clone()),
+                            config: PluginConfig::Http(HttpPluginConfig {
                                 endpoint: args.endpoint,
                                 headers,
                                 https: args.https,
-                            });
-                        }
-                        None => {
-                            ensure_unique_plugin_name(&plugins, name)?;
-                            plugins.push(PluginDefinition {
-                                enabled: !args.disable,
-                                name: Some(name_owned.clone()),
-                                config: PluginConfig::Http(HttpPluginConfig {
-                                    endpoint: args.endpoint,
-                                    headers,
-                                    https: args.https,
-                                }),
-                            });
-                        }
+                            }),
+                        });
                     }
+                }
                 config.save_plugins(&plugins)?;
                 println!(
                     "HTTP plugin '{}' {}",
@@ -612,6 +629,14 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
             config.save_plugins(&plugins)?;
             println!("Plugin '{}' removed", name);
         }
+        PluginCommands::Replay(args) => {
+            replay(
+                Some(path.clone()),
+                args.plugin,
+                args.aggregate,
+                args.aggregate_id,
+            )?;
+        }
         PluginCommands::Test => {
             let enabled: Vec<PluginDefinition> = plugins
                 .iter()
@@ -755,9 +780,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                     }
                 }
                 PluginKind::Csv => {
-                    return Err(anyhow!(
-                        "field mapping is not supported for the CSV plugin"
-                    ));
+                    return Err(anyhow!("field mapping is not supported for the CSV plugin"));
                 }
                 PluginKind::Tcp | PluginKind::Http | PluginKind::Json | PluginKind::Log => {
                     return Err(anyhow!(
@@ -765,9 +788,116 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                     ));
                 }
             },
-        }
+        },
     }
 
+    Ok(())
+}
+
+pub fn replay(
+    config_path: Option<PathBuf>,
+    plugin_name: String,
+    aggregate: String,
+    aggregate_id: Option<String>,
+) -> Result<()> {
+    run_blocking(move || replay_blocking(config_path, plugin_name, aggregate, aggregate_id))
+}
+
+fn replay_blocking(
+    config_path: Option<PathBuf>,
+    plugin_name: String,
+    aggregate: String,
+    aggregate_id: Option<String>,
+) -> Result<()> {
+    let (config, _) = load_or_default(config_path)?;
+    let store = EventStore::open(config.event_store_path())?;
+    let schema_manager = SchemaManager::load(config.schema_store_path())?;
+
+    let plugin_defs = config.load_plugins()?;
+
+    let target_plugin = plugin_defs
+        .iter()
+        .find(|definition| {
+            definition.enabled
+                && match &definition.name {
+                    Some(name) => name == &plugin_name,
+                    None => plugin_name == plugin_kind_name(definition.config.kind()),
+                }
+        })
+        .cloned()
+        .ok_or_else(|| anyhow!("no enabled plugin named '{}' is configured", plugin_name))?;
+
+    let base_types: Arc<ColumnTypes> = Arc::new(config.column_types.clone());
+    let plugin_instance = instantiate_plugin(&target_plugin, Arc::clone(&base_types));
+    let plugin = plugin_instance.as_ref();
+    let schema = schema_manager.get(&aggregate).ok();
+
+    if let Some(aggregate_id) = aggregate_id {
+        replay_single(&store, plugin, &aggregate, &aggregate_id, schema.as_ref())?
+    } else {
+        replay_all(&store, plugin, &aggregate, schema.as_ref())?;
+    }
+
+    Ok(())
+}
+
+fn replay_single(
+    store: &EventStore,
+    plugin: &dyn Plugin,
+    aggregate: &str,
+    aggregate_id: &str,
+    schema: Option<&AggregateSchema>,
+) -> Result<()> {
+    let events = match store.list_events(aggregate, aggregate_id) {
+        Ok(events) => events,
+        Err(EventError::AggregateNotFound) => {
+            println!("no events found for {}::{}", aggregate, aggregate_id);
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
+    if events.is_empty() {
+        println!("no events found for {}::{}", aggregate, aggregate_id);
+        return Ok(());
+    }
+
+    let mut state_map = BTreeMap::new();
+    for event in events {
+        for (key, value) in payload_to_map(&event.payload) {
+            state_map.insert(key, value);
+        }
+        let state = AggregateState {
+            aggregate_type: aggregate.to_string(),
+            aggregate_id: aggregate_id.to_string(),
+            version: event.version,
+            state: state_map.clone(),
+            merkle_root: event.merkle_root.clone(),
+            archived: false,
+        };
+        plugin.notify_event(&event, &state, schema)?;
+    }
+
+    println!("replayed {}::{}", aggregate, aggregate_id);
+    Ok(())
+}
+
+fn replay_all(
+    store: &EventStore,
+    plugin: &dyn Plugin,
+    aggregate: &str,
+    schema: Option<&AggregateSchema>,
+) -> Result<()> {
+    let mut total = 0;
+    let aggregates = store.list_aggregate_ids(aggregate)?;
+    for aggregate_id in aggregates {
+        replay_single(store, plugin, aggregate, &aggregate_id, schema)?;
+        total += 1;
+    }
+    if total == 0 {
+        println!("no aggregates found for '{}'", aggregate);
+    } else {
+        println!("replayed {} aggregate(s) for '{}'", total, aggregate);
+    }
     Ok(())
 }
 
@@ -861,9 +991,12 @@ where
     T: Send + 'static,
 {
     match Handle::try_current() {
-        Ok(_) => thread::spawn(move || f())
-            .join()
-            .map_err(|err| panic_into_anyhow(err))?,
+        Ok(_) => {
+            let result = thread::spawn(move || f())
+                .join()
+                .map_err(|err| panic_into_anyhow(err))?;
+            result
+        }
         Err(_) => f(),
     }
 }

@@ -425,6 +425,31 @@ impl EventStore {
         Ok(events)
     }
 
+    pub fn list_aggregate_ids(&self, aggregate_type: &str) -> Result<Vec<String>> {
+        let mut prefix = key_with_segments(&[PREFIX_META, aggregate_type]);
+        prefix.push(SEP);
+
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+
+        let mut ids = Vec::new();
+        for item in iter {
+            let (key, _) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            let remainder = &key[prefix.len()..];
+            if remainder.is_empty() {
+                continue;
+            }
+            let id = std::str::from_utf8(remainder)
+                .map_err(|err| EventError::Storage(err.to_string()))?;
+            ids.push(id.to_string());
+        }
+        Ok(ids)
+    }
+
     pub fn verify(&self, aggregate_type: &str, aggregate_id: &str) -> Result<String> {
         let meta = self
             .load_meta(aggregate_type, aggregate_id)?
