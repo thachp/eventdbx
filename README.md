@@ -107,8 +107,8 @@ EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--
 
 ### Configuration
 
-- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>]`  
-  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. Use `--list-page-size` (default 10) to control pagination for aggregate listings.
+- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>] [--page-limit <usize>]`  
+  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10) and `--page-limit` caps any requested page size across list and event endpoints (default 1000, alias `--event-page-limit`).
 
 ### Tokens
 
@@ -230,6 +230,11 @@ curl \
         }
       }' \
   http://localhost:7070/v1/events
+
+# Retrieve the first 10 events for an aggregate (supports `skip`/`take` up to `page_limit`)
+curl \
+  -H "Authorization: Bearer TOKEN" \
+  "http://localhost:7070/v1/aggregates/patient/p-001/events?skip=0&take=10"
 
 # Health check
 curl http://localhost:7070/health
