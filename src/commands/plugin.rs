@@ -1,14 +1,15 @@
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    path::PathBuf,
+    io::{self, Write},
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand, ValueEnum};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -53,12 +54,25 @@ pub enum PluginCommands {
     /// Send a sample event to all enabled plugins
     #[command(name = "test")]
     Test,
-    /// Show plugin retry queue statistics
+    /// Show or manage the plugin retry queue
     #[command(name = "queue")]
-    Queue,
+    Queue(PluginQueueArgs),
     /// List enabled plugins
     #[command(name = "list")]
     List,
+}
+
+#[derive(Args)]
+pub struct PluginQueueArgs {
+    #[command(subcommand)]
+    pub action: Option<PluginQueueAction>,
+}
+
+#[derive(Subcommand, Clone, Copy)]
+pub enum PluginQueueAction {
+    /// Remove all dead entries from the queue
+    #[command(name = "clear")]
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -313,8 +327,33 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
         PluginCommands::List => {
             list_plugins(&plugins);
         }
-        PluginCommands::Queue => {
-            print_plugin_queue_status(config.plugin_queue_path())?;
+        PluginCommands::Queue(args) => {
+            let queue_path = config.plugin_queue_path();
+            match args.action {
+                None => {
+                    print_plugin_queue_status(queue_path)?;
+                }
+                Some(PluginQueueAction::Clear) => {
+                    let status = load_plugin_queue_status(&queue_path)?;
+                    let dead_count = status
+                        .as_ref()
+                        .map(|status| status.dead_events.len())
+                        .unwrap_or(0);
+
+                    if dead_count == 0 {
+                        println!("no dead plugin events to clear");
+                        return Ok(());
+                    }
+
+                    if !confirm_clear_dead(dead_count)? {
+                        println!("clear cancelled");
+                        return Ok(());
+                    }
+
+                    let cleared = clear_dead_queue(queue_path)?;
+                    println!("cleared {} dead event(s) from the plugin queue", cleared);
+                }
+            }
         }
         PluginCommands::Config(config_command) => match config_command {
             PluginConfigureCommands::Postgres(args) => {
@@ -902,51 +941,97 @@ fn replay_all(
 }
 
 fn print_plugin_queue_status(path: PathBuf) -> Result<()> {
+    match load_plugin_queue_status(&path)? {
+        Some(status) => {
+            println!("pending={} dead={}", status.pending, status.dead);
+
+            if !status.pending_events.is_empty() {
+                println!("\nPending events:");
+                for event in &status.pending_events {
+                    println!(
+                        "  {} aggregate={}::{} event={} attempts={}",
+                        event.event_id,
+                        event.aggregate_type,
+                        event.aggregate_id,
+                        event.event_type,
+                        event.attempts
+                    );
+                }
+            }
+
+            if !status.dead_events.is_empty() {
+                println!("\nDead events:");
+                for event in &status.dead_events {
+                    println!(
+                        "  {} aggregate={}::{} event={} attempts={} (no further retries)",
+                        event.event_id,
+                        event.aggregate_type,
+                        event.aggregate_id,
+                        event.event_type,
+                        event.attempts
+                    );
+                }
+            }
+        }
+        None => {
+            println!("pending=0 dead=0");
+        }
+    }
+    Ok(())
+}
+
+fn clear_dead_queue(path: PathBuf) -> Result<usize> {
+    let Some(mut status) = load_plugin_queue_status(&path)? else {
+        return Ok(0);
+    };
+
+    let cleared = status.dead_events.len();
+    if cleared == 0 && status.dead == 0 {
+        return Ok(0);
+    }
+
+    status.dead = 0;
+    status.dead_events.clear();
+    write_plugin_queue_status(&path, &status)?;
+    Ok(cleared)
+}
+
+fn confirm_clear_dead(dead_count: usize) -> Result<bool> {
+    print!(
+        "This will remove {} dead plugin event(s). Type 'clear' to confirm: ",
+        dead_count
+    );
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .with_context(|| "failed to read confirmation input")?;
+    Ok(input.trim().eq_ignore_ascii_case("clear"))
+}
+
+fn load_plugin_queue_status(path: &Path) -> Result<Option<PluginQueueStatus>> {
     if !path.exists() {
-        println!("pending=0 dead=0");
-        return Ok(());
+        return Ok(None);
     }
-
-    let contents = fs::read_to_string(&path)
+    let contents = fs::read_to_string(path)
         .with_context(|| format!("failed to read queue file at {}", path.display()))?;
-
     if contents.trim().is_empty() {
-        println!("pending=0 dead=0");
-        return Ok(());
+        return Ok(Some(PluginQueueStatus::default()));
     }
-
-    let status: PluginQueueStatus =
+    let status =
         serde_json::from_str(&contents).with_context(|| "failed to decode queue status JSON")?;
+    Ok(Some(status))
+}
 
-    println!("pending={} dead={}", status.pending, status.dead);
-
-    if !status.pending_events.is_empty() {
-        println!("\nPending events:");
-        for event in &status.pending_events {
-            println!(
-                "  {} aggregate={}::{} event={} attempts={}",
-                event.event_id,
-                event.aggregate_type,
-                event.aggregate_id,
-                event.event_type,
-                event.attempts
-            );
+fn write_plugin_queue_status(path: &Path, status: &PluginQueueStatus) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
         }
     }
-
-    if !status.dead_events.is_empty() {
-        println!("\nDead events:");
-        for event in &status.dead_events {
-            println!(
-                "  {} aggregate={}::{} event={} attempts={} (no further retries)",
-                event.event_id,
-                event.aggregate_type,
-                event.aggregate_id,
-                event.event_type,
-                event.attempts
-            );
-        }
-    }
+    let payload = serde_json::to_string_pretty(status)?;
+    fs::write(path, payload)?;
     Ok(())
 }
 
@@ -1011,7 +1096,7 @@ fn panic_into_anyhow(err: Box<dyn Any + Send + 'static>) -> anyhow::Error {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct PluginQueueStatus {
     pending: usize,
     dead: usize,
@@ -1021,7 +1106,7 @@ struct PluginQueueStatus {
     dead_events: Vec<PluginQueueEvent>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct PluginQueueEvent {
     event_id: Uuid,
     aggregate_type: String,

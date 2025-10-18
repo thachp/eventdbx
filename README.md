@@ -164,7 +164,10 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `eventdbx plugin test`
 - `eventdbx plugin list`
 - `eventdbx plugin queue`
+- `eventdbx plugin queue clear`
 - `eventdbx plugin replay <plugin-name> <aggregate> [<aggregate_id>]`
+
+Clearing dead entries prompts for confirmation to avoid accidental removal.
 
 ### System
 
