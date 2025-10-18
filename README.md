@@ -133,10 +133,10 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 
 ### Aggregates
 
-- `eventdbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE...`  
-  Appends an event to the store (validated against the schema when restricted).
-- `eventdbx aggregate list [--skip <n>] [--take <n>]`  
-  Lists aggregates with version, Merkle root, and archive status; supports pagination via `--skip`/`--take`.
+- `eventdbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--stage]`  
+  Appends an event immediately—use `--stage` to queue it for a later commit.
+- `eventdbx aggregate list [--skip <n>] [--take <n>] [--stage]`  
+  Lists aggregates with version, Merkle root, and archive status; pass `--stage` to display queued events instead.
 - `eventdbx aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
 - `eventdbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
 - `eventdbx aggregate verify --aggregate <type> --aggregate-id <id>`
@@ -145,31 +145,9 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 - `eventdbx aggregate restore --aggregate <type> --aggregate-id <id> [--comment <text>]`
 - `eventdbx aggregate remove --aggregate <type> --aggregate-id <id>`    Removes an aggregate that has no events (version still 0).
 - `eventdbx aggregate commit`  
-  Reads staged events from `stdin` and commits them atomically (see below).
+  Flushes all staged events in a single atomic transaction.
 
-Batch commits accept either a JSON array, a single JSON object, or newline-delimited JSON where each record has the fields `aggregate` (or `aggregate_type`), `aggregate_id`, `event` (or `event_type`), `payload`, and optional `issued_by { group, user }`. Example:
-
-```bash
-cat <<'EOF' | eventdbx aggregate commit
-[
-  {
-    "aggregate": "order",
-    "aggregate_id": "ord-42",
-    "event": "order-created",
-    "payload": { "status": "processing" },
-    "issued_by": { "group": "ops", "user": "maria" }
-  },
-  {
-    "aggregate_type": "order",
-    "aggregate_id": "ord-42",
-    "event_type": "order-updated",
-    "payload": { "status": "shipped", "tracking": "abc123" }
-  }
-]
-EOF
-```
-
-In restricted mode each staged event is validated against the configured schema before the transaction is committed. All events are written in a single RocksDB batch, ensuring either every staged record is appended or none are.
+Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply --stage` to add entries to this queue, inspect them with `aggregate list --stage`, and persist the entire batch with `aggregate commit`. Events are validated against the active schema (when restriction is enabled) during both staging and commit. The commit operation writes every pending event in one RocksDB batch, guaranteeing all-or-nothing persistence.
 
 ### Plugins
 

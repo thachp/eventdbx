@@ -157,6 +157,10 @@ impl Config {
         self.data_dir.join("schemas.json")
     }
 
+    pub fn staging_path(&self) -> PathBuf {
+        self.data_dir.join("staged_events.json")
+    }
+
     pub fn pid_file_path(&self) -> PathBuf {
         self.data_dir.join("eventdbx.pid")
     }
