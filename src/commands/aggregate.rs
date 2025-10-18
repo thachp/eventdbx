@@ -16,6 +16,8 @@ use eventdbx::{
 pub enum AggregateCommands {
     /// Apply an event to an aggregate instance
     Apply(AggregateApplyArgs),
+    /// Create an empty aggregate (no events)
+    Create(AggregateIdentityArgs),
     /// List aggregates in the store
     List(AggregateListArgs),
     /// Retrieve the state of an aggregate
@@ -30,6 +32,8 @@ pub enum AggregateCommands {
     Archive(AggregateArchiveArgs),
     /// Restore an archived aggregate instance
     Restore(AggregateArchiveArgs),
+    /// Remove an aggregate that has no events
+    Remove(AggregateIdentityArgs),
     /// Commit staged events (no-op placeholder)
     Commit,
 }
@@ -136,9 +140,26 @@ pub struct AggregateListArgs {
     pub take: Option<usize>,
 }
 
+#[derive(Args)]
+pub struct AggregateIdentityArgs {
+    /// Aggregate type
+    pub aggregate: String,
+
+    /// Aggregate identifier
+    pub aggregate_id: String,
+}
+
 pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     match command {
+        AggregateCommands::Create(args) => {
+            let store = EventStore::open(config.event_store_path())?;
+            store.create_aggregate(&args.aggregate, &args.aggregate_id)?;
+            println!(
+                "aggregate_type={} aggregate_id={} created",
+                args.aggregate, args.aggregate_id
+            );
+        }
         AggregateCommands::List(args) => {
             let store = EventStore::open_read_only(config.event_store_path())?;
             let take = args.take.or(Some(config.list_page_size));
@@ -152,6 +173,14 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     aggregate.archived
                 );
             }
+        }
+        AggregateCommands::Remove(args) => {
+            let store = EventStore::open(config.event_store_path())?;
+            store.remove_aggregate(&args.aggregate, &args.aggregate_id)?;
+            println!(
+                "aggregate_type={} aggregate_id={} removed",
+                args.aggregate, args.aggregate_id
+            );
         }
         AggregateCommands::Get(args) => {
             let store = EventStore::open_read_only(config.event_store_path())?;

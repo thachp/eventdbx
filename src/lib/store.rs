@@ -416,6 +416,63 @@ impl EventStore {
         }
     }
 
+    pub fn create_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<()> {
+        self.ensure_writable()?;
+        let _guard = self.write_lock.lock();
+
+        if self.load_meta(aggregate_type, aggregate_id)?.is_some() {
+            return Err(EventError::Storage(format!(
+                "aggregate {}:{} already exists",
+                aggregate_type, aggregate_id
+            )));
+        }
+
+        let meta = AggregateMeta::new(aggregate_type.to_string(), aggregate_id.to_string());
+        let state: BTreeMap<String, String> = BTreeMap::new();
+
+        self.db
+            .put(
+                meta_key(aggregate_type, aggregate_id),
+                serde_json::to_vec(&meta)?,
+            )
+            .map_err(|err| EventError::Storage(err.to_string()))?;
+
+        self.db
+            .put(
+                state_key(aggregate_type, aggregate_id),
+                serde_json::to_vec(&state)?,
+            )
+            .map_err(|err| EventError::Storage(err.to_string()))?;
+
+        Ok(())
+    }
+
+    pub fn remove_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<()> {
+        self.ensure_writable()?;
+        let _guard = self.write_lock.lock();
+
+        let Some(meta) = self.load_meta(aggregate_type, aggregate_id)? else {
+            return Err(EventError::AggregateNotFound);
+        };
+
+        if meta.version > 0 {
+            return Err(EventError::Storage(format!(
+                "aggregate {}:{} cannot be removed while events exist",
+                aggregate_type, aggregate_id
+            )));
+        }
+
+        self.db
+            .delete(meta_key(aggregate_type, aggregate_id))
+            .map_err(|err| EventError::Storage(err.to_string()))?;
+
+        self.db
+            .delete(state_key(aggregate_type, aggregate_id))
+            .map_err(|err| EventError::Storage(err.to_string()))?;
+
+        Ok(())
+    }
+
     fn load_state_map(
         &self,
         aggregate_type: &str,

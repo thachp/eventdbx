@@ -143,6 +143,7 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 - `eventdbx aggregate snapshot --aggregate <type> --aggregate-id <id> [--comment <text>]`
 - `eventdbx aggregate archive --aggregate <type> --aggregate-id <id> [--comment <text>]`
 - `eventdbx aggregate restore --aggregate <type> --aggregate-id <id> [--comment <text>]`
+- `eventdbx aggregate remove --aggregate <type> --aggregate-id <id>`    Removes an aggregate that has no events (version still 0).
 - `eventdbx aggregate commit`  
   Currently a no-op placeholder.
 
