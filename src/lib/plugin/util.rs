@@ -16,3 +16,7 @@ pub fn sanitize_identifier(input: &str) -> String {
         result
     }
 }
+
+pub fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}

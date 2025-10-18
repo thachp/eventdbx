@@ -25,8 +25,20 @@ impl HttpPlugin {
         Self { config, client }
     }
 
+    fn resolved_endpoint(&self) -> String {
+        let endpoint = self.config.endpoint.trim();
+        if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+            endpoint.to_string()
+        } else if self.config.https {
+            format!("https://{}", endpoint)
+        } else {
+            format!("http://{}", endpoint)
+        }
+    }
+
     pub(super) fn ensure_ready(&self) -> Result<()> {
-        let mut request = self.client.head(&self.config.endpoint);
+        let resolved = self.resolved_endpoint();
+        let mut request = self.client.head(&resolved);
         for (key, value) in &self.config.headers {
             request = request.header(key, value);
         }
@@ -48,7 +60,8 @@ impl Plugin for HttpPlugin {
         _state: &AggregateState,
         _schema: Option<&AggregateSchema>,
     ) -> Result<()> {
-        let mut request = self.client.post(&self.config.endpoint);
+        let resolved = self.resolved_endpoint();
+        let mut request = self.client.post(&resolved);
         for (key, value) in &self.config.headers {
             request = request.header(key, value);
         }

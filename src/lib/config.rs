@@ -282,6 +282,7 @@ pub struct PluginDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginConfig {
+    Postgres(PostgresPluginConfig),
     Csv(CsvPluginConfig),
     Tcp(TcpPluginConfig),
     Http(HttpPluginConfig),
@@ -292,6 +293,7 @@ pub enum PluginConfig {
 impl PluginConfig {
     pub fn kind(&self) -> PluginKind {
         match self {
+            PluginConfig::Postgres(_) => PluginKind::Postgres,
             PluginConfig::Csv(_) => PluginKind::Csv,
             PluginConfig::Tcp(_) => PluginKind::Tcp,
             PluginConfig::Http(_) => PluginKind::Http,
@@ -304,11 +306,24 @@ impl PluginConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
+    Postgres,
     Csv,
     Tcp,
     Http,
     Json,
     Log,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostgresPluginConfig {
+    pub connection_string: String,
+    #[serde(default)]
+    pub field_mappings: BTreeMap<String, BTreeMap<String, PostgresColumnConfig>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PostgresColumnConfig {
+    pub data_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +342,8 @@ pub struct HttpPluginConfig {
     pub endpoint: String,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub https: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
