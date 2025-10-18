@@ -145,7 +145,31 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 - `eventdbx aggregate restore --aggregate <type> --aggregate-id <id> [--comment <text>]`
 - `eventdbx aggregate remove --aggregate <type> --aggregate-id <id>`    Removes an aggregate that has no events (version still 0).
 - `eventdbx aggregate commit`  
-  Currently a no-op placeholder.
+  Reads staged events from `stdin` and commits them atomically (see below).
+
+Batch commits accept either a JSON array, a single JSON object, or newline-delimited JSON where each record has the fields `aggregate` (or `aggregate_type`), `aggregate_id`, `event` (or `event_type`), `payload`, and optional `issued_by { group, user }`. Example:
+
+```bash
+cat <<'EOF' | eventdbx aggregate commit
+[
+  {
+    "aggregate": "order",
+    "aggregate_id": "ord-42",
+    "event": "order-created",
+    "payload": { "status": "processing" },
+    "issued_by": { "group": "ops", "user": "maria" }
+  },
+  {
+    "aggregate_type": "order",
+    "aggregate_id": "ord-42",
+    "event_type": "order-updated",
+    "payload": { "status": "shipped", "tracking": "abc123" }
+  }
+]
+EOF
+```
+
+In restricted mode each staged event is validated against the configured schema before the transaction is committed. All events are written in a single RocksDB batch, ensuring either every staged record is appended or none are.
 
 ### Plugins
 

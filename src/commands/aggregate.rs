@@ -1,7 +1,12 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    io::{self, Read},
+    path::PathBuf,
+};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand};
+use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value};
 
 use eventdbx::{
@@ -9,7 +14,7 @@ use eventdbx::{
     merkle::compute_merkle_root,
     plugin::PluginManager,
     schema::SchemaManager,
-    store::{self, AppendEvent, EventStore, payload_to_map},
+    store::{self, ActorClaims, AppendEvent, EventStore, payload_to_map},
 };
 
 #[derive(Subcommand)]
@@ -34,7 +39,7 @@ pub enum AggregateCommands {
     Restore(AggregateArchiveArgs),
     /// Remove an aggregate that has no events
     Remove(AggregateIdentityArgs),
-    /// Commit staged events (no-op placeholder)
+    /// Commit staged events read from stdin (JSON array or NDJSON)
     Commit,
 }
 
@@ -326,7 +331,68 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             );
         }
         AggregateCommands::Commit => {
-            println!("all events are already committed");
+            let staged_events = read_staged_events_from_stdin()?;
+            if staged_events.is_empty() {
+                println!("no staged events provided on stdin");
+                return Ok(());
+            }
+
+            let schema_manager = SchemaManager::load(config.schema_store_path())?;
+            let store = EventStore::open(config.event_store_path())?;
+            let plugins = PluginManager::from_config(&config)?;
+            let mut tx = store.transaction()?;
+
+            for staged_event in staged_events {
+                if config.restrict {
+                    let payload_map = payload_to_map(&staged_event.payload);
+                    schema_manager.validate_event(
+                        &staged_event.aggregate,
+                        &staged_event.event,
+                        &payload_map,
+                    )?;
+                }
+
+                tx.append(AppendEvent {
+                    aggregate_type: staged_event.aggregate,
+                    aggregate_id: staged_event.aggregate_id,
+                    event_type: staged_event.event,
+                    payload: staged_event.payload,
+                    issued_by: staged_event.issued_by.map(Into::into),
+                })?;
+            }
+
+            let records = tx.commit()?;
+            if records.is_empty() {
+                println!("no events were committed");
+                return Ok(());
+            }
+
+            for record in &records {
+                println!("{}", serde_json::to_string_pretty(record)?);
+            }
+
+            if !plugins.is_empty() {
+                for record in &records {
+                    let schema = schema_manager.get(&record.aggregate_type).ok();
+                    match store.get_aggregate_state(&record.aggregate_type, &record.aggregate_id) {
+                        Ok(current_state) => {
+                            if let Err(err) =
+                                plugins.notify_event(record, &current_state, schema.as_ref())
+                            {
+                                eprintln!("plugin notification failed: {}", err);
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "plugin notification skipped (failed to load state): {}",
+                                err
+                            );
+                        }
+                    }
+                }
+            }
+
+            println!("committed {} event(s)", records.len());
         }
     }
 
@@ -383,4 +449,78 @@ fn state_at_version(
 
     let merkle_root = compute_merkle_root(&hashes);
     (last_version, state, merkle_root)
+}
+
+#[derive(Debug, Deserialize)]
+struct StagedEventInput {
+    #[serde(alias = "aggregate_type")]
+    aggregate: String,
+    aggregate_id: String,
+    #[serde(alias = "event_type")]
+    event: String,
+    #[serde(default = "default_event_payload")]
+    payload: Value,
+    #[serde(default)]
+    issued_by: Option<StagedIssuedBy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StagedIssuedBy {
+    group: String,
+    user: String,
+}
+
+impl From<StagedIssuedBy> for ActorClaims {
+    fn from(value: StagedIssuedBy) -> Self {
+        ActorClaims {
+            group: value.group,
+            user: value.user,
+        }
+    }
+}
+
+fn default_event_payload() -> Value {
+    Value::Null
+}
+
+fn read_staged_events_from_stdin() -> Result<Vec<StagedEventInput>> {
+    let mut buffer = String::new();
+    io::stdin().read_to_string(&mut buffer)?;
+    parse_staged_events(&buffer)
+}
+
+fn parse_staged_events(raw: &str) -> Result<Vec<StagedEventInput>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if let Ok(events) = serde_json::from_str::<Vec<StagedEventInput>>(trimmed) {
+        return Ok(events);
+    }
+
+    if let Ok(event) = serde_json::from_str::<StagedEventInput>(trimmed) {
+        return Ok(vec![event]);
+    }
+
+    parse_ndjson(trimmed)
+}
+
+fn parse_ndjson(input: &str) -> Result<Vec<StagedEventInput>> {
+    let mut events = Vec::new();
+    for (idx, line) in input.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let event: StagedEventInput = serde_json::from_str(line)
+            .map_err(|err| anyhow!("failed to parse staged event on line {}: {}", idx + 1, err))?;
+        events.push(event);
+    }
+
+    if events.is_empty() {
+        Err(anyhow!("no staged events found in input"))
+    } else {
+        Ok(events)
+    }
 }
