@@ -5,7 +5,15 @@ version = "1.4.3"
 edition = "2024"
 repository = "https://github.com/thachp/eventdbx"
 license = "MIT"
-categories = "database,immutable,event sourcing,api"
+keywords = [
+  "api",
+  "events",
+  "event-sourcing",
+  "event-store",
+  "cqrs",
+  "api"
+]
+categories = "database"
 
 [lib]
 path = "src/lib/mod.rs"
