@@ -80,7 +80,7 @@ You now have a working EventDBX instance with an initial aggregate. Explore the 
 
 ## Features
 
-- **String-Only Storage**: EventDBX adopts a string-only storage format, meaning all data, regardless of its original type (e.g., integers, dates), is stored as strings. This approach simplifies data handling and ensures uniformity across the database, which is particularly beneficial for data integrity and auditability.
+- **Flexible JSON payloads**: Events accept arbitrary JSON payloads; scalar values are normalized into strings for state tracking, while structured objects remain fully queryable.
 - **Immutable Data Structure**: Once data is entered into EventDBX, it becomes immutable, meaning it cannot be altered or deleted. This characteristic is crucial for applications where the accuracy and traceability of historical data are paramount, such as medical records, financial transactions, and supply chain management. Data can be archived, moving from short-term to long-term storage, but cannot be deleted.
 - **Event Sourcing and Replay**: EventDBX is built on the principle of event sourcing, storing all changes to the data as a sequence of events. This allows for the complete replay of events to reconstruct the database's state at any point in time, thereby enhancing data recovery and audit capabilities. Unlike traditional databases that execute update statements to modify data, this system is event-driven. Aggregate state changes are defined in the event object, allowing these events to be replayed at any time to reconstruct the aggregate's current state.
 - **Merkle Tree Integration**: Each aggregate in EventDBX is associated with a Merkle tree of events, enabling verification of data integrity. The Merkle tree structure ensures that any data tampering can be detected, offering an additional security layer against data corruption.
@@ -205,7 +205,8 @@ The server exposes a small HTTP API (served on port `7070` by default). All endp
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}`                        | Returns the current state for a specific aggregate.                 |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                 | Lists every event for an aggregate.                                 |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events/recent?take=<n>` | Returns the `n` most recent events (defaults to 10).                |
-| `POST /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                | Appends an event (payload must include `event_type` and `payload`). |
+| `POST /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                | Appends an event scoped to the path aggregate.                      |
+| `POST /v1/events`                                                           | Appends an event; aggregate identifiers are provided in the body.   |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/verify`                 | Computes and returns the Merkle root for integrity verification.    |
 | `GET /v1/schemas`                                                           | Lists all schema definitions.                                       |
 | `GET /v1/schemas/{aggregate}`                                               | Returns the schema for a specific aggregate.                        |
@@ -215,6 +216,22 @@ All authenticated requests must include `Authorization: Bearer <token>` with a t
 ### cURL examples
 
 ```bash
+# Post a JSON event (global endpoint)
+curl \
+  -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "aggregate_type": "patient",
+        "aggregate_id": "p-001",
+        "event_type": "patient-updated",
+        "payload": {
+          "status": "inactive",
+          "meta": {"source": "api"}
+        }
+      }' \
+  http://localhost:7070/v1/events
+
 # Health check
 curl http://localhost:7070/health
 

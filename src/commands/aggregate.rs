@@ -2,13 +2,14 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use serde_json::{Map as JsonMap, Value};
 
 use eventdbx::{
     config::load_or_default,
     merkle::compute_merkle_root,
     plugin::PluginManager,
     schema::SchemaManager,
-    store::{self, AppendEvent, EventStore},
+    store::{self, AppendEvent, EventStore, payload_to_map},
 };
 
 #[derive(Subcommand)]
@@ -188,7 +189,8 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             let payload = collect_payload(args.fields);
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
             if config.restrict {
-                schema_manager.validate_event(&args.aggregate, &args.event, &payload)?;
+                let map = payload_to_map(&payload);
+                schema_manager.validate_event(&args.aggregate, &args.event, &map)?;
             }
 
             let store = EventStore::open(config.event_store_path())?;
@@ -311,12 +313,12 @@ fn parse_key_value(raw: &str) -> Result<KeyValue, String> {
     })
 }
 
-fn collect_payload(fields: Vec<KeyValue>) -> BTreeMap<String, String> {
-    let mut payload = BTreeMap::new();
+fn collect_payload(fields: Vec<KeyValue>) -> Value {
+    let mut map = JsonMap::new();
     for kv in fields {
-        payload.insert(kv.key, kv.value);
+        map.insert(kv.key, Value::String(kv.value));
     }
-    payload
+    Value::Object(map)
 }
 
 fn state_at_version(
@@ -333,8 +335,8 @@ fn state_at_version(
         }
         last_version = event.version;
         hashes.push(event.hash.clone());
-        for (key, value) in &event.payload {
-            state.insert(key.clone(), value.clone());
+        for (key, value) in payload_to_map(&event.payload) {
+            state.insert(key, value);
         }
     }
 
