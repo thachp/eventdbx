@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use rocksdb::{DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
@@ -23,7 +24,7 @@ pub struct EventRecord {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub event_type: String,
-    pub payload: BTreeMap<String, String>,
+    pub payload: Value,
     pub metadata: EventMetadata,
     pub version: u64,
     pub hash: String,
@@ -57,7 +58,7 @@ pub struct AppendEvent {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub event_type: String,
-    pub payload: BTreeMap<String, String>,
+    pub payload: Value,
     pub issued_by: Option<ActorClaims>,
 }
 
@@ -163,19 +164,20 @@ impl EventStore {
         let version = meta.version + 1;
         let created_at = Utc::now();
         let event_id = Uuid::new_v4();
+        let payload_map = payload_to_map(&input.payload);
         let hash = hash_event(
             &input.aggregate_type,
             &input.aggregate_id,
             version,
             &input.event_type,
-            &input.payload,
+            &payload_map,
         );
 
         meta.event_hashes.push(hash.clone());
         meta.version = version;
         meta.merkle_root = compute_merkle_root(&meta.event_hashes);
 
-        for (key, value) in &input.payload {
+        for (key, value) in &payload_map {
             state.insert(key.clone(), value.clone());
         }
 
@@ -483,6 +485,30 @@ fn hash_event(
     hex::encode(hasher.finalize())
 }
 
+pub fn payload_to_map(value: &Value) -> BTreeMap<String, String> {
+    fn normalize(value: &Value) -> String {
+        match value {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            _ => value.to_string(),
+        }
+    }
+
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), normalize(v)))
+            .collect::<BTreeMap<_, _>>(),
+        other => {
+            let mut map = BTreeMap::new();
+            if !other.is_null() {
+                map.insert("_value".into(), normalize(other));
+            }
+            map
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,8 +531,7 @@ mod tests {
         {
             let store = EventStore::open(path.clone()).unwrap();
 
-            let mut payload = BTreeMap::new();
-            payload.insert("name".into(), "Alice".into());
+            let payload = serde_json::json!({ "name": "Alice" });
 
             let record = store
                 .append(AppendEvent {
@@ -537,8 +562,7 @@ mod tests {
         let path = dir.path().join("event_store");
         let store = EventStore::open(path).unwrap();
 
-        let mut payload = BTreeMap::new();
-        payload.insert("status".into(), "active".into());
+        let payload = serde_json::json!({ "status": "active" });
 
         store
             .append(AppendEvent {
@@ -566,7 +590,7 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-1".into(),
                 event_type: "order-updated".into(),
-                payload: BTreeMap::new(),
+                payload: serde_json::json!({}),
                 issued_by: None,
             })
             .unwrap_err();

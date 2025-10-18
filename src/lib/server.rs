@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -17,7 +18,7 @@ use super::{
     error::{EventError, Result},
     plugin::PluginManager,
     schema::{AggregateSchema, SchemaManager},
-    store::{AggregateState, AppendEvent, EventRecord, EventStore},
+    store::{self, AggregateState, AppendEvent, EventRecord, EventStore},
     token::{AccessKind, TokenManager},
 };
 
@@ -57,6 +58,7 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
             "/v1/aggregates/:aggregate_type/:aggregate_id/events/recent",
             get(list_recent_events),
         )
+        .route("/v1/events", post(append_event_global))
         .route(
             "/v1/aggregates/:aggregate_type/:aggregate_id/verify",
             get(verify_aggregate),
@@ -141,7 +143,7 @@ async fn list_recent_events(
 #[derive(Deserialize)]
 struct AppendEventRequest {
     event_type: String,
-    payload: BTreeMap<String, String>,
+    payload: Value,
 }
 
 async fn append_event(
@@ -153,10 +155,11 @@ async fn append_event(
     let token = extract_bearer_token(&headers).ok_or(EventError::Unauthorized)?;
     let claims = state.tokens.authorize(&token, AccessKind::Write)?.into();
 
+    let payload_map = store::payload_to_map(&request.payload);
     if state.restrict {
         state
             .schemas
-            .validate_event(&aggregate_type, &request.event_type, &request.payload)?;
+            .validate_event(&aggregate_type, &request.event_type, &payload_map)?;
     }
 
     let record = state.store.append(AppendEvent {
@@ -167,39 +170,43 @@ async fn append_event(
         issued_by: Some(claims),
     })?;
 
-    let plugins = state.plugins.clone();
-    if !plugins.is_empty() {
-        match state
-            .store
-            .get_aggregate_state(&record.aggregate_type, &record.aggregate_id)
-        {
-            Ok(current_state) => {
-                let schema = state.schemas.get(&record.aggregate_type).ok();
-                let record_clone = record.clone();
-                tokio::spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                        let schema_ref = schema.as_ref();
-                        if let Err(err) =
-                            plugins.notify_event(&record_clone, &current_state, schema_ref)
-                        {
-                            tracing::error!("plugin notification failed: {}", err);
-                        }
-                    })
-                    .await;
+    notify_plugins(&state, &record);
 
-                    if let Err(err) = result {
-                        tracing::error!("plugin task join error: {}", err);
-                    }
-                });
-            }
-            Err(err) => {
-                tracing::error!(
-                    "failed to load aggregate state for plugin notification: {}",
-                    err
-                );
-            }
-        }
+    Ok(Json(record))
+}
+
+#[derive(Deserialize)]
+struct AppendEventGlobalRequest {
+    aggregate_type: String,
+    aggregate_id: String,
+    event_type: String,
+    payload: Value,
+}
+
+async fn append_event_global(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AppendEventGlobalRequest>,
+) -> Result<Json<EventRecord>> {
+    let token = extract_bearer_token(&headers).ok_or(EventError::Unauthorized)?;
+    let claims = state.tokens.authorize(&token, AccessKind::Write)?.into();
+
+    let payload_map = store::payload_to_map(&request.payload);
+    if state.restrict {
+        state
+            .schemas
+            .validate_event(&request.aggregate_type, &request.event_type, &payload_map)?;
     }
+
+    let record = state.store.append(AppendEvent {
+        aggregate_type: request.aggregate_type,
+        aggregate_id: request.aggregate_id,
+        event_type: request.event_type,
+        payload: request.payload,
+        issued_by: Some(claims),
+    })?;
+
+    notify_plugins(&state, &record);
 
     Ok(Json(record))
 }
@@ -236,6 +243,44 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
         Some(token.trim().to_string())
     } else {
         None
+    }
+}
+
+fn notify_plugins(state: &AppState, record: &EventRecord) {
+    let plugins = state.plugins.clone();
+    if plugins.is_empty() {
+        return;
+    }
+
+    match state
+        .store
+        .get_aggregate_state(&record.aggregate_type, &record.aggregate_id)
+    {
+        Ok(current_state) => {
+            let schema = state.schemas.get(&record.aggregate_type).ok();
+            let record_clone = record.clone();
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    let schema_ref = schema.as_ref();
+                    if let Err(err) =
+                        plugins.notify_event(&record_clone, &current_state, schema_ref)
+                    {
+                        tracing::error!("plugin notification failed: {}", err);
+                    }
+                })
+                .await;
+
+                if let Err(err) = result {
+                    tracing::error!("plugin task join error: {}", err);
+                }
+            });
+        }
+        Err(err) => {
+            tracing::error!(
+                "failed to load aggregate state for plugin notification: {}",
+                err
+            );
+        }
     }
 }
 
