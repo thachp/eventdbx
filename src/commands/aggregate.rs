@@ -37,7 +37,7 @@ pub enum AggregateCommands {
     Restore(AggregateArchiveArgs),
     /// Remove an aggregate that has no events
     Remove(AggregateRemoveArgs),
-    /// Commit staged events read from stdin (JSON array or NDJSON)
+    /// Commit events previously staged with `aggregate apply --stage`
     Commit,
 }
 

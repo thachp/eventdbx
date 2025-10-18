@@ -30,6 +30,7 @@ struct AppState {
     restrict: bool,
     plugins: PluginManager,
     list_page_size: usize,
+    page_limit: usize,
 }
 
 pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
@@ -43,6 +44,7 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         restrict: config.restrict,
         plugins,
         list_page_size: config.list_page_size,
+        page_limit: config.page_limit,
     };
 
     let app = Router::new()
@@ -51,6 +53,10 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         .route(
             "/v1/aggregates/:aggregate_type/:aggregate_id",
             get(get_aggregate),
+        )
+        .route(
+            "/v1/aggregates/:aggregate_type/:aggregate_id/events",
+            get(list_events),
         )
         .route("/v1/events", post(append_event_global))
         .route(
@@ -97,8 +103,14 @@ async fn list_aggregates(
     Query(params): Query<AggregatesQuery>,
 ) -> Result<Json<Vec<AggregateState>>> {
     let skip = params.skip.unwrap_or(0);
-    let take = params.take.or(Some(state.list_page_size));
-    let aggregates = state.store.aggregates_paginated(skip, take);
+    let mut take = params.take.unwrap_or(state.list_page_size);
+    if take == 0 {
+        return Ok(Json(Vec::new()));
+    }
+    if take > state.page_limit {
+        take = state.page_limit;
+    }
+    let aggregates = state.store.aggregates_paginated(skip, Some(take));
     Ok(Json(aggregates))
 }
 
@@ -110,6 +122,33 @@ async fn get_aggregate(
         .store
         .get_aggregate_state(&aggregate_type, &aggregate_id)?;
     Ok(Json(aggregate))
+}
+
+#[derive(Deserialize, Default)]
+struct EventsQuery {
+    #[serde(default)]
+    skip: Option<usize>,
+    #[serde(default)]
+    take: Option<usize>,
+}
+
+async fn list_events(
+    State(state): State<AppState>,
+    Path((aggregate_type, aggregate_id)): Path<(String, String)>,
+    Query(params): Query<EventsQuery>,
+) -> Result<Json<Vec<EventRecord>>> {
+    let skip = params.skip.unwrap_or(0);
+    let mut take = params.take.unwrap_or(state.page_limit);
+    if take == 0 {
+        return Ok(Json(Vec::new()));
+    }
+    if take > state.page_limit {
+        take = state.page_limit;
+    }
+
+    let events = state.store.list_events(&aggregate_type, &aggregate_id)?;
+    let filtered: Vec<EventRecord> = events.into_iter().skip(skip).take(take).collect();
+    Ok(Json(filtered))
 }
 
 #[derive(Deserialize)]

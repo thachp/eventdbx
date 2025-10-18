@@ -33,6 +33,8 @@ pub struct Config {
     pub column_types: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default = "default_list_page_size")]
     pub list_page_size: usize,
+    #[serde(default = "default_page_limit")]
+    pub page_limit: usize,
 }
 
 impl Default for Config {
@@ -50,6 +52,7 @@ impl Default for Config {
             plugins: Vec::new(),
             column_types: BTreeMap::new(),
             list_page_size: default_list_page_size(),
+            page_limit: default_page_limit(),
         }
     }
 }
@@ -63,6 +66,7 @@ pub struct ConfigUpdate {
     pub data_encryption_key: Option<String>,
     pub restrict: Option<bool>,
     pub list_page_size: Option<usize>,
+    pub page_limit: Option<usize>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -123,6 +127,9 @@ impl Config {
         }
         if let Some(list_page_size) = update.list_page_size {
             self.list_page_size = list_page_size;
+        }
+        if let Some(page_limit) = update.page_limit {
+            self.page_limit = page_limit;
         }
         self.updated_at = Utc::now();
     }
@@ -203,6 +210,10 @@ fn default_restrict() -> bool {
 
 fn default_list_page_size() -> usize {
     10
+}
+
+fn default_page_limit() -> usize {
+    1000
 }
 
 fn deserialize_restrict<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>

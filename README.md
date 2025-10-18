@@ -204,8 +204,11 @@ The server exposes a small HTTP API (served on port `7070` by default). All endp
 | `GET /health`                                                               | Liveness probe (unauthenticated).                                   |
 | `GET /v1/aggregates`                                                        | Lists aggregates; supports `skip`/`take` query parameters.          |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}`                        | Returns the current state for a specific aggregate.                 |
+| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                 | Lists events for an aggregate; supports `skip`/`take` pagination.   |
 | `POST /v1/events`                                                           | Appends an event; aggregate identifiers are provided in the body.   |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/verify`                 | Computes and returns the Merkle root for integrity verification.    |
+
+Paginated responses cap `take` at the configurable `page_limit` (default `1000`). Adjust it with `eventdbx config --page-limit <n>` if you need larger pages.
 
 All authenticated requests must include `Authorization: Bearer <token>` with a token issued via the CLI.
 
