@@ -6,7 +6,7 @@ edition = "2024"
 repository = "https://github.com/thachp/eventdbx"
 license = "MIT"
 keywords = [
-  "api",
+  "immutable",
   "events",
   "event-sourcing",
   "event-store",
