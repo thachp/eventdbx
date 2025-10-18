@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use serde::Deserialize;
 use serde_json::json;
@@ -17,7 +17,10 @@ use eventdbx::config::{
 };
 use eventdbx::plugin::{establish_connection, instantiate_plugin};
 use eventdbx::store::{ActorClaims, AggregateState, EventMetadata, EventRecord};
-use tokio::{runtime::Handle, task::spawn_blocking};
+use std::any::Any;
+use std::thread;
+
+use tokio::runtime::Handle;
 
 #[derive(Subcommand)]
 pub enum PluginCommands {
@@ -522,45 +525,37 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 return Ok(());
             }
 
-            let now = Utc::now();
-            let aggregate_type = "plugin-test".to_string();
-            let aggregate_id = format!("sample-{}", now.timestamp());
-
-            let mut state_values = BTreeMap::new();
-            state_values.insert("status".to_string(), "ok".to_string());
-            state_values.insert("tested_at".to_string(), now.to_rfc3339());
-            state_values.insert("plugin_count".to_string(), enabled.len().to_string());
-
             let aggregate_state = AggregateState {
-                aggregate_type: aggregate_type.clone(),
-                aggregate_id: aggregate_id.clone(),
-                version: 1,
-                state: state_values.clone(),
-                merkle_root: "plugin-test-merkle".to_string(),
+                aggregate_type: "patient".to_string(),
+                aggregate_id: "p-001".to_string(),
+                version: 5,
+                state: BTreeMap::new(),
+                merkle_root: "deadbeef…".to_string(),
                 archived: false,
             };
 
             let record = EventRecord {
-                aggregate_type: aggregate_type.clone(),
-                aggregate_id: aggregate_id.clone(),
-                event_type: "plugin-test-event".to_string(),
+                aggregate_type: "patient".to_string(),
+                aggregate_id: "p-001".to_string(),
+                event_type: "patient-updated".to_string(),
                 payload: json!({
-                    "message": "Plugin connectivity check",
-                    "status": "ok",
-                    "tested_at": now.to_rfc3339(),
-                    "aggregate_state": state_values,
+                    "status": "inactive",
+                    "comment": "Archived via API"
                 }),
                 metadata: EventMetadata {
-                    event_id: Uuid::new_v4(),
-                    created_at: now,
+                    event_id: Uuid::parse_str("45c3013e-9b95-4ed0-9af9-1a465f81d3cf")
+                        .unwrap_or_else(|_| Uuid::new_v4()),
+                    created_at: DateTime::parse_from_rfc3339("2024-12-01T17:22:43.512345Z")
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
                     issued_by: Some(ActorClaims {
-                        group: "system".to_string(),
-                        user: "plugin-test".to_string(),
+                        group: "admin".to_string(),
+                        user: "jane".to_string(),
                     }),
                 },
-                version: 1,
-                hash: "plugin-test-hash".to_string(),
-                merkle_root: "plugin-test-merkle".to_string(),
+                version: 5,
+                hash: "cafe…".to_string(),
+                merkle_root: "deadbeef…".to_string(),
             };
 
             let mut successes = 0;
@@ -713,10 +708,20 @@ where
     T: Send + 'static,
 {
     match Handle::try_current() {
-        Ok(handle) => handle
-            .block_on(spawn_blocking(f))
-            .map_err(|err| anyhow!(err))?,
+        Ok(_) => thread::spawn(move || f())
+            .join()
+            .map_err(|err| panic_into_anyhow(err))?,
         Err(_) => f(),
+    }
+}
+
+fn panic_into_anyhow(err: Box<dyn Any + Send + 'static>) -> anyhow::Error {
+    match err.downcast::<String>() {
+        Ok(message) => anyhow!("blocking task panicked: {}", *message),
+        Err(err) => match err.downcast::<&'static str>() {
+            Ok(message) => anyhow!("blocking task panicked: {}", *message),
+            Err(_) => anyhow!("blocking task panicked"),
+        },
     }
 }
 
