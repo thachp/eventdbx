@@ -5,7 +5,6 @@ use clap::{Args, Subcommand};
 
 use eventdbx::{
     config::load_or_default,
-    error::EventError,
     schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
 };
 
@@ -15,17 +14,13 @@ pub enum SchemaCommands {
     Create(SchemaCreateArgs),
     /// Add events to an existing schema definition
     Add(SchemaAddEventArgs),
-    /// Alter an existing schema definition
-    Alter(SchemaAlterArgs),
     /// Remove an event definition from an aggregate
     Remove(SchemaRemoveEventArgs),
     /// List available schemas
     List,
-    /// Show a specific schema
-    Show {
-        /// Aggregate name
-        aggregate: String,
-    },
+    /// Fallback handler for positional aggregate commands
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 #[derive(Args)]
@@ -48,35 +43,6 @@ pub struct SchemaAddEventArgs {
     /// Event names to add (comma-delimited or repeated)
     #[arg(required = true, value_delimiter = ',')]
     pub events: Vec<String>,
-}
-
-#[derive(Args)]
-pub struct SchemaAlterArgs {
-    /// Aggregate name
-    pub aggregate: String,
-
-    /// Optional event name to alter
-    pub event: Option<String>,
-
-    /// Set the snapshot threshold
-    #[arg(long)]
-    pub snapshot_threshold: Option<u64>,
-
-    /// Lock or unlock the aggregate (or field when --field is specified)
-    #[arg(long)]
-    pub lock: Option<bool>,
-
-    /// Field name to lock/unlock
-    #[arg(long)]
-    pub field: Option<String>,
-
-    /// Add fields to an event definition
-    #[arg(long, short = 'a', value_delimiter = ',')]
-    pub add: Vec<String>,
-
-    /// Remove fields from an event definition
-    #[arg(long, short = 'r', value_delimiter = ',')]
-    pub remove: Vec<String>,
 }
 
 #[derive(Args)]
@@ -106,86 +72,17 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                 schema.snapshot_threshold
             );
         }
-        SchemaCommands::Add(args) => match manager.get(&args.aggregate) {
-            Ok(_) => {
-                let mut update = SchemaUpdate::default();
-                for event in &args.events {
-                    update.event_add_fields.entry(event.clone()).or_default();
-                }
-                let schema = manager.update(&args.aggregate, update)?;
-                println!(
-                    "schema={} added_events={} total_events={}",
-                    schema.aggregate,
-                    args.events.join(","),
-                    schema.events.len()
-                );
-            }
-            Err(EventError::SchemaNotFound) => {
-                let schema = manager.create(CreateSchemaInput {
-                    aggregate: args.aggregate.clone(),
-                    events: args.events.clone(),
-                    snapshot_threshold: None,
-                })?;
-                println!(
-                    "schema={} created events={}",
-                    schema.aggregate,
-                    schema.events.len()
-                );
-            }
-            Err(err) => return Err(err.into()),
-        },
-        SchemaCommands::Alter(args) => {
+        SchemaCommands::Add(args) => {
+            manager.get(&args.aggregate)?;
             let mut update = SchemaUpdate::default();
-
-            if let Some(value) = args.snapshot_threshold {
-                update.snapshot_threshold = Some(Some(value));
+            for event in &args.events {
+                update.event_add_fields.entry(event.clone()).or_default();
             }
-
-            if args.event.is_none() && args.field.is_none() {
-                if let Some(lock) = args.lock {
-                    update.locked = Some(lock);
-                }
-            }
-
-            if let Some(field) = args.field {
-                if let Some(lock) = args.lock {
-                    update.field_lock = Some((field, lock));
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "--lock must be provided when using --field"
-                    ));
-                }
-            }
-
-            if let Some(event) = args.event {
-                if !args.add.is_empty() {
-                    update
-                        .event_add_fields
-                        .entry(event.clone())
-                        .or_default()
-                        .extend(args.add.clone());
-                }
-                if !args.remove.is_empty() {
-                    update
-                        .event_remove_fields
-                        .insert(event.clone(), args.remove.clone());
-                }
-                if args.add.is_empty() && args.remove.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "provide --add or --remove when specifying an event"
-                    ));
-                }
-            } else if (!args.add.is_empty() || !args.remove.is_empty()) && args.event.is_none() {
-                return Err(anyhow::anyhow!(
-                    "--event must be provided when adding or removing fields"
-                ));
-            }
-
             let schema = manager.update(&args.aggregate, update)?;
             println!(
-                "schema={} updated_at={} version_events={}",
+                "schema={} added_events={} total_events={}",
                 schema.aggregate,
-                schema.updated_at.to_rfc3339(),
+                args.events.join(","),
                 schema.events.len()
             );
         }
@@ -209,10 +106,26 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                 );
             }
         }
-        SchemaCommands::Show { aggregate } => {
-            let schema = manager.get(&aggregate)?;
-            println!("{}", serde_json::to_string_pretty(&schema)?);
-        }
+        SchemaCommands::External(args) => match args.as_slice() {
+            [] => {
+                return Err(anyhow::anyhow!(
+                    "missing aggregate name; try `eventdbx schema <aggregate>`"
+                ));
+            }
+            [aggregate] => {
+                let schema = manager.get(aggregate)?;
+                println!("{}", serde_json::to_string_pretty(&schema)?);
+            }
+            [command, aggregate] if command.eq_ignore_ascii_case("show") => {
+                let schema = manager.get(aggregate)?;
+                println!("{}", serde_json::to_string_pretty(&schema)?);
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "unsupported schema command; available subcommands are create, add, remove, list"
+                ));
+            }
+        },
     }
 
     Ok(())

@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use chrono::{DateTime, Utc};
-use parking_lot::Mutex;
-use rocksdb::{DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options};
+use parking_lot::{Mutex, MutexGuard};
+use rocksdb::{DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options, WriteBatch};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -51,6 +51,152 @@ impl From<TokenGrant> for ActorClaims {
             user: value.user,
         }
     }
+}
+
+impl<'a> Transaction<'a> {
+    pub fn append(&mut self, input: AppendEvent) -> Result<EventRecord> {
+        let key = AggregateKey::new(input.aggregate_type.clone(), input.aggregate_id.clone());
+        let (meta, state) = self.ensure_cache(&key)?;
+        if meta.archived {
+            return Err(EventError::AggregateArchived);
+        }
+        let record = apply_event(meta, state, input);
+        let event_value = serde_json::to_vec(&record)?;
+
+        self.pending_events.push(PendingEvent {
+            key: event_key(&record.aggregate_type, &record.aggregate_id, record.version),
+            value: event_value,
+        });
+        self.pending_records.push(record.clone());
+        Ok(record)
+    }
+
+    pub fn commit(mut self) -> Result<Vec<EventRecord>> {
+        if self.pending_events.is_empty()
+            && self.meta_cache.is_empty()
+            && self.state_cache.is_empty()
+        {
+            return Ok(Vec::new());
+        }
+
+        let pending_events = std::mem::take(&mut self.pending_events);
+        let meta_cache = std::mem::take(&mut self.meta_cache);
+        let state_cache = std::mem::take(&mut self.state_cache);
+        let records = std::mem::take(&mut self.pending_records);
+
+        let mut batch = WriteBatch::default();
+
+        for pending in pending_events {
+            batch_put(&mut batch, pending.key, pending.value)?;
+        }
+
+        for meta in meta_cache.into_values() {
+            let key = meta_key(&meta.aggregate_type, &meta.aggregate_id);
+            batch_put(&mut batch, key, serde_json::to_vec(&meta)?)?;
+        }
+
+        for (key, state) in state_cache {
+            let (aggregate_type, aggregate_id) = key.parts();
+            let state_bytes = serde_json::to_vec(&state)?;
+            batch_put(
+                &mut batch,
+                state_key(aggregate_type, aggregate_id),
+                state_bytes,
+            )?;
+        }
+
+        self.store.write_batch(batch)?;
+        Ok(records)
+    }
+
+    fn ensure_cache(
+        &mut self,
+        key: &AggregateKey,
+    ) -> Result<(&mut AggregateMeta, &mut BTreeMap<String, String>)> {
+        if !self.meta_cache.contains_key(key) {
+            let (aggregate_type, aggregate_id) = key.parts();
+            let meta = self
+                .store
+                .load_meta(aggregate_type, aggregate_id)?
+                .unwrap_or_else(|| {
+                    AggregateMeta::new(aggregate_type.to_string(), aggregate_id.to_string())
+                });
+            self.meta_cache.insert(key.clone(), meta);
+        }
+
+        if !self.state_cache.contains_key(key) {
+            let (aggregate_type, aggregate_id) = key.parts();
+            let state = self.store.load_state_map(aggregate_type, aggregate_id)?;
+            self.state_cache.insert(key.clone(), state);
+        }
+
+        let meta = self
+            .meta_cache
+            .get_mut(key)
+            .expect("meta cache missing after insertion");
+        let state = self
+            .state_cache
+            .get_mut(key)
+            .expect("state cache missing after insertion");
+        Ok((meta, state))
+    }
+}
+
+fn apply_event(
+    meta: &mut AggregateMeta,
+    state: &mut BTreeMap<String, String>,
+    input: AppendEvent,
+) -> EventRecord {
+    let AppendEvent {
+        aggregate_type,
+        aggregate_id,
+        event_type,
+        payload,
+        issued_by,
+    } = input;
+
+    debug_assert_eq!(&meta.aggregate_type, &aggregate_type);
+    debug_assert_eq!(&meta.aggregate_id, &aggregate_id);
+
+    let version = meta.version + 1;
+    let created_at = Utc::now();
+    let event_id = Uuid::new_v4();
+    let payload_map = payload_to_map(&payload);
+    let hash = hash_event(
+        &aggregate_type,
+        &aggregate_id,
+        version,
+        &event_type,
+        &payload_map,
+    );
+
+    meta.event_hashes.push(hash.clone());
+    meta.version = version;
+    meta.merkle_root = compute_merkle_root(&meta.event_hashes);
+
+    for (key, value) in payload_map {
+        state.insert(key, value);
+    }
+
+    EventRecord {
+        aggregate_type,
+        aggregate_id,
+        event_type,
+        payload,
+        metadata: EventMetadata {
+            event_id,
+            created_at,
+            issued_by,
+        },
+        version,
+        hash,
+        merkle_root: meta.merkle_root.clone(),
+    }
+}
+
+fn batch_put(batch: &mut WriteBatch, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+    batch.put(key, value);
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -102,10 +248,43 @@ impl AggregateMeta {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AggregateKey {
+    aggregate_type: String,
+    aggregate_id: String,
+}
+
+impl AggregateKey {
+    fn new(aggregate_type: impl Into<String>, aggregate_id: impl Into<String>) -> Self {
+        Self {
+            aggregate_type: aggregate_type.into(),
+            aggregate_id: aggregate_id.into(),
+        }
+    }
+
+    fn parts(&self) -> (&str, &str) {
+        (&self.aggregate_type, &self.aggregate_id)
+    }
+}
+
+struct PendingEvent {
+    key: Vec<u8>,
+    value: Vec<u8>,
+}
+
 pub struct EventStore {
     db: DBWithThreadMode<MultiThreaded>,
     write_lock: Mutex<()>,
     read_only: bool,
+}
+
+pub struct Transaction<'a> {
+    store: &'a EventStore,
+    _guard: MutexGuard<'a, ()>,
+    pending_events: Vec<PendingEvent>,
+    pending_records: Vec<EventRecord>,
+    meta_cache: BTreeMap<AggregateKey, AggregateMeta>,
+    state_cache: BTreeMap<AggregateKey, BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,74 +329,52 @@ impl EventStore {
         self.ensure_writable()?;
         let _guard = self.write_lock.lock();
 
+        let aggregate_type = input.aggregate_type.clone();
+        let aggregate_id = input.aggregate_id.clone();
+
         let mut meta = self
-            .load_meta(&input.aggregate_type, &input.aggregate_id)?
-            .unwrap_or_else(|| {
-                AggregateMeta::new(input.aggregate_type.clone(), input.aggregate_id.clone())
-            });
+            .load_meta(&aggregate_type, &aggregate_id)?
+            .unwrap_or_else(|| AggregateMeta::new(aggregate_type.clone(), aggregate_id.clone()));
 
         if meta.archived {
             return Err(EventError::AggregateArchived);
         }
-        let mut state = self.load_state_map(&input.aggregate_type, &input.aggregate_id)?;
+        let mut state = self.load_state_map(&aggregate_type, &aggregate_id)?;
+        let record = apply_event(&mut meta, &mut state, input);
 
-        let version = meta.version + 1;
-        let created_at = Utc::now();
-        let event_id = Uuid::new_v4();
-        let payload_map = payload_to_map(&input.payload);
-        let hash = hash_event(
-            &input.aggregate_type,
-            &input.aggregate_id,
-            version,
-            &input.event_type,
-            &payload_map,
-        );
+        let mut batch = WriteBatch::default();
+        batch_put(
+            &mut batch,
+            event_key(&record.aggregate_type, &record.aggregate_id, record.version),
+            serde_json::to_vec(&record)?,
+        )?;
+        batch_put(
+            &mut batch,
+            meta_key(&record.aggregate_type, &record.aggregate_id),
+            serde_json::to_vec(&meta)?,
+        )?;
+        batch_put(
+            &mut batch,
+            state_key(&record.aggregate_type, &record.aggregate_id),
+            serde_json::to_vec(&state)?,
+        )?;
 
-        meta.event_hashes.push(hash.clone());
-        meta.version = version;
-        meta.merkle_root = compute_merkle_root(&meta.event_hashes);
-
-        for (key, value) in &payload_map {
-            state.insert(key.clone(), value.clone());
-        }
-
-        let record = EventRecord {
-            aggregate_type: input.aggregate_type.clone(),
-            aggregate_id: input.aggregate_id.clone(),
-            event_type: input.event_type,
-            payload: input.payload,
-            metadata: EventMetadata {
-                event_id,
-                created_at,
-                issued_by: input.issued_by,
-            },
-            version,
-            hash,
-            merkle_root: meta.merkle_root.clone(),
-        };
-
-        self.db
-            .put(
-                event_key(&record.aggregate_type, &record.aggregate_id, version),
-                serde_json::to_vec(&record)?,
-            )
-            .map_err(|err| EventError::Storage(err.to_string()))?;
-
-        self.db
-            .put(
-                meta_key(&record.aggregate_type, &record.aggregate_id),
-                serde_json::to_vec(&meta)?,
-            )
-            .map_err(|err| EventError::Storage(err.to_string()))?;
-
-        self.db
-            .put(
-                state_key(&record.aggregate_type, &record.aggregate_id),
-                serde_json::to_vec(&state)?,
-            )
-            .map_err(|err| EventError::Storage(err.to_string()))?;
+        self.write_batch(batch)?;
 
         Ok(record)
+    }
+
+    pub fn transaction(&self) -> Result<Transaction<'_>> {
+        self.ensure_writable()?;
+        let guard = self.write_lock.lock();
+        Ok(Transaction {
+            store: self,
+            _guard: guard,
+            pending_events: Vec::new(),
+            pending_records: Vec::new(),
+            meta_cache: BTreeMap::new(),
+            state_cache: BTreeMap::new(),
+        })
     }
 
     pub fn get_aggregate_state(
@@ -346,12 +503,23 @@ impl EventStore {
         }
     }
 
+    fn write_batch(&self, batch: WriteBatch) -> Result<()> {
+        self.db
+            .write(batch)
+            .map_err(|err| EventError::Storage(err.to_string()))
+    }
+
     pub fn aggregates(&self) -> Vec<AggregateState> {
+        self.aggregates_paginated(0, None)
+    }
+
+    pub fn aggregates_paginated(&self, skip: usize, take: Option<usize>) -> Vec<AggregateState> {
         let prefix = meta_prefix();
         let iter = self
             .db
             .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
         let mut items = Vec::new();
+        let mut skipped = 0usize;
 
         for item in iter {
             let Ok((key, value)) = item else {
@@ -374,6 +542,11 @@ impl EventStore {
                 Err(_) => continue,
             };
 
+            if skipped < skip {
+                skipped += 1;
+                continue;
+            }
+
             items.push(AggregateState {
                 aggregate_type: meta.aggregate_type.clone(),
                 aggregate_id: meta.aggregate_id.clone(),
@@ -382,6 +555,12 @@ impl EventStore {
                 merkle_root: meta.merkle_root,
                 archived: meta.archived,
             });
+
+            if let Some(limit) = take {
+                if items.len() >= limit {
+                    break;
+                }
+            }
         }
 
         items
@@ -398,6 +577,63 @@ impl EventStore {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn create_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<()> {
+        self.ensure_writable()?;
+        let _guard = self.write_lock.lock();
+
+        if self.load_meta(aggregate_type, aggregate_id)?.is_some() {
+            return Err(EventError::Storage(format!(
+                "aggregate {}:{} already exists",
+                aggregate_type, aggregate_id
+            )));
+        }
+
+        let meta = AggregateMeta::new(aggregate_type.to_string(), aggregate_id.to_string());
+        let state: BTreeMap<String, String> = BTreeMap::new();
+
+        self.db
+            .put(
+                meta_key(aggregate_type, aggregate_id),
+                serde_json::to_vec(&meta)?,
+            )
+            .map_err(|err| EventError::Storage(err.to_string()))?;
+
+        self.db
+            .put(
+                state_key(aggregate_type, aggregate_id),
+                serde_json::to_vec(&state)?,
+            )
+            .map_err(|err| EventError::Storage(err.to_string()))?;
+
+        Ok(())
+    }
+
+    pub fn remove_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<()> {
+        self.ensure_writable()?;
+        let _guard = self.write_lock.lock();
+
+        let Some(meta) = self.load_meta(aggregate_type, aggregate_id)? else {
+            return Err(EventError::AggregateNotFound);
+        };
+
+        if meta.version > 0 {
+            return Err(EventError::Storage(format!(
+                "aggregate {}:{} cannot be removed while events exist",
+                aggregate_type, aggregate_id
+            )));
+        }
+
+        self.db
+            .delete(meta_key(aggregate_type, aggregate_id))
+            .map_err(|err| EventError::Storage(err.to_string()))?;
+
+        self.db
+            .delete(state_key(aggregate_type, aggregate_id))
+            .map_err(|err| EventError::Storage(err.to_string()))?;
+
+        Ok(())
     }
 
     fn load_state_map(
@@ -554,6 +790,74 @@ mod tests {
             let events = store.list_events("patient", "patient-1").unwrap();
             assert_eq!(events.len(), 1);
         }
+    }
+
+    #[test]
+    fn transaction_appends_multiple_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path).unwrap();
+
+        let mut tx = store.transaction().unwrap();
+        let first = tx
+            .append(AppendEvent {
+                aggregate_type: "order".into(),
+                aggregate_id: "order-42".into(),
+                event_type: "order-created".into(),
+                payload: serde_json::json!({ "status": "processing" }),
+                issued_by: None,
+            })
+            .unwrap();
+        assert_eq!(first.version, 1);
+
+        let second = tx
+            .append(AppendEvent {
+                aggregate_type: "order".into(),
+                aggregate_id: "order-42".into(),
+                event_type: "order-updated".into(),
+                payload: serde_json::json!({
+                    "status": "shipped",
+                    "tracking": "abc123"
+                }),
+                issued_by: None,
+            })
+            .unwrap();
+        assert_eq!(second.version, 2);
+
+        let committed = tx.commit().unwrap();
+        assert_eq!(committed.len(), 2);
+        assert_eq!(committed[0].version, 1);
+        assert_eq!(committed[1].version, 2);
+
+        let state = store.get_aggregate_state("order", "order-42").unwrap();
+        assert_eq!(state.version, 2);
+        assert_eq!(state.state["status"], "shipped");
+        assert_eq!(state.state["tracking"], "abc123");
+
+        let events = store.list_events("order", "order-42").unwrap();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn transaction_without_commit_discards_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path.clone()).unwrap();
+
+        {
+            let mut tx = store.transaction().unwrap();
+            tx.append(AppendEvent {
+                aggregate_type: "invoice".into(),
+                aggregate_id: "inv-1".into(),
+                event_type: "invoice-created".into(),
+                payload: serde_json::json!({ "total": "100.00" }),
+                issued_by: None,
+            })
+            .unwrap();
+        }
+
+        let err = store.list_events("invoice", "inv-1").unwrap_err();
+        assert!(matches!(err, crate::error::EventError::AggregateNotFound));
     }
 
     #[test]

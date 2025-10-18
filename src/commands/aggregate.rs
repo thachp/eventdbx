@@ -1,7 +1,12 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
 
 use eventdbx::{
@@ -9,7 +14,7 @@ use eventdbx::{
     merkle::compute_merkle_root,
     plugin::PluginManager,
     schema::SchemaManager,
-    store::{self, AppendEvent, EventStore, payload_to_map},
+    store::{self, ActorClaims, AppendEvent, EventStore, payload_to_map},
 };
 
 #[derive(Subcommand)]
@@ -17,7 +22,7 @@ pub enum AggregateCommands {
     /// Apply an event to an aggregate instance
     Apply(AggregateApplyArgs),
     /// List aggregates in the store
-    List,
+    List(AggregateListArgs),
     /// Retrieve the state of an aggregate
     Get(AggregateGetArgs),
     /// Replay events for an aggregate instance
@@ -30,7 +35,9 @@ pub enum AggregateCommands {
     Archive(AggregateArchiveArgs),
     /// Restore an archived aggregate instance
     Restore(AggregateArchiveArgs),
-    /// Commit staged events (no-op placeholder)
+    /// Remove an aggregate that has no events
+    Remove(AggregateRemoveArgs),
+    /// Commit events previously staged with `aggregate apply --stage`
     Commit,
 }
 
@@ -48,6 +55,10 @@ pub struct AggregateApplyArgs {
     /// Event fields expressed as KEY=VALUE pairs
     #[arg(long = "field", value_parser = parse_key_value, value_name = "KEY=VALUE")]
     pub fields: Vec<KeyValue>,
+
+    /// Stage the event for a later commit instead of writing immediately
+    #[arg(long, default_value_t = false)]
+    pub stage: bool,
 }
 
 #[derive(Args)]
@@ -125,12 +136,50 @@ pub struct KeyValue {
     pub value: String,
 }
 
+#[derive(Args)]
+pub struct AggregateRemoveArgs {
+    /// Aggregate type
+    pub aggregate: String,
+
+    /// Aggregate identifier
+    pub aggregate_id: String,
+}
+
+#[derive(Args)]
+pub struct AggregateListArgs {
+    /// Number of aggregates to skip
+    #[arg(long, default_value_t = 0)]
+    pub skip: usize,
+
+    /// Maximum number of aggregates to return
+    #[arg(long)]
+    pub take: Option<usize>,
+
+    /// Show staged events instead of persisted aggregates
+    #[arg(long, default_value_t = false)]
+    pub stage: bool,
+}
+
 pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     match command {
-        AggregateCommands::List => {
+        AggregateCommands::List(args) => {
+            if args.stage {
+                let staging_path = config.staging_path();
+                let staged_events = load_staged_events(staging_path.as_path())?;
+                if staged_events.is_empty() {
+                    println!("no staged events");
+                } else {
+                    for event in staged_events {
+                        println!("{}", serde_json::to_string_pretty(&event)?);
+                    }
+                }
+                return Ok(());
+            }
+
             let store = EventStore::open_read_only(config.event_store_path())?;
-            for aggregate in store.aggregates() {
+            let take = args.take.or(Some(config.list_page_size));
+            for aggregate in store.aggregates_paginated(args.skip, take) {
                 println!(
                     "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
                     aggregate.aggregate_type,
@@ -140,6 +189,14 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     aggregate.archived
                 );
             }
+        }
+        AggregateCommands::Remove(args) => {
+            let store = EventStore::open(config.event_store_path())?;
+            store.remove_aggregate(&args.aggregate, &args.aggregate_id)?;
+            println!(
+                "aggregate_type={} aggregate_id={} removed",
+                args.aggregate, args.aggregate_id
+            );
         }
         AggregateCommands::Get(args) => {
             let store = EventStore::open_read_only(config.event_store_path())?;
@@ -186,19 +243,52 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         AggregateCommands::Apply(args) => {
-            let payload = collect_payload(args.fields);
+            let AggregateApplyArgs {
+                aggregate,
+                aggregate_id,
+                event,
+                fields,
+                stage,
+            } = args;
+            let payload = collect_payload(fields);
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
             if config.restrict {
                 let map = payload_to_map(&payload);
-                schema_manager.validate_event(&args.aggregate, &args.event, &map)?;
+                schema_manager.validate_event(&aggregate, &event, &map)?;
+            }
+
+            if stage {
+                let store = EventStore::open(config.event_store_path())?;
+                {
+                    let mut tx = store.transaction()?;
+                    tx.append(AppendEvent {
+                        aggregate_type: aggregate.clone(),
+                        aggregate_id: aggregate_id.clone(),
+                        event_type: event.clone(),
+                        payload: payload.clone(),
+                        issued_by: None,
+                    })?;
+                }
+
+                let staged_event = StagedEvent {
+                    aggregate,
+                    aggregate_id,
+                    event,
+                    payload,
+                    issued_by: None,
+                };
+                let staging_path = config.staging_path();
+                append_staged_event(staging_path.as_path(), staged_event)?;
+                println!("event staged for later commit");
+                return Ok(());
             }
 
             let store = EventStore::open(config.event_store_path())?;
             let plugins = PluginManager::from_config(&config)?;
             let record = store.append(AppendEvent {
-                aggregate_type: args.aggregate,
-                aggregate_id: args.aggregate_id,
-                event_type: args.event,
+                aggregate_type: aggregate.clone(),
+                aggregate_id: aggregate_id.clone(),
+                event_type: event.clone(),
                 payload,
                 issued_by: None,
             })?;
@@ -285,7 +375,59 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             );
         }
         AggregateCommands::Commit => {
-            println!("all events are already committed");
+            let staging_path = config.staging_path();
+            let staged_events = load_staged_events(staging_path.as_path())?;
+            if staged_events.is_empty() {
+                println!("no staged events to commit");
+                return Ok(());
+            }
+
+            let schema_manager = SchemaManager::load(config.schema_store_path())?;
+            let store = EventStore::open(config.event_store_path())?;
+            let plugins = PluginManager::from_config(&config)?;
+            let mut tx = store.transaction()?;
+
+            for staged_event in &staged_events {
+                if config.restrict {
+                    let payload_map = payload_to_map(&staged_event.payload);
+                    schema_manager.validate_event(
+                        &staged_event.aggregate,
+                        &staged_event.event,
+                        &payload_map,
+                    )?;
+                }
+
+                tx.append(staged_event.to_append_event())?;
+            }
+
+            let records = tx.commit()?;
+            for record in &records {
+                println!("{}", serde_json::to_string_pretty(record)?);
+            }
+
+            if !plugins.is_empty() {
+                for record in &records {
+                    let schema = schema_manager.get(&record.aggregate_type).ok();
+                    match store.get_aggregate_state(&record.aggregate_type, &record.aggregate_id) {
+                        Ok(current_state) => {
+                            if let Err(err) =
+                                plugins.notify_event(record, &current_state, schema.as_ref())
+                            {
+                                eprintln!("plugin notification failed: {}", err);
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "plugin notification skipped (failed to load state): {}",
+                                err
+                            );
+                        }
+                    }
+                }
+            }
+
+            clear_staged_events(staging_path.as_path())?;
+            println!("committed {} event(s)", records.len());
         }
     }
 
@@ -342,4 +484,82 @@ fn state_at_version(
 
     let merkle_root = compute_merkle_root(&hashes);
     (last_version, state, merkle_root)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StagedEvent {
+    aggregate: String,
+    aggregate_id: String,
+    event: String,
+    #[serde(default = "default_event_payload")]
+    payload: Value,
+    #[serde(default)]
+    issued_by: Option<StagedIssuedBy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StagedIssuedBy {
+    group: String,
+    user: String,
+}
+
+impl StagedEvent {
+    fn to_append_event(&self) -> AppendEvent {
+        AppendEvent {
+            aggregate_type: self.aggregate.clone(),
+            aggregate_id: self.aggregate_id.clone(),
+            event_type: self.event.clone(),
+            payload: self.payload.clone(),
+            issued_by: self.issued_by.clone().map(Into::into),
+        }
+    }
+}
+
+impl From<StagedIssuedBy> for ActorClaims {
+    fn from(value: StagedIssuedBy) -> Self {
+        ActorClaims {
+            group: value.group,
+            user: value.user,
+        }
+    }
+}
+
+fn default_event_payload() -> Value {
+    Value::Null
+}
+
+fn load_staged_events(path: &Path) -> Result<Vec<StagedEvent>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let contents = fs::read_to_string(path)?;
+    if contents.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let events = serde_json::from_str::<Vec<StagedEvent>>(&contents)?;
+    Ok(events)
+}
+
+fn append_staged_event(path: &Path, event: StagedEvent) -> Result<()> {
+    let mut events = load_staged_events(path)?;
+    events.push(event);
+    save_staged_events(path, &events)
+}
+
+fn clear_staged_events(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::write(path, "[]")?;
+    }
+    Ok(())
+}
+
+fn save_staged_events(path: &Path, events: &[StagedEvent]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let payload = serde_json::to_string_pretty(events)?;
+    fs::write(path, payload)?;
+    Ok(())
 }

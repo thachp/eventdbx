@@ -107,8 +107,8 @@ EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--
 
 ### Configuration
 
-- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>]`  
-  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`.
+- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>] [--page-limit <usize>]`  
+  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10) and `--page-limit` caps any requested page size across list and event endpoints (default 1000, alias `--event-page-limit`).
 
 ### Tokens
 
@@ -125,27 +125,28 @@ EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--
 
 - `eventdbx schema create --aggregate <name> --events <event1,event2,...> [--snapshot-threshold <u64>]`
 - `eventdbx schema add --aggregate <name> --events <event1,event2,...>`
-- `eventdbx schema alter <aggregate> [--event <name>] [--snapshot-threshold <u64>] [--lock <true|false>] [--field <name>] [--add <field1,field2,...>] [--remove <field1,field2,...>]`
 - `eventdbx schema remove --aggregate <name> --event <name>`
 - `eventdbx schema list`
-- `eventdbx schema show --aggregate <name>`
 
 Schemas are stored on disk; when the server runs with restriction enabled, incoming events must satisfy the recorded schema.
 
 ### Aggregates
 
-- `eventdbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE...`  
-  Appends an event to the store (validated against the schema when restricted).
-- `eventdbx aggregate list`  
-  Lists aggregates with version, Merkle root, and archive status.
+- `eventdbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--stage]`  
+  Appends an event immediately—use `--stage` to queue it for a later commit.
+- `eventdbx aggregate list [--skip <n>] [--take <n>] [--stage]`  
+  Lists aggregates with version, Merkle root, and archive status; pass `--stage` to display queued events instead.
 - `eventdbx aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
 - `eventdbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
 - `eventdbx aggregate verify --aggregate <type> --aggregate-id <id>`
 - `eventdbx aggregate snapshot --aggregate <type> --aggregate-id <id> [--comment <text>]`
 - `eventdbx aggregate archive --aggregate <type> --aggregate-id <id> [--comment <text>]`
 - `eventdbx aggregate restore --aggregate <type> --aggregate-id <id> [--comment <text>]`
+- `eventdbx aggregate remove --aggregate <type> --aggregate-id <id>`    Removes an aggregate that has no events (version still 0).
 - `eventdbx aggregate commit`  
-  Currently a no-op placeholder.
+  Flushes all staged events in a single atomic transaction.
+
+Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply --stage` to add entries to this queue, inspect them with `aggregate list --stage`, and persist the entire batch with `aggregate commit`. Events are validated against the active schema (when restriction is enabled) during both staging and commit. The commit operation writes every pending event in one RocksDB batch, guaranteeing all-or-nothing persistence.
 
 ### Plugins
 
@@ -201,15 +202,13 @@ The server exposes a small HTTP API (served on port `7070` by default). All endp
 | Method & Path                                                               | Description                                                         |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | `GET /health`                                                               | Liveness probe (unauthenticated).                                   |
-| `GET /v1/aggregates`                                                        | Lists all aggregates.                                               |
+| `GET /v1/aggregates`                                                        | Lists aggregates; supports `skip`/`take` query parameters.          |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}`                        | Returns the current state for a specific aggregate.                 |
-| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                 | Lists every event for an aggregate.                                 |
-| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events/recent?take=<n>` | Returns the `n` most recent events (defaults to 10).                |
-| `POST /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                | Appends an event scoped to the path aggregate.                      |
+| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                 | Lists events for an aggregate; supports `skip`/`take` pagination.   |
 | `POST /v1/events`                                                           | Appends an event; aggregate identifiers are provided in the body.   |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/verify`                 | Computes and returns the Merkle root for integrity verification.    |
-| `GET /v1/schemas`                                                           | Lists all schema definitions.                                       |
-| `GET /v1/schemas/{aggregate}`                                               | Returns the schema for a specific aggregate.                        |
+
+Paginated responses cap `take` at the configurable `page_limit` (default `1000`). Adjust it with `eventdbx config --page-limit <n>` if you need larger pages.
 
 All authenticated requests must include `Authorization: Bearer <token>` with a token issued via the CLI.
 
@@ -232,6 +231,11 @@ curl \
       }' \
   http://localhost:7070/v1/events
 
+# Retrieve the first 10 events for an aggregate (supports `skip`/`take` up to `page_limit`)
+curl \
+  -H "Authorization: Bearer TOKEN" \
+  "http://localhost:7070/v1/aggregates/patient/p-001/events?skip=0&take=10"
+
 # Health check
 curl http://localhost:7070/health
 
@@ -240,29 +244,22 @@ curl \
   -H "Authorization: Bearer TOKEN" \
   http://localhost:7070/v1/aggregates
 
-# Append an event
+# Append an event (global endpoint)
 curl \
   -X POST \
   -H "Authorization: Bearer TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
+        "aggregate_type": "patient",
+        "aggregate_id": "p-001",
         "event_type": "patient-updated",
         "payload": {
           "status": "inactive",
           "comment": "Archived via API"
         }
       }' \
-  http://localhost:7070/v1/aggregates/patient/p-001/events
+  http://localhost:7070/v1/events
 
-# Fetch the latest five events for an aggregate
-curl \
-  -H "Authorization: Bearer TOKEN" \
-  "http://localhost:7070/v1/aggregates/patient/p-001/events/recent?take=5"
-
-# Retrieve a schema definition
-curl \
-  -H "Authorization: Bearer TOKEN" \
-  http://localhost:7070/v1/schemas/patient | jq
 ```
 
 ## Contributing

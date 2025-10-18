@@ -31,6 +31,10 @@ pub struct Config {
     pub plugins: Vec<PluginDefinition>,
     #[serde(default)]
     pub column_types: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default = "default_list_page_size")]
+    pub list_page_size: usize,
+    #[serde(default = "default_page_limit")]
+    pub page_limit: usize,
 }
 
 impl Default for Config {
@@ -47,6 +51,8 @@ impl Default for Config {
             restrict: default_restrict(),
             plugins: Vec::new(),
             column_types: BTreeMap::new(),
+            list_page_size: default_list_page_size(),
+            page_limit: default_page_limit(),
         }
     }
 }
@@ -59,6 +65,8 @@ pub struct ConfigUpdate {
     pub memory_threshold: Option<usize>,
     pub data_encryption_key: Option<String>,
     pub restrict: Option<bool>,
+    pub list_page_size: Option<usize>,
+    pub page_limit: Option<usize>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -117,6 +125,12 @@ impl Config {
         if let Some(restrict) = update.restrict {
             self.restrict = restrict;
         }
+        if let Some(list_page_size) = update.list_page_size {
+            self.list_page_size = list_page_size;
+        }
+        if let Some(page_limit) = update.page_limit {
+            self.page_limit = page_limit;
+        }
         self.updated_at = Utc::now();
     }
 
@@ -148,6 +162,10 @@ impl Config {
 
     pub fn schema_store_path(&self) -> PathBuf {
         self.data_dir.join("schemas.json")
+    }
+
+    pub fn staging_path(&self) -> PathBuf {
+        self.data_dir.join("staged_events.json")
     }
 
     pub fn pid_file_path(&self) -> PathBuf {
@@ -188,6 +206,14 @@ fn default_data_dir() -> PathBuf {
 
 fn default_restrict() -> bool {
     true
+}
+
+fn default_list_page_size() -> usize {
+    10
+}
+
+fn default_page_limit() -> usize {
+    1000
 }
 
 fn deserialize_restrict<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
