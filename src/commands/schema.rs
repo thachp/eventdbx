@@ -5,7 +5,6 @@ use clap::{Args, Parser as ClapParser, Subcommand};
 
 use eventdbx::{
     config::load_or_default,
-    error::EventError,
     schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
 };
 
@@ -131,34 +130,20 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                 schema.snapshot_threshold
             );
         }
-        SchemaCommands::Add(args) => match manager.get(&args.aggregate) {
-            Ok(_) => {
-                let mut update = SchemaUpdate::default();
-                for event in &args.events {
-                    update.event_add_fields.entry(event.clone()).or_default();
-                }
-                let schema = manager.update(&args.aggregate, update)?;
-                println!(
-                    "schema={} added_events={} total_events={}",
-                    schema.aggregate,
-                    args.events.join(","),
-                    schema.events.len()
-                );
+        SchemaCommands::Add(args) => {
+            manager.get(&args.aggregate)?;
+            let mut update = SchemaUpdate::default();
+            for event in &args.events {
+                update.event_add_fields.entry(event.clone()).or_default();
             }
-            Err(EventError::SchemaNotFound) => {
-                let schema = manager.create(CreateSchemaInput {
-                    aggregate: args.aggregate.clone(),
-                    events: args.events.clone(),
-                    snapshot_threshold: None,
-                })?;
-                println!(
-                    "schema={} created events={}",
-                    schema.aggregate,
-                    schema.events.len()
-                );
-            }
-            Err(err) => return Err(err.into()),
-        },
+            let schema = manager.update(&args.aggregate, update)?;
+            println!(
+                "schema={} added_events={} total_events={}",
+                schema.aggregate,
+                args.events.join(","),
+                schema.events.len()
+            );
+        }
         SchemaCommands::Alter(args) => {
             apply_schema_update(&manager, args)?;
         }
