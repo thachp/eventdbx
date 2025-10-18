@@ -17,7 +17,7 @@ use super::{
     config::Config,
     error::{EventError, Result},
     plugin::PluginManager,
-    schema::{AggregateSchema, SchemaManager},
+    schema::SchemaManager,
     store::{self, AggregateState, AppendEvent, EventRecord, EventStore},
     token::{AccessKind, TokenManager},
 };
@@ -52,21 +52,11 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
             "/v1/aggregates/:aggregate_type/:aggregate_id",
             get(get_aggregate),
         )
-        .route(
-            "/v1/aggregates/:aggregate_type/:aggregate_id/events",
-            post(append_event).get(list_events),
-        )
-        .route(
-            "/v1/aggregates/:aggregate_type/:aggregate_id/events/recent",
-            get(list_recent_events),
-        )
         .route("/v1/events", post(append_event_global))
         .route(
             "/v1/aggregates/:aggregate_type/:aggregate_id/verify",
             get(verify_aggregate),
         )
-        .route("/v1/schemas", get(list_schemas))
-        .route("/v1/schemas/:aggregate", get(get_schema))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -122,75 +112,6 @@ async fn get_aggregate(
     Ok(Json(aggregate))
 }
 
-async fn list_events(
-    State(state): State<AppState>,
-    Path((aggregate_type, aggregate_id)): Path<(String, String)>,
-) -> Result<Json<Vec<EventRecord>>> {
-    let events = state.store.list_events(&aggregate_type, &aggregate_id)?;
-    Ok(Json(events))
-}
-
-#[derive(Deserialize)]
-struct EventsQuery {
-    #[serde(default)]
-    take: Option<usize>,
-}
-
-async fn list_recent_events(
-    State(state): State<AppState>,
-    Path((aggregate_type, aggregate_id)): Path<(String, String)>,
-    Query(params): Query<EventsQuery>,
-) -> Result<Json<Vec<EventRecord>>> {
-    let mut events = state.store.list_events(&aggregate_type, &aggregate_id)?;
-
-    let take = params.take.unwrap_or(10);
-    if take == 0 {
-        return Ok(Json(Vec::new()));
-    }
-
-    if events.len() > take {
-        events = events.split_off(events.len() - take);
-    }
-    events.reverse();
-
-    Ok(Json(events))
-}
-
-#[derive(Deserialize)]
-struct AppendEventRequest {
-    event_type: String,
-    payload: Value,
-}
-
-async fn append_event(
-    State(state): State<AppState>,
-    Path((aggregate_type, aggregate_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<AppendEventRequest>,
-) -> Result<Json<EventRecord>> {
-    let token = extract_bearer_token(&headers).ok_or(EventError::Unauthorized)?;
-    let claims = state.tokens.authorize(&token, AccessKind::Write)?.into();
-
-    let payload_map = store::payload_to_map(&request.payload);
-    if state.restrict {
-        state
-            .schemas
-            .validate_event(&aggregate_type, &request.event_type, &payload_map)?;
-    }
-
-    let record = state.store.append(AppendEvent {
-        aggregate_type,
-        aggregate_id,
-        event_type: request.event_type,
-        payload: request.payload,
-        issued_by: Some(claims),
-    })?;
-
-    notify_plugins(&state, &record);
-
-    Ok(Json(record))
-}
-
 #[derive(Deserialize)]
 struct AppendEventGlobalRequest {
     aggregate_type: String,
@@ -238,18 +159,6 @@ async fn verify_aggregate(
 #[derive(Serialize)]
 struct VerifyResponse {
     merkle_root: String,
-}
-
-async fn list_schemas(State(state): State<AppState>) -> Result<Json<Vec<AggregateSchema>>> {
-    Ok(Json(state.schemas.list()))
-}
-
-async fn get_schema(
-    State(state): State<AppState>,
-    Path(aggregate): Path<String>,
-) -> Result<Json<AggregateSchema>> {
-    let schema = state.schemas.get(&aggregate)?;
-    Ok(Json(schema))
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {

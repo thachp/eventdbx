@@ -125,7 +125,6 @@ EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--
 
 - `eventdbx schema create --aggregate <name> --events <event1,event2,...> [--snapshot-threshold <u64>]`
 - `eventdbx schema add --aggregate <name> --events <event1,event2,...>`
-- `eventdbx schema alter <aggregate> [--event <name>] [--snapshot-threshold <u64>] [--lock <true|false>] [--field <name>] [--add <field1,field2,...>] [--remove <field1,field2,...>]`
 - `eventdbx schema remove --aggregate <name> --event <name>`
 - `eventdbx schema list`
 
@@ -205,13 +204,8 @@ The server exposes a small HTTP API (served on port `7070` by default). All endp
 | `GET /health`                                                               | Liveness probe (unauthenticated).                                   |
 | `GET /v1/aggregates`                                                        | Lists aggregates; supports `skip`/`take` query parameters.          |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}`                        | Returns the current state for a specific aggregate.                 |
-| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                 | Lists every event for an aggregate.                                 |
-| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events/recent?take=<n>` | Returns the `n` most recent events (defaults to 10).                |
-| `POST /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                | Appends an event scoped to the path aggregate.                      |
 | `POST /v1/events`                                                           | Appends an event; aggregate identifiers are provided in the body.   |
 | `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/verify`                 | Computes and returns the Merkle root for integrity verification.    |
-| `GET /v1/schemas`                                                           | Lists all schema definitions.                                       |
-| `GET /v1/schemas/{aggregate}`                                               | Returns the schema for a specific aggregate.                        |
 
 All authenticated requests must include `Authorization: Bearer <token>` with a token issued via the CLI.
 
@@ -242,29 +236,22 @@ curl \
   -H "Authorization: Bearer TOKEN" \
   http://localhost:7070/v1/aggregates
 
-# Append an event
+# Append an event (global endpoint)
 curl \
   -X POST \
   -H "Authorization: Bearer TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
+        "aggregate_type": "patient",
+        "aggregate_id": "p-001",
         "event_type": "patient-updated",
         "payload": {
           "status": "inactive",
           "comment": "Archived via API"
         }
       }' \
-  http://localhost:7070/v1/aggregates/patient/p-001/events
+  http://localhost:7070/v1/events
 
-# Fetch the latest five events for an aggregate
-curl \
-  -H "Authorization: Bearer TOKEN" \
-  "http://localhost:7070/v1/aggregates/patient/p-001/events/recent?take=5"
-
-# Retrieve a schema definition
-curl \
-  -H "Authorization: Bearer TOKEN" \
-  http://localhost:7070/v1/schemas/patient | jq
 ```
 
 ## Contributing

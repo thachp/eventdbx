@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Args, Parser as ClapParser, Subcommand};
+use clap::{Args, Subcommand};
 
 use eventdbx::{
     config::load_or_default,
@@ -14,8 +14,6 @@ pub enum SchemaCommands {
     Create(SchemaCreateArgs),
     /// Add events to an existing schema definition
     Add(SchemaAddEventArgs),
-    /// Alter an existing schema definition
-    Alter(SchemaAlterArgs),
     /// Remove an event definition from an aggregate
     Remove(SchemaRemoveEventArgs),
     /// List available schemas
@@ -48,68 +46,12 @@ pub struct SchemaAddEventArgs {
 }
 
 #[derive(Args)]
-pub struct SchemaAlterArgs {
-    /// Aggregate name
-    pub aggregate: String,
-
-    /// Optional event name to alter
-    pub event: Option<String>,
-
-    /// Set the snapshot threshold
-    #[arg(long)]
-    pub snapshot_threshold: Option<u64>,
-
-    /// Lock or unlock the aggregate (or field when --field is specified)
-    #[arg(long)]
-    pub lock: Option<bool>,
-
-    /// Field name to lock/unlock
-    #[arg(long)]
-    pub field: Option<String>,
-
-    /// Add fields to an event definition
-    #[arg(long, short = 'a', value_delimiter = ',')]
-    pub add: Vec<String>,
-
-    /// Remove fields from an event definition
-    #[arg(long, short = 'r', value_delimiter = ',')]
-    pub remove: Vec<String>,
-}
-
-#[derive(Args)]
 pub struct SchemaRemoveEventArgs {
     /// Aggregate name
     pub aggregate: String,
 
     /// Event name to remove
     pub event: String,
-}
-
-#[derive(ClapParser, Default, Debug)]
-struct SchemaInlineArgs {
-    /// Event name to target when adding/removing fields
-    #[arg(long)]
-    event: Option<String>,
-
-    /// Add fields to the event definition (comma separated)
-    #[arg(long, value_delimiter = ',', default_value = "")]
-    add: Vec<String>,
-
-    /// Remove fields from the event definition (comma separated)
-    #[arg(long, value_delimiter = ',', default_value = "")]
-    remove: Vec<String>,
-
-    /// Lock or unlock the aggregate (or specific field when --field is set)
-    #[arg(long)]
-    lock: Option<bool>,
-
-    /// Field name to lock/unlock
-    #[arg(long)]
-    field: Option<String>,
-
-    /// Snapshot threshold to set
-    #[arg(long)]
-    snapshot_threshold: Option<u64>,
 }
 
 pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<()> {
@@ -143,9 +85,6 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                 args.events.join(","),
                 schema.events.len()
             );
-        }
-        SchemaCommands::Alter(args) => {
-            apply_schema_update(&manager, args)?;
         }
         SchemaCommands::Remove(args) => {
             let schema = manager.remove_event(&args.aggregate, &args.event)?;
@@ -181,80 +120,13 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                 let schema = manager.get(aggregate)?;
                 println!("{}", serde_json::to_string_pretty(&schema)?);
             }
-            [aggregate, rest @ ..] => {
-                let mut argv = vec!["schema-inline".to_string()];
-                argv.extend(rest.iter().cloned());
-                let inline = SchemaInlineArgs::try_parse_from(argv.iter().map(String::as_str))?;
-                let alter_args = SchemaAlterArgs {
-                    aggregate: aggregate.clone(),
-                    event: inline.event,
-                    snapshot_threshold: inline.snapshot_threshold,
-                    lock: inline.lock,
-                    field: inline.field,
-                    add: inline.add,
-                    remove: inline.remove,
-                };
-                apply_schema_update(&manager, alter_args)?;
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "unsupported schema command; available subcommands are create, add, remove, list"
+                ));
             }
         },
     }
 
-    Ok(())
-}
-
-fn apply_schema_update(manager: &SchemaManager, args: SchemaAlterArgs) -> Result<()> {
-    let mut update = SchemaUpdate::default();
-
-    if let Some(value) = args.snapshot_threshold {
-        update.snapshot_threshold = Some(Some(value));
-    }
-
-    if args.event.is_none() && args.field.is_none() {
-        if let Some(lock) = args.lock {
-            update.locked = Some(lock);
-        }
-    }
-
-    if let Some(field) = args.field.clone() {
-        if let Some(lock) = args.lock {
-            update.field_lock = Some((field, lock));
-        } else {
-            return Err(anyhow::anyhow!(
-                "--lock must be provided when using --field"
-            ));
-        }
-    }
-
-    if let Some(event) = args.event.clone() {
-        if !args.add.is_empty() {
-            update
-                .event_add_fields
-                .entry(event.clone())
-                .or_default()
-                .extend(args.add.clone());
-        }
-        if !args.remove.is_empty() {
-            update
-                .event_remove_fields
-                .insert(event.clone(), args.remove.clone());
-        }
-        if args.add.is_empty() && args.remove.is_empty() {
-            return Err(anyhow::anyhow!(
-                "provide --add or --remove when specifying an event"
-            ));
-        }
-    } else if (!args.add.is_empty() || !args.remove.is_empty()) && args.event.is_none() {
-        return Err(anyhow::anyhow!(
-            "--event must be provided when adding or removing fields"
-        ));
-    }
-
-    let schema = manager.update(&args.aggregate, update)?;
-    println!(
-        "schema={} updated_at={} version_events={}",
-        schema.aggregate,
-        schema.updated_at.to_rfc3339(),
-        schema.events.len()
-    );
     Ok(())
 }
