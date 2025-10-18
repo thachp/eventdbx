@@ -21,8 +21,6 @@ use eventdbx::{
 pub enum AggregateCommands {
     /// Apply an event to an aggregate instance
     Apply(AggregateApplyArgs),
-    /// Create an empty aggregate (no events)
-    Create(AggregateIdentityArgs),
     /// List aggregates in the store
     List(AggregateListArgs),
     /// Retrieve the state of an aggregate
@@ -38,7 +36,7 @@ pub enum AggregateCommands {
     /// Restore an archived aggregate instance
     Restore(AggregateArchiveArgs),
     /// Remove an aggregate that has no events
-    Remove(AggregateIdentityArgs),
+    Remove(AggregateRemoveArgs),
     /// Commit staged events read from stdin (JSON array or NDJSON)
     Commit,
 }
@@ -139,6 +137,15 @@ pub struct KeyValue {
 }
 
 #[derive(Args)]
+pub struct AggregateRemoveArgs {
+    /// Aggregate type
+    pub aggregate: String,
+
+    /// Aggregate identifier
+    pub aggregate_id: String,
+}
+
+#[derive(Args)]
 pub struct AggregateListArgs {
     /// Number of aggregates to skip
     #[arg(long, default_value_t = 0)]
@@ -153,26 +160,9 @@ pub struct AggregateListArgs {
     pub stage: bool,
 }
 
-#[derive(Args)]
-pub struct AggregateIdentityArgs {
-    /// Aggregate type
-    pub aggregate: String,
-
-    /// Aggregate identifier
-    pub aggregate_id: String,
-}
-
 pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     match command {
-        AggregateCommands::Create(args) => {
-            let store = EventStore::open(config.event_store_path())?;
-            store.create_aggregate(&args.aggregate, &args.aggregate_id)?;
-            println!(
-                "aggregate_type={} aggregate_id={} created",
-                args.aggregate, args.aggregate_id
-            );
-        }
         AggregateCommands::List(args) => {
             if args.stage {
                 let staging_path = config.staging_path();
