@@ -165,9 +165,10 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `eventdbx plugin list`
 - `eventdbx plugin queue`
 - `eventdbx plugin queue clear`
+- `eventdbx plugin queue retry [--event-id <uuid>]`
 - `eventdbx plugin replay <plugin-name> <aggregate> [<aggregate_id>]`
 
-Clearing dead entries prompts for confirmation to avoid accidental removal.
+Clearing dead entries prompts for confirmation to avoid accidental removal. Manual retries run the failed events immediately; use `--event-id` to target a specific entry.
 
 ### System
 
