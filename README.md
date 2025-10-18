@@ -150,15 +150,14 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 
 ### Plugins
 
-- `eventdbx plugin map --aggregate <name> --field <field> --datatype <type> [--plugin postgres]`  
-  Records the base column type for a field; use `--plugin postgres` to override only the Postgres mapping.
-- `eventdbx plugin postgres --connection <connection-string> [--disable]`
-- `eventdbx plugin sqlite --path <file> [--disable]`
-- `eventdbx plugin csv --output-dir <dir> [--disable]`
-- `eventdbx plugin tcp --host <hostname> --port <u16> [--disable]`
-- `eventdbx plugin http --endpoint <url> [--header KEY=VALUE]... [--disable]`
-- `eventdbx plugin json --path <file> [--pretty] [--disable]`
-- `eventdbx plugin log --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
+- `eventdbx plugin map --aggregate <name> --field <field> --datatype <type>`  
+  Records the base column type for a field.
+- `eventdbx plugin csv --output-dir <dir> [--name <label>] [--disable]`
+- `eventdbx plugin tcp --host <hostname> --port <u16> [--name <label>] [--disable]`
+- `eventdbx plugin http --endpoint <url> [--header KEY=VALUE]... [--name <label>] [--disable]`
+- `eventdbx plugin json --path <file> [--pretty] [--name <label>] [--disable]`
+- `eventdbx plugin log --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--name <label>] [--disable]`
+- `eventdbx plugin list`
 - `eventdbx plugin queue`
 
 Plugins fire after every committed event to keep external systems in sync. Each plugin sends or records different data:
@@ -166,8 +165,8 @@ Plugins fire after every committed event to keep external systems in sync. Each 
 Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications.
 Use `eventdbx plugin queue` to inspect pending/dead event IDs.
 
-- **Postgres**: Applies schema/base types to create/alter columns and upsert the aggregate row. Payload is the aggregate state at the time of the event.
-- **SQLite**: Mirrors state into a local SQLite file with the same column set as Postgres.
+Plugin configurations are stored in `.eventdbx/plugins.json`. Supply `--name` to manage multiple instances of the same plugin type for later updates or disable operations.
+
 - **CSV**: Appends state snapshots into `<aggregate>.csv`, expanding columns as new fields appear.
 - **TCP**: Writes a single-line JSON `EventRecord` to the configured socket.
 - **HTTP**: POSTs the `EventRecord` JSON to the endpoint with optional headers.

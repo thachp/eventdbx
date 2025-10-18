@@ -175,6 +175,10 @@ impl Config {
         self.data_dir.join("staged_events.json")
     }
 
+    pub fn plugins_path(&self) -> PathBuf {
+        self.data_dir.join("plugins.json")
+    }
+
     pub fn plugin_queue_path(&self) -> PathBuf {
         self.data_dir.join("plugin_queue.json")
     }
@@ -195,16 +199,29 @@ impl Config {
                 .unwrap_or(false)
     }
 
-    pub fn set_plugin(&mut self, plugin: PluginDefinition) {
-        if let Some(existing) = self
-            .plugins
-            .iter_mut()
-            .find(|item| item.config.kind() == plugin.config.kind())
-        {
-            *existing = plugin;
-        } else {
-            self.plugins.push(plugin);
+    pub fn load_plugins(&self) -> Result<Vec<PluginDefinition>> {
+        let path = self.plugins_path();
+        if !path.exists() {
+            return Ok(Vec::new());
         }
+
+        let contents = fs::read_to_string(&path)?;
+        if contents.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let plugins = serde_json::from_str(&contents)?;
+        Ok(plugins)
+    }
+
+    pub fn save_plugins(&self, plugins: &[PluginDefinition]) -> Result<()> {
+        let path = self.plugins_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let payload = serde_json::to_string_pretty(plugins)?;
+        fs::write(path, payload)?;
+        Ok(())
     }
 }
 
@@ -257,14 +274,14 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginDefinition {
     pub enabled: bool,
+    #[serde(default)]
+    pub name: Option<String>,
     pub config: PluginConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginConfig {
-    Postgres(PostgresPluginConfig),
-    Sqlite(SqlitePluginConfig),
     Csv(CsvPluginConfig),
     Tcp(TcpPluginConfig),
     Http(HttpPluginConfig),
@@ -275,8 +292,6 @@ pub enum PluginConfig {
 impl PluginConfig {
     pub fn kind(&self) -> PluginKind {
         match self {
-            PluginConfig::Postgres(_) => PluginKind::Postgres,
-            PluginConfig::Sqlite(_) => PluginKind::Sqlite,
             PluginConfig::Csv(_) => PluginKind::Csv,
             PluginConfig::Tcp(_) => PluginKind::Tcp,
             PluginConfig::Http(_) => PluginKind::Http,
@@ -289,30 +304,11 @@ impl PluginConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
-    Postgres,
-    Sqlite,
     Csv,
     Tcp,
     Http,
     Json,
     Log,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PostgresPluginConfig {
-    pub connection_string: String,
-    #[serde(default)]
-    pub field_mappings: BTreeMap<String, BTreeMap<String, PostgresColumnConfig>>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PostgresColumnConfig {
-    pub data_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SqlitePluginConfig {
-    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
