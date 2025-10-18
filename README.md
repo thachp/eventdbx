@@ -170,6 +170,21 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 
 Clearing dead entries prompts for confirmation to avoid accidental removal. Manual retries run the failed events immediately; use `--event-id` to target a specific entry.
 
+### Replication
+
+- `eventdbx remote add <name> <endpoint> --public-key <base64>`  
+  Registers a standby and pins its Ed25519 public key.
+- `eventdbx remote rm <name>`  
+  Removes a configured remote.
+- `eventdbx remote ls`  
+  Lists remotes with their endpoints.
+- `eventdbx remote show <name>`  
+  Displays the endpoint and pinned key for a remote.
+- `eventdbx remote key [--show-path]`  
+  Prints this node's replication public key (generated on first run).
+
+Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration.
+
 ### Maintenance
 
 - `eventdbx backup --output <path> [--force]`  
