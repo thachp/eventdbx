@@ -166,6 +166,13 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `eventdbx plugin queue`
 - `eventdbx plugin replay <plugin-name> <aggregate> [<aggregate_id>]`
 
+### System
+
+- `eventdbx system backup --output <path> [--force]`  
+  Creates a compressed archive with the entire EventDBX data directory and configuration. Stop the server before running a backup to avoid partial snapshots.
+- `eventdbx system restore --input <path> [--data-dir <path>] [--force]`  
+  Restores data from a backup archive. Use `--data-dir` to override the stored location, and `--force` to overwrite non-empty destinations. The server must be stopped before restoring.
+
 Plugins fire after every committed event to keep external systems in sync. Each plugin sends or records different data:
 
 Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications.
