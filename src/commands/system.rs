@@ -8,23 +8,15 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use clap::{Args, Subcommand};
+use clap::Args;
 use eventdbx::config::{Config, default_config_path, load_or_default};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use serde::{Deserialize, Serialize};
 use tar::{Archive, Builder};
 use tempfile::tempdir;
 
-#[derive(Subcommand)]
-pub enum SystemCommands {
-    /// Create a backup archive containing all EventDBX data
-    Backup(SystemBackupArgs),
-    /// Restore EventDBX data from a backup archive
-    Restore(SystemRestoreArgs),
-}
-
 #[derive(Args)]
-pub struct SystemBackupArgs {
+pub struct BackupArgs {
     /// Destination path for the backup archive (.tar.gz)
     #[arg(long)]
     pub output: PathBuf,
@@ -35,7 +27,7 @@ pub struct SystemBackupArgs {
 }
 
 #[derive(Args)]
-pub struct SystemRestoreArgs {
+pub struct RestoreArgs {
     /// Path to the backup archive (.tar.gz)
     #[arg(long)]
     pub input: PathBuf,
@@ -62,20 +54,14 @@ struct PidRecord {
     pid: u32,
 }
 
-pub fn execute(config_path: Option<PathBuf>, command: SystemCommands) -> Result<()> {
-    match command {
-        SystemCommands::Backup(args) => backup(config_path, args),
-        SystemCommands::Restore(args) => restore(config_path, args),
-    }
-}
-
-fn backup(config_path: Option<PathBuf>, args: SystemBackupArgs) -> Result<()> {
+pub fn backup(config_path: Option<PathBuf>, args: BackupArgs) -> Result<()> {
     let (config, resolved_config_path) = load_or_default(config_path)?;
 
     ensure_server_stopped(&config)?;
     config.ensure_data_dir()?;
 
-    let output_path = args.output;
+    let BackupArgs { output, force } = args;
+    let output_path = output;
     if output_path.starts_with(&config.data_dir) {
         bail!(
             "backup output path {} resides inside the data directory {}; choose a different location",
@@ -85,7 +71,7 @@ fn backup(config_path: Option<PathBuf>, args: SystemBackupArgs) -> Result<()> {
     }
 
     if output_path.exists() {
-        if args.force {
+        if force {
             fs::remove_file(&output_path).with_context(|| {
                 format!(
                     "failed to remove existing backup at {}",
@@ -143,9 +129,15 @@ fn backup(config_path: Option<PathBuf>, args: SystemBackupArgs) -> Result<()> {
     Ok(())
 }
 
-fn restore(config_path: Option<PathBuf>, args: SystemRestoreArgs) -> Result<()> {
-    if !args.input.exists() {
-        bail!("backup archive {} does not exist", args.input.display());
+pub fn restore(config_path: Option<PathBuf>, args: RestoreArgs) -> Result<()> {
+    let RestoreArgs {
+        input,
+        data_dir,
+        force,
+    } = args;
+
+    if !input.exists() {
+        bail!("backup archive {} does not exist", input.display());
     }
 
     let target_config_path = match config_path {
@@ -153,8 +145,8 @@ fn restore(config_path: Option<PathBuf>, args: SystemRestoreArgs) -> Result<()> 
         None => default_config_path().context("failed to resolve default config path")?,
     };
 
-    let archive_file = File::open(&args.input)
-        .with_context(|| format!("failed to open {}", args.input.display()))?;
+    let archive_file =
+        File::open(&input).with_context(|| format!("failed to open {}", input.display()))?;
     let decoder = GzDecoder::new(archive_file);
     let mut archive = Archive::new(decoder);
     let temp_dir = tempdir().context("failed to create temporary working directory")?;
@@ -174,7 +166,7 @@ fn restore(config_path: Option<PathBuf>, args: SystemRestoreArgs) -> Result<()> 
     };
 
     let mut restored_config = manifest.config;
-    if let Some(data_dir) = args.data_dir {
+    if let Some(data_dir) = data_dir {
         restored_config.data_dir = data_dir;
     }
     restored_config.updated_at = Utc::now();
@@ -186,7 +178,7 @@ fn restore(config_path: Option<PathBuf>, args: SystemRestoreArgs) -> Result<()> 
         bail!("backup archive is missing the data directory");
     }
 
-    prepare_target_data_dir(&restored_config.data_dir, args.force)?;
+    prepare_target_data_dir(&restored_config.data_dir, force)?;
 
     copy_dir_all(&backup_data_root, &restored_config.data_dir).with_context(|| {
         format!(
@@ -214,7 +206,7 @@ fn restore(config_path: Option<PathBuf>, args: SystemRestoreArgs) -> Result<()> 
 
     println!(
         "Restored backup from {} into {} (config written to {})",
-        args.input.display(),
+        input.display(),
         restored_config.data_dir.display(),
         target_config_path.display()
     );

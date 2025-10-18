@@ -11,7 +11,7 @@ use crate::commands::{
     plugin::PluginCommands,
     schema::SchemaCommands,
     start::{DestroyArgs, StartArgs},
-    system::SystemCommands,
+    system::{BackupArgs, RestoreArgs},
     token::TokenCommands,
 };
 
@@ -60,11 +60,10 @@ enum Commands {
         #[command(subcommand)]
         command: AggregateCommands,
     },
-    /// Perform system-level maintenance operations
-    System {
-        #[command(subcommand)]
-        command: SystemCommands,
-    },
+    /// Create a backup archive containing all EventDBX data
+    Backup(BackupArgs),
+    /// Restore EventDBX data from a backup archive
+    Restore(RestoreArgs),
     /// Internal command used for daemonized server execution
     #[command(name = "__internal:server", hide = true)]
     InternalServer,
@@ -90,7 +89,8 @@ async fn main() -> Result<()> {
         Commands::Schema { command } => commands::schema::execute(config, command)?,
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
-        Commands::System { command } => commands::system::execute(config, command)?,
+        Commands::Backup(args) => commands::system::backup(config, args)?,
+        Commands::Restore(args) => commands::system::restore(config, args)?,
         Commands::InternalServer => commands::start::run_internal(config).await?,
     }
 

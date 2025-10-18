@@ -170,11 +170,11 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 
 Clearing dead entries prompts for confirmation to avoid accidental removal. Manual retries run the failed events immediately; use `--event-id` to target a specific entry.
 
-### System
+### Maintenance
 
-- `eventdbx system backup --output <path> [--force]`  
+- `eventdbx backup --output <path> [--force]`  
   Creates a compressed archive with the entire EventDBX data directory and configuration. Stop the server before running a backup to avoid partial snapshots.
-- `eventdbx system restore --input <path> [--data-dir <path>] [--force]`  
+- `eventdbx restore --input <path> [--data-dir <path>] [--force]`  
   Restores data from a backup archive. Use `--data-dir` to override the stored location, and `--force` to overwrite non-empty destinations. The server must be stopped before restoring.
 
 Plugins fire after every committed event to keep external systems in sync. Each plugin sends or records different data:
