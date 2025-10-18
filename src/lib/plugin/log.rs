@@ -18,6 +18,10 @@ impl LogPlugin {
         Self { config }
     }
 
+    pub(super) fn ensure_ready(&self) -> Result<()> {
+        self.level().map(|_| ())
+    }
+
     fn level(&self) -> Result<Level> {
         match self.config.level.to_ascii_lowercase().as_str() {
             "trace" => Ok(Level::TRACE),

@@ -24,6 +24,17 @@ impl HttpPlugin {
             .expect("failed to build http client");
         Self { config, client }
     }
+
+    pub(super) fn ensure_ready(&self) -> Result<()> {
+        let mut request = self.client.head(&self.config.endpoint);
+        for (key, value) in &self.config.headers {
+            request = request.header(key, value);
+        }
+        request
+            .send()
+            .map(|_| ())
+            .map_err(|err| EventError::Storage(err.to_string()))
+    }
 }
 
 impl Plugin for HttpPlugin {

@@ -18,6 +18,10 @@ impl JsonPlugin {
         Self { config }
     }
 
+    pub(super) fn ensure_ready(&self) -> Result<()> {
+        self.open_file().map(|_| ())
+    }
+
     fn open_file(&self) -> Result<std::fs::File> {
         OpenOptions::new()
             .create(true)

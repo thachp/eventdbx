@@ -3,14 +3,14 @@ use std::sync::Arc;
 use tracing::error;
 
 use crate::{
-    config::{Config, PluginConfig},
+    config::{Config, PluginConfig, PluginDefinition},
     error::Result,
     schema::AggregateSchema,
     store::{AggregateState, EventRecord},
 };
 
-mod util;
 mod csv;
+mod util;
 use csv::CsvPlugin;
 mod tcp;
 use tcp::TcpPlugin;
@@ -88,5 +88,30 @@ impl PluginManager {
             }
         }
         Ok(())
+    }
+}
+
+pub fn establish_connection(definition: &PluginDefinition) -> Result<()> {
+    match &definition.config {
+        PluginConfig::Csv(settings) => {
+            let plugin = CsvPlugin::new(settings.clone());
+            plugin.ensure_ready()
+        }
+        PluginConfig::Tcp(settings) => {
+            let plugin = TcpPlugin::new(settings.clone());
+            plugin.ensure_ready()
+        }
+        PluginConfig::Http(settings) => {
+            let plugin = HttpPlugin::new(settings.clone());
+            plugin.ensure_ready()
+        }
+        PluginConfig::Json(settings) => {
+            let plugin = JsonPlugin::new(settings.clone());
+            plugin.ensure_ready()
+        }
+        PluginConfig::Log(settings) => {
+            let plugin = LogPlugin::new(settings.clone());
+            plugin.ensure_ready()
+        }
     }
 }

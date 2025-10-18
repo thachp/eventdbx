@@ -152,11 +152,14 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 
 - `eventdbx plugin map --aggregate <name> --field <field> --datatype <type>`  
   Records the base column type for a field.
-- `eventdbx plugin csv --output-dir <dir> [--name <label>] [--disable]`
-- `eventdbx plugin tcp --host <hostname> --port <u16> [--name <label>] [--disable]`
-- `eventdbx plugin http --endpoint <url> [--header KEY=VALUE]... [--name <label>] [--disable]`
-- `eventdbx plugin json --path <file> [--pretty] [--name <label>] [--disable]`
-- `eventdbx plugin log --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--name <label>] [--disable]`
+- `eventdbx plugin config csv --name <label> --output-dir <dir> [--disable]`
+- `eventdbx plugin config tcp --name <label> --host <hostname> --port <u16> [--disable]`
+- `eventdbx plugin config http --name <label> --endpoint <url> [--header KEY=VALUE]... [--disable]`
+- `eventdbx plugin config json --name <label> --path <file> [--pretty] [--disable]`
+- `eventdbx plugin config log --name <label> --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
+- `eventdbx plugin enable <label>`
+- `eventdbx plugin disable <label>`
+- `eventdbx plugin remove <label>`
 - `eventdbx plugin list`
 - `eventdbx plugin queue`
 
@@ -165,7 +168,7 @@ Plugins fire after every committed event to keep external systems in sync. Each 
 Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications.
 Use `eventdbx plugin queue` to inspect pending/dead event IDs.
 
-Plugin configurations are stored in `.eventdbx/plugins.json`. Supply `--name` to manage multiple instances of the same plugin type for later updates or disable operations.
+Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instance requires a unique `--name` so you can update, enable, disable, or remove it later. `plugin enable` validates connectivity (creating directories, touching files, or checking network access) before marking the plugin active. Remove a plugin only after disabling it with `plugin disable <name>`.
 
 - **CSV**: Appends state snapshots into `<aggregate>.csv`, expanding columns as new fields appear.
 - **TCP**: Writes a single-line JSON `EventRecord` to the configured socket.

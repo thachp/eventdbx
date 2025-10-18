@@ -1,6 +1,10 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs,
+    path::PathBuf,
+};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -9,33 +13,50 @@ use eventdbx::config::{
     CsvPluginConfig, HttpPluginConfig, JsonPluginConfig, LogPluginConfig, PluginConfig,
     PluginDefinition, PluginKind, TcpPluginConfig, load_or_default,
 };
+use eventdbx::plugin::establish_connection;
 
 #[derive(Subcommand)]
 pub enum PluginCommands {
-    /// Configure the CSV plugin
-    #[command(name = "csv")]
-    CsvConfigure(PluginCsvConfigureArgs),
-    /// Configure the TCP plugin
-    #[command(name = "tcp")]
-    TcpConfigure(PluginTcpConfigureArgs),
-    /// Configure the HTTP plugin
-    #[command(name = "http")]
-    HttpConfigure(PluginHttpConfigureArgs),
-    /// Configure the JSON file plugin
-    #[command(name = "json")]
-    JsonConfigure(PluginJsonConfigureArgs),
-    /// Configure the logging plugin
-    #[command(name = "log")]
-    LogConfigure(PluginLogConfigureArgs),
+    /// Configure plugins
+    #[command(subcommand)]
+    Config(PluginConfigureCommands),
     /// Configure per-plugin field mappings
     #[command(name = "map")]
     Map(PluginMapArgs),
+    /// Enable a configured plugin
+    #[command(name = "enable")]
+    Enable(PluginEnableArgs),
+    /// Disable a configured plugin
+    #[command(name = "disable")]
+    Disable(PluginDisableArgs),
+    /// Remove a configured plugin
+    #[command(name = "remove")]
+    Remove(PluginRemoveArgs),
     /// Show plugin retry queue statistics
     #[command(name = "queue")]
     Queue,
     /// List enabled plugins
     #[command(name = "list")]
     List,
+}
+
+#[derive(Subcommand)]
+pub enum PluginConfigureCommands {
+    /// Configure the CSV plugin
+    #[command(name = "csv")]
+    Csv(PluginCsvConfigureArgs),
+    /// Configure the TCP plugin
+    #[command(name = "tcp")]
+    Tcp(PluginTcpConfigureArgs),
+    /// Configure the HTTP plugin
+    #[command(name = "http")]
+    Http(PluginHttpConfigureArgs),
+    /// Configure the JSON file plugin
+    #[command(name = "json")]
+    Json(PluginJsonConfigureArgs),
+    /// Configure the logging plugin
+    #[command(name = "log")]
+    Log(PluginLogConfigureArgs),
 }
 
 #[derive(Args)]
@@ -48,9 +69,9 @@ pub struct PluginCsvConfigureArgs {
     #[arg(long, default_value_t = false)]
     pub disable: bool,
 
-    /// Optional label for this CSV plugin instance
+    /// Name for this CSV plugin instance
     #[arg(long)]
-    pub name: Option<String>,
+    pub name: String,
 }
 
 #[derive(Args)]
@@ -67,9 +88,9 @@ pub struct PluginTcpConfigureArgs {
     #[arg(long, default_value_t = false)]
     pub disable: bool,
 
-    /// Optional label for this TCP plugin instance
+    /// Name for this TCP plugin instance
     #[arg(long)]
-    pub name: Option<String>,
+    pub name: String,
 }
 
 #[derive(Args)]
@@ -86,9 +107,9 @@ pub struct PluginHttpConfigureArgs {
     #[arg(long, default_value_t = false)]
     pub disable: bool,
 
-    /// Optional label for this HTTP plugin instance
+    /// Name for this HTTP plugin instance
     #[arg(long)]
-    pub name: Option<String>,
+    pub name: String,
 }
 
 #[derive(Args)]
@@ -105,9 +126,9 @@ pub struct PluginJsonConfigureArgs {
     #[arg(long, default_value_t = false)]
     pub disable: bool,
 
-    /// Optional label for this JSON plugin instance
+    /// Name for this JSON plugin instance
     #[arg(long)]
-    pub name: Option<String>,
+    pub name: String,
 }
 
 #[derive(Args)]
@@ -124,9 +145,9 @@ pub struct PluginLogConfigureArgs {
     #[arg(long, default_value_t = false)]
     pub disable: bool,
 
-    /// Optional label for this Log plugin instance
+    /// Name for this Log plugin instance
     #[arg(long)]
-    pub name: Option<String>,
+    pub name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -150,191 +171,334 @@ pub struct PluginMapArgs {
     pub data_type: String,
 }
 
+#[derive(Args)]
+pub struct PluginEnableArgs {
+    /// Name of the plugin instance to enable
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct PluginDisableArgs {
+    /// Name of the plugin instance to disable
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct PluginRemoveArgs {
+    /// Name of the plugin instance to remove
+    pub name: String,
+}
+
 pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<()> {
     let (mut config, path) = load_or_default(config_path)?;
 
     let mut plugins = config.load_plugins()?;
+    let mut plugins_dirty = normalize_plugin_names(&mut plugins);
+    if dedupe_plugins_by_name(&mut plugins) {
+        plugins_dirty = true;
+    }
+
+    let mut config_dirty = false;
     if plugins.is_empty() && !config.plugins.is_empty() {
         plugins = config.plugins.clone();
         config.plugins.clear();
+        plugins_dirty = true;
+        config_dirty = true;
+
+        if normalize_plugin_names(&mut plugins) {
+            plugins_dirty = true;
+        }
+        if dedupe_plugins_by_name(&mut plugins) {
+            plugins_dirty = true;
+        }
+    }
+
+    if plugins_dirty {
+        config.ensure_data_dir()?;
         config.save_plugins(&plugins)?;
+    }
+    if config_dirty {
         config.ensure_data_dir()?;
         config.save(&path)?;
     }
 
     match command {
         PluginCommands::List => {
-            list_enabled_plugins(&plugins);
+            list_plugins(&plugins);
         }
         PluginCommands::Queue => {
             print_plugin_queue_status(config.plugin_queue_path())?;
         }
-        PluginCommands::CsvConfigure(args) => {
-            let label = display_label(&args.name);
-            match find_plugin_mut(&mut plugins, PluginKind::Csv, &args.name)? {
-                Some(plugin) => {
-                    plugin.enabled = !args.disable;
-                    plugin.name = args.name.clone();
-                    plugin.config = PluginConfig::Csv(CsvPluginConfig {
-                        output_dir: args.output_dir.clone(),
-                    });
+        PluginCommands::Config(config_command) => match config_command {
+            PluginConfigureCommands::Csv(args) => {
+                let name = args.name.trim();
+                if name.is_empty() {
+                    bail!("plugin name cannot be empty");
                 }
-                None => {
-                    plugins.push(PluginDefinition {
-                        enabled: !args.disable,
-                        name: args.name.clone(),
-                        config: PluginConfig::Csv(CsvPluginConfig {
+                let name_owned = name.to_string();
+                let label = display_label(name);
+                match find_plugin_mut(&mut plugins, PluginKind::Csv, Some(name))? {
+                    Some(plugin) => {
+                        plugin.enabled = !args.disable;
+                        plugin.name = Some(name_owned.clone());
+                        plugin.config = PluginConfig::Csv(CsvPluginConfig {
                             output_dir: args.output_dir.clone(),
-                        }),
-                    });
+                        });
+                    }
+                    None => {
+                        ensure_unique_plugin_name(&plugins, name)?;
+                        plugins.push(PluginDefinition {
+                            enabled: !args.disable,
+                            name: Some(name_owned.clone()),
+                            config: PluginConfig::Csv(CsvPluginConfig {
+                                output_dir: args.output_dir.clone(),
+                            }),
+                        });
+                    }
                 }
+                config.save_plugins(&plugins)?;
+                println!(
+                    "CSV plugin '{}' {}",
+                    label,
+                    if args.disable {
+                        "disabled"
+                    } else {
+                        "configured"
+                    }
+                );
             }
-            config.save_plugins(&plugins)?;
-            println!(
-                "CSV plugin '{}' {}",
-                label,
-                if args.disable {
-                    "disabled"
-                } else {
-                    "configured"
+            PluginConfigureCommands::Tcp(args) => {
+                let name = args.name.trim();
+                if name.is_empty() {
+                    bail!("plugin name cannot be empty");
                 }
-            );
-        }
-        PluginCommands::TcpConfigure(args) => {
-            let label = display_label(&args.name);
-            match find_plugin_mut(&mut plugins, PluginKind::Tcp, &args.name)? {
-                Some(plugin) => {
-                    plugin.enabled = !args.disable;
-                    plugin.name = args.name.clone();
-                    plugin.config = PluginConfig::Tcp(TcpPluginConfig {
-                        host: args.host,
-                        port: args.port,
-                    });
-                }
-                None => {
-                    plugins.push(PluginDefinition {
-                        enabled: !args.disable,
-                        name: args.name.clone(),
-                        config: PluginConfig::Tcp(TcpPluginConfig {
+                let name_owned = name.to_string();
+                let label = display_label(name);
+                match find_plugin_mut(&mut plugins, PluginKind::Tcp, Some(name))? {
+                    Some(plugin) => {
+                        plugin.enabled = !args.disable;
+                        plugin.name = Some(name_owned.clone());
+                        plugin.config = PluginConfig::Tcp(TcpPluginConfig {
                             host: args.host,
                             port: args.port,
-                        }),
-                    });
+                        });
+                    }
+                    None => {
+                        ensure_unique_plugin_name(&plugins, name)?;
+                        plugins.push(PluginDefinition {
+                            enabled: !args.disable,
+                            name: Some(name_owned.clone()),
+                            config: PluginConfig::Tcp(TcpPluginConfig {
+                                host: args.host,
+                                port: args.port,
+                            }),
+                        });
+                    }
                 }
+                config.save_plugins(&plugins)?;
+                println!(
+                    "TCP plugin '{}' {}",
+                    label,
+                    if args.disable {
+                        "disabled"
+                    } else {
+                        "configured"
+                    }
+                );
             }
-            config.save_plugins(&plugins)?;
-            println!(
-                "TCP plugin '{}' {}",
-                label,
-                if args.disable {
-                    "disabled"
-                } else {
-                    "configured"
+            PluginConfigureCommands::Http(args) => {
+                let mut headers = BTreeMap::new();
+                for entry in args.headers {
+                    headers.insert(entry.key, entry.value);
                 }
-            );
-        }
-        PluginCommands::HttpConfigure(args) => {
-            let mut headers = BTreeMap::new();
-            for entry in args.headers {
-                headers.insert(entry.key, entry.value);
-            }
-            let label = display_label(&args.name);
-            match find_plugin_mut(&mut plugins, PluginKind::Http, &args.name)? {
-                Some(plugin) => {
-                    plugin.enabled = !args.disable;
-                    plugin.name = args.name.clone();
-                    plugin.config = PluginConfig::Http(HttpPluginConfig {
-                        endpoint: args.endpoint,
-                        headers,
-                    });
+                let name = args.name.trim();
+                if name.is_empty() {
+                    bail!("plugin name cannot be empty");
                 }
-                None => {
-                    plugins.push(PluginDefinition {
-                        enabled: !args.disable,
-                        name: args.name.clone(),
-                        config: PluginConfig::Http(HttpPluginConfig {
+                let name_owned = name.to_string();
+                let label = display_label(name);
+                match find_plugin_mut(&mut plugins, PluginKind::Http, Some(name))? {
+                    Some(plugin) => {
+                        plugin.enabled = !args.disable;
+                        plugin.name = Some(name_owned.clone());
+                        plugin.config = PluginConfig::Http(HttpPluginConfig {
                             endpoint: args.endpoint,
                             headers,
-                        }),
-                    });
+                        });
+                    }
+                    None => {
+                        ensure_unique_plugin_name(&plugins, name)?;
+                        plugins.push(PluginDefinition {
+                            enabled: !args.disable,
+                            name: Some(name_owned.clone()),
+                            config: PluginConfig::Http(HttpPluginConfig {
+                                endpoint: args.endpoint,
+                                headers,
+                            }),
+                        });
+                    }
                 }
+                config.save_plugins(&plugins)?;
+                println!(
+                    "HTTP plugin '{}' {}",
+                    label,
+                    if args.disable {
+                        "disabled"
+                    } else {
+                        "configured"
+                    }
+                );
             }
-            config.save_plugins(&plugins)?;
-            println!(
-                "HTTP plugin '{}' {}",
-                label,
-                if args.disable {
-                    "disabled"
-                } else {
-                    "configured"
+            PluginConfigureCommands::Json(args) => {
+                let name = args.name.trim();
+                if name.is_empty() {
+                    bail!("plugin name cannot be empty");
                 }
-            );
-        }
-        PluginCommands::JsonConfigure(args) => {
-            let label = display_label(&args.name);
-            match find_plugin_mut(&mut plugins, PluginKind::Json, &args.name)? {
-                Some(plugin) => {
-                    plugin.enabled = !args.disable;
-                    plugin.name = args.name.clone();
-                    plugin.config = PluginConfig::Json(JsonPluginConfig {
-                        path: args.path,
-                        pretty: args.pretty,
-                    });
-                }
-                None => {
-                    plugins.push(PluginDefinition {
-                        enabled: !args.disable,
-                        name: args.name.clone(),
-                        config: PluginConfig::Json(JsonPluginConfig {
+                let name_owned = name.to_string();
+                let label = display_label(name);
+                match find_plugin_mut(&mut plugins, PluginKind::Json, Some(name))? {
+                    Some(plugin) => {
+                        plugin.enabled = !args.disable;
+                        plugin.name = Some(name_owned.clone());
+                        plugin.config = PluginConfig::Json(JsonPluginConfig {
                             path: args.path,
                             pretty: args.pretty,
-                        }),
-                    });
+                        });
+                    }
+                    None => {
+                        ensure_unique_plugin_name(&plugins, name)?;
+                        plugins.push(PluginDefinition {
+                            enabled: !args.disable,
+                            name: Some(name_owned.clone()),
+                            config: PluginConfig::Json(JsonPluginConfig {
+                                path: args.path,
+                                pretty: args.pretty,
+                            }),
+                        });
+                    }
                 }
+                config.save_plugins(&plugins)?;
+                println!(
+                    "JSON plugin '{}' {}",
+                    label,
+                    if args.disable {
+                        "disabled"
+                    } else {
+                        "configured"
+                    }
+                );
             }
-            config.save_plugins(&plugins)?;
-            println!(
-                "JSON plugin '{}' {}",
-                label,
-                if args.disable {
-                    "disabled"
-                } else {
-                    "configured"
+            PluginConfigureCommands::Log(args) => {
+                let name = args.name.trim();
+                if name.is_empty() {
+                    bail!("plugin name cannot be empty");
                 }
-            );
-        }
-        PluginCommands::LogConfigure(args) => {
-            let label = display_label(&args.name);
-            match find_plugin_mut(&mut plugins, PluginKind::Log, &args.name)? {
-                Some(plugin) => {
-                    plugin.enabled = !args.disable;
-                    plugin.name = args.name.clone();
-                    plugin.config = PluginConfig::Log(LogPluginConfig {
-                        level: args.level.clone(),
-                        template: args.template.clone(),
-                    });
-                }
-                None => {
-                    plugins.push(PluginDefinition {
-                        enabled: !args.disable,
-                        name: args.name.clone(),
-                        config: PluginConfig::Log(LogPluginConfig {
+                let name_owned = name.to_string();
+                let label = display_label(name);
+                match find_plugin_mut(&mut plugins, PluginKind::Log, Some(name))? {
+                    Some(plugin) => {
+                        plugin.enabled = !args.disable;
+                        plugin.name = Some(name_owned.clone());
+                        plugin.config = PluginConfig::Log(LogPluginConfig {
                             level: args.level.clone(),
                             template: args.template.clone(),
-                        }),
-                    });
+                        });
+                    }
+                    None => {
+                        ensure_unique_plugin_name(&plugins, name)?;
+                        plugins.push(PluginDefinition {
+                            enabled: !args.disable,
+                            name: Some(name_owned.clone()),
+                            config: PluginConfig::Log(LogPluginConfig {
+                                level: args.level.clone(),
+                                template: args.template.clone(),
+                            }),
+                        });
+                    }
                 }
+                config.save_plugins(&plugins)?;
+                println!(
+                    "Log plugin '{}' {}",
+                    label,
+                    if args.disable {
+                        "disabled"
+                    } else {
+                        "configured"
+                    }
+                );
             }
+        },
+        PluginCommands::Enable(args) => {
+            let name = args.name.trim();
+            if name.is_empty() {
+                bail!("plugin name cannot be empty");
+            }
+
+            let plugin = plugins
+                .iter_mut()
+                .find(|definition| definition.name.as_deref() == Some(name))
+                .ok_or_else(|| anyhow!("no plugin named '{}' is configured", name))?;
+
+            establish_connection(plugin)
+                .with_context(|| format!("failed to establish connection for '{}'", name))?;
+
+            let mut changed = false;
+            if !plugin.enabled {
+                plugin.enabled = true;
+                changed = true;
+            }
+
+            if changed {
+                config.ensure_data_dir()?;
+                config.save_plugins(&plugins)?;
+                println!("Plugin '{}' enabled", name);
+            } else {
+                println!("Plugin '{}' is already enabled", name);
+            }
+        }
+        PluginCommands::Disable(args) => {
+            let name = args.name.trim();
+            if name.is_empty() {
+                bail!("plugin name cannot be empty");
+            }
+
+            let plugin = plugins
+                .iter_mut()
+                .find(|definition| definition.name.as_deref() == Some(name))
+                .ok_or_else(|| anyhow!("no plugin named '{}' is configured", name))?;
+
+            if plugin.enabled {
+                plugin.enabled = false;
+                config.ensure_data_dir()?;
+                config.save_plugins(&plugins)?;
+                println!("Plugin '{}' disabled", name);
+            } else {
+                println!("Plugin '{}' is already disabled", name);
+            }
+        }
+        PluginCommands::Remove(args) => {
+            let name = args.name.trim();
+            if name.is_empty() {
+                bail!("plugin name cannot be empty");
+            }
+
+            let index = plugins
+                .iter()
+                .position(|definition| definition.name.as_deref() == Some(name))
+                .ok_or_else(|| anyhow!("no plugin named '{}' is configured", name))?;
+
+            if plugins[index].enabled {
+                bail!(
+                    "disable plugin '{}' before removing it (use plugin disable {})",
+                    name,
+                    name
+                );
+            }
+
+            plugins.remove(index);
+            config.ensure_data_dir()?;
             config.save_plugins(&plugins)?;
-            println!(
-                "Log plugin '{}' {}",
-                label,
-                if args.disable {
-                    "disabled"
-                } else {
-                    "configured"
-                }
-            );
+            println!("Plugin '{}' removed", name);
         }
         PluginCommands::Map(args) => {
             config.set_column_type(&args.aggregate, &args.field, args.data_type.clone());
@@ -399,20 +563,38 @@ fn print_plugin_queue_status(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn list_enabled_plugins(plugins: &[PluginDefinition]) {
-    let mut any = false;
-    for plugin in plugins.iter().filter(|plugin| plugin.enabled) {
-        let kind = plugin_kind_name(plugin.config.kind());
-        if let Some(name) = &plugin.name {
-            println!("{} ({})", kind, name);
-        } else {
-            println!("{}", kind);
-        }
-        any = true;
+fn list_plugins(plugins: &[PluginDefinition]) {
+    if plugins.is_empty() {
+        println!("(no plugins configured)");
+        return;
     }
 
-    if !any {
-        println!("(no plugins enabled)");
+    for plugin in plugins {
+        let kind = plugin_kind_name(plugin.config.kind());
+        let status = if plugin.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let suggestion = plugin.name.as_deref().map(|name| {
+            if plugin.enabled {
+                format!(" (disable with plugin disable {})", name)
+            } else {
+                format!(" (enable with plugin enable {})", name)
+            }
+        });
+
+        if let Some(name) = &plugin.name {
+            match suggestion {
+                Some(hint) => println!("{} ({}) - {}{}", kind, name, status, hint),
+                None => println!("{} ({}) - {}", kind, name, status),
+            }
+        } else {
+            match suggestion {
+                Some(hint) => println!("{} - {}{}", kind, status, hint),
+                None => println!("{} - {}", kind, status),
+            }
+        }
     }
 }
 
@@ -435,8 +617,12 @@ struct PluginQueueEvent {
     attempts: u32,
 }
 
-fn display_label(name: &Option<String>) -> &str {
-    name.as_deref().unwrap_or("default")
+fn display_label(name: &str) -> &str {
+    if name.trim().is_empty() {
+        "default"
+    } else {
+        name
+    }
 }
 
 fn plugin_kind_name(kind: PluginKind) -> &'static str {
@@ -452,20 +638,13 @@ fn plugin_kind_name(kind: PluginKind) -> &'static str {
 fn find_plugin_mut<'a>(
     plugins: &'a mut [PluginDefinition],
     kind: PluginKind,
-    name: &Option<String>,
+    name: Option<&str>,
 ) -> Result<Option<&'a mut PluginDefinition>> {
     if let Some(target) = name {
         let plugin = plugins
             .iter_mut()
-            .find(|def| def.config.kind() == kind && def.name.as_deref() == Some(target.as_str()))
-            .ok_or_else(|| {
-                anyhow!(
-                    "no {} plugin named '{}' is configured",
-                    plugin_kind_name(kind),
-                    target
-                )
-            })?;
-        return Ok(Some(plugin));
+            .find(|def| def.config.kind() == kind && def.name.as_deref() == Some(target));
+        return Ok(plugin);
     }
 
     let mut iter = plugins.iter_mut().filter(|def| def.config.kind() == kind);
@@ -481,6 +660,56 @@ fn find_plugin_mut<'a>(
     }
     Ok(first)
 }
+
+fn normalize_plugin_names(plugins: &mut [PluginDefinition]) -> bool {
+    let mut changed = false;
+    for plugin in plugins.iter_mut() {
+        if let Some(name) = &mut plugin.name {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                plugin.name = None;
+                changed = true;
+            } else if trimmed != name.as_str() {
+                *name = trimmed.to_string();
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+fn dedupe_plugins_by_name(plugins: &mut Vec<PluginDefinition>) -> bool {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut changed = false;
+    let mut index = plugins.len();
+    while index > 0 {
+        index -= 1;
+        let remove = match plugins[index].name.as_deref() {
+            Some(name) if !seen.insert(name.to_string()) => true,
+            _ => false,
+        };
+        if remove {
+            plugins.remove(index);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn ensure_unique_plugin_name(plugins: &[PluginDefinition], name: &str) -> Result<()> {
+    if let Some(conflict) = plugins
+        .iter()
+        .find(|plugin| plugin.name.as_deref() == Some(name))
+    {
+        bail!(
+            "plugin name '{}' is already used by {}",
+            name,
+            plugin_kind_name(conflict.config.kind())
+        );
+    }
+    Ok(())
+}
+
 fn parse_key_value(raw: &str) -> Result<KeyValue, String> {
     let mut parts = raw.splitn(2, '=');
     let key = parts

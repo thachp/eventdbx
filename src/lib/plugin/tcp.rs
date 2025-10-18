@@ -18,6 +18,10 @@ impl TcpPlugin {
         Self { config }
     }
 
+    pub(super) fn ensure_ready(&self) -> Result<()> {
+        self.connect().map(|_| ())
+    }
+
     fn connect(&self) -> Result<TcpStream> {
         let addr = format!("{}:{}", self.config.host, self.config.port);
         TcpStream::connect(&addr).map_err(|err| EventError::Storage(err.to_string()))
