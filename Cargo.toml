@@ -10,8 +10,7 @@ keywords = [
   "events",
   "event-sourcing",
   "event-store",
-  "cqrs",
-  "api"
+  "cqrs"
 ]
 categories = ["database"]
 
