@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand, ValueEnum};
@@ -404,8 +404,8 @@ fn print_plugin_queue_status(path: PathBuf) -> Result<()> {
         return Ok(());
     }
 
-    let status: PluginQueueStatus = serde_json::from_str(&contents)
-        .with_context(|| "failed to decode queue status JSON")?;
+    let status: PluginQueueStatus =
+        serde_json::from_str(&contents).with_context(|| "failed to decode queue status JSON")?;
 
     println!("pending={} dead={}", status.pending, status.dead);
 
