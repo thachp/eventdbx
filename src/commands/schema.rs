@@ -21,11 +21,9 @@ pub enum SchemaCommands {
     Remove(SchemaRemoveEventArgs),
     /// List available schemas
     List,
-    /// Show a specific schema
-    Show {
-        /// Aggregate name
-        aggregate: String,
-    },
+    /// Fallback handler for positional aggregate commands
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 #[derive(Args)]
@@ -209,10 +207,21 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                 );
             }
         }
-        SchemaCommands::Show { aggregate } => {
-            let schema = manager.get(&aggregate)?;
-            println!("{}", serde_json::to_string_pretty(&schema)?);
-        }
+        SchemaCommands::External(args) => match args.as_slice() {
+            [aggregate] => {
+                let schema = manager.get(aggregate)?;
+                println!("{}", serde_json::to_string_pretty(&schema)?);
+            }
+            [command, aggregate] if command.eq_ignore_ascii_case("show") => {
+                let schema = manager.get(aggregate)?;
+                println!("{}", serde_json::to_string_pretty(&schema)?);
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "unknown schema command; try `eventdbx schema list` or `eventdbx schema <aggregate>`"
+                ));
+            }
+        },
     }
 
     Ok(())
