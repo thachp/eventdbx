@@ -24,6 +24,12 @@ impl PostgresPlugin {
         Self { config, base_types }
     }
 
+    pub(super) fn ensure_ready(&self) -> Result<()> {
+        Client::connect(&self.config.connection_string, NoTls)
+            .map(|_| ())
+            .map_err(|err| EventError::Storage(err.to_string()))
+    }
+
     fn ensure_table(
         &self,
         client: &mut Client,

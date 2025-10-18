@@ -35,6 +35,8 @@ pub struct Config {
     pub list_page_size: usize,
     #[serde(default = "default_page_limit")]
     pub page_limit: usize,
+    #[serde(default = "default_plugin_max_attempts")]
+    pub plugin_max_attempts: u32,
 }
 
 impl Default for Config {
@@ -53,6 +55,7 @@ impl Default for Config {
             column_types: BTreeMap::new(),
             list_page_size: default_list_page_size(),
             page_limit: default_page_limit(),
+            plugin_max_attempts: default_plugin_max_attempts(),
         }
     }
 }
@@ -67,6 +70,7 @@ pub struct ConfigUpdate {
     pub restrict: Option<bool>,
     pub list_page_size: Option<usize>,
     pub page_limit: Option<usize>,
+    pub plugin_max_attempts: Option<u32>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -131,6 +135,9 @@ impl Config {
         if let Some(page_limit) = update.page_limit {
             self.page_limit = page_limit;
         }
+        if let Some(max_attempts) = update.plugin_max_attempts {
+            self.plugin_max_attempts = max_attempts.max(1);
+        }
         self.updated_at = Utc::now();
     }
 
@@ -168,6 +175,14 @@ impl Config {
         self.data_dir.join("staged_events.json")
     }
 
+    pub fn plugins_path(&self) -> PathBuf {
+        self.data_dir.join("plugins.json")
+    }
+
+    pub fn plugin_queue_path(&self) -> PathBuf {
+        self.data_dir.join("plugin_queue.json")
+    }
+
     pub fn pid_file_path(&self) -> PathBuf {
         self.data_dir.join("eventdbx.pid")
     }
@@ -184,16 +199,29 @@ impl Config {
                 .unwrap_or(false)
     }
 
-    pub fn set_plugin(&mut self, plugin: PluginDefinition) {
-        if let Some(existing) = self
-            .plugins
-            .iter_mut()
-            .find(|item| item.config.kind() == plugin.config.kind())
-        {
-            *existing = plugin;
-        } else {
-            self.plugins.push(plugin);
+    pub fn load_plugins(&self) -> Result<Vec<PluginDefinition>> {
+        let path = self.plugins_path();
+        if !path.exists() {
+            return Ok(Vec::new());
         }
+
+        let contents = fs::read_to_string(&path)?;
+        if contents.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let plugins = serde_json::from_str(&contents)?;
+        Ok(plugins)
+    }
+
+    pub fn save_plugins(&self, plugins: &[PluginDefinition]) -> Result<()> {
+        let path = self.plugins_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let payload = serde_json::to_string_pretty(plugins)?;
+        fs::write(path, payload)?;
+        Ok(())
     }
 }
 
@@ -214,6 +242,10 @@ fn default_list_page_size() -> usize {
 
 fn default_page_limit() -> usize {
     1000
+}
+
+fn default_plugin_max_attempts() -> u32 {
+    10
 }
 
 fn deserialize_restrict<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
@@ -242,6 +274,8 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginDefinition {
     pub enabled: bool,
+    #[serde(default)]
+    pub name: Option<String>,
     pub config: PluginConfig,
 }
 
@@ -249,7 +283,6 @@ pub struct PluginDefinition {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginConfig {
     Postgres(PostgresPluginConfig),
-    Sqlite(SqlitePluginConfig),
     Csv(CsvPluginConfig),
     Tcp(TcpPluginConfig),
     Http(HttpPluginConfig),
@@ -261,7 +294,6 @@ impl PluginConfig {
     pub fn kind(&self) -> PluginKind {
         match self {
             PluginConfig::Postgres(_) => PluginKind::Postgres,
-            PluginConfig::Sqlite(_) => PluginKind::Sqlite,
             PluginConfig::Csv(_) => PluginKind::Csv,
             PluginConfig::Tcp(_) => PluginKind::Tcp,
             PluginConfig::Http(_) => PluginKind::Http,
@@ -275,7 +307,6 @@ impl PluginConfig {
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
     Postgres,
-    Sqlite,
     Csv,
     Tcp,
     Http,
@@ -296,11 +327,6 @@ pub struct PostgresColumnConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SqlitePluginConfig {
-    pub path: PathBuf,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CsvPluginConfig {
     pub output_dir: PathBuf,
 }
@@ -316,6 +342,8 @@ pub struct HttpPluginConfig {
     pub endpoint: String,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub https: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

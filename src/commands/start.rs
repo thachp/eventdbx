@@ -261,6 +261,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         restrict: Some(args.restrict),
         list_page_size: None,
         page_limit: None,
+        plugin_max_attempts: None,
     });
 }
 

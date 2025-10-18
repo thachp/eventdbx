@@ -24,6 +24,10 @@ impl CsvPlugin {
         Self { config }
     }
 
+    pub(super) fn ensure_ready(&self) -> Result<()> {
+        self.ensure_output_dir()
+    }
+
     fn ensure_output_dir(&self) -> Result<()> {
         if !self.config.output_dir.exists() {
             fs::create_dir_all(&self.config.output_dir)

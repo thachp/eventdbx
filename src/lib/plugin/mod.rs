@@ -3,19 +3,17 @@ use std::{collections::BTreeMap, sync::Arc};
 use tracing::error;
 
 use crate::{
-    config::{Config, PluginConfig},
+    config::{Config, PluginConfig, PluginDefinition},
     error::Result,
     schema::AggregateSchema,
     store::{AggregateState, EventRecord},
 };
 
-mod sqlite;
-mod util;
-use sqlite::SqlitePlugin;
-mod postgres;
-use postgres::PostgresPlugin;
 mod csv;
+mod postgres;
+mod util;
 use csv::CsvPlugin;
+use postgres::PostgresPlugin;
 mod tcp;
 use tcp::TcpPlugin;
 mod http;
@@ -25,7 +23,7 @@ use json::JsonPlugin;
 mod log;
 use log::LogPlugin;
 
-pub(super) type ColumnTypes = BTreeMap<String, BTreeMap<String, String>>;
+pub type ColumnTypes = BTreeMap<String, BTreeMap<String, String>>;
 
 pub trait Plugin: Send + Sync {
     fn name(&self) -> &'static str;
@@ -46,36 +44,16 @@ impl PluginManager {
     pub fn from_config(config: &Config) -> Result<Self> {
         let mut plugins: Vec<Box<dyn Plugin>> = Vec::new();
         let base_types: Arc<ColumnTypes> = Arc::new(config.column_types.clone());
-        for definition in &config.plugins {
+        let mut definitions = config.load_plugins()?;
+        if definitions.is_empty() && !config.plugins.is_empty() {
+            definitions = config.plugins.clone();
+        }
+
+        for definition in definitions.into_iter() {
             if !definition.enabled {
                 continue;
             }
-            match &definition.config {
-                PluginConfig::Postgres(settings) => {
-                    plugins.push(Box::new(PostgresPlugin::new(
-                        settings.clone(),
-                        base_types.clone(),
-                    )));
-                }
-                PluginConfig::Sqlite(settings) => {
-                    plugins.push(Box::new(SqlitePlugin::new(settings.clone())));
-                }
-                PluginConfig::Csv(settings) => {
-                    plugins.push(Box::new(CsvPlugin::new(settings.clone())));
-                }
-                PluginConfig::Tcp(settings) => {
-                    plugins.push(Box::new(TcpPlugin::new(settings.clone())));
-                }
-                PluginConfig::Http(settings) => {
-                    plugins.push(Box::new(HttpPlugin::new(settings.clone())));
-                }
-                PluginConfig::Json(settings) => {
-                    plugins.push(Box::new(JsonPlugin::new(settings.clone())));
-                }
-                PluginConfig::Log(settings) => {
-                    plugins.push(Box::new(LogPlugin::new(settings.clone())));
-                }
-            }
+            plugins.push(instantiate_plugin(&definition, Arc::clone(&base_types)));
         }
 
         Ok(Self {
@@ -99,5 +77,50 @@ impl PluginManager {
             }
         }
         Ok(())
+    }
+}
+
+pub fn establish_connection(definition: &PluginDefinition) -> Result<()> {
+    match &definition.config {
+        PluginConfig::Postgres(settings) => {
+            let plugin = PostgresPlugin::new(settings.clone(), Arc::new(ColumnTypes::new()));
+            plugin.ensure_ready()
+        }
+        PluginConfig::Csv(settings) => {
+            let plugin = CsvPlugin::new(settings.clone());
+            plugin.ensure_ready()
+        }
+        PluginConfig::Tcp(settings) => {
+            let plugin = TcpPlugin::new(settings.clone());
+            plugin.ensure_ready()
+        }
+        PluginConfig::Http(settings) => {
+            let plugin = HttpPlugin::new(settings.clone());
+            plugin.ensure_ready()
+        }
+        PluginConfig::Json(settings) => {
+            let plugin = JsonPlugin::new(settings.clone());
+            plugin.ensure_ready()
+        }
+        PluginConfig::Log(settings) => {
+            let plugin = LogPlugin::new(settings.clone());
+            plugin.ensure_ready()
+        }
+    }
+}
+
+pub fn instantiate_plugin(
+    definition: &PluginDefinition,
+    base_types: Arc<ColumnTypes>,
+) -> Box<dyn Plugin> {
+    match &definition.config {
+        PluginConfig::Postgres(settings) => {
+            Box::new(PostgresPlugin::new(settings.clone(), base_types))
+        }
+        PluginConfig::Csv(settings) => Box::new(CsvPlugin::new(settings.clone())),
+        PluginConfig::Tcp(settings) => Box::new(TcpPlugin::new(settings.clone())),
+        PluginConfig::Http(settings) => Box::new(HttpPlugin::new(settings.clone())),
+        PluginConfig::Json(settings) => Box::new(JsonPlugin::new(settings.clone())),
+        PluginConfig::Log(settings) => Box::new(LogPlugin::new(settings.clone())),
     }
 }

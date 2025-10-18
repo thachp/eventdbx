@@ -107,8 +107,8 @@ EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--
 
 ### Configuration
 
-- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>] [--page-limit <usize>]`  
-  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10) and `--page-limit` caps any requested page size across list and event endpoints (default 1000, alias `--event-page-limit`).
+- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>]`  
+  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000, alias `--event-page-limit`), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10).
 
 ### Tokens
 
@@ -150,23 +150,33 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 
 ### Plugins
 
-- `eventdbx plugin map --aggregate <name> --field <field> --datatype <type> [--plugin postgres]`  
-  Records the base column type for a field; use `--plugin postgres` to override only the Postgres mapping.
-- `eventdbx plugin postgres --connection <connection-string> [--disable]`
-- `eventdbx plugin sqlite --path <file> [--disable]`
-- `eventdbx plugin csv --output-dir <dir> [--disable]`
-- `eventdbx plugin tcp --host <hostname> --port <u16> [--disable]`
-- `eventdbx plugin http --endpoint <url> [--header KEY=VALUE]... [--disable]`
-- `eventdbx plugin json --path <file> [--pretty] [--disable]`
-- `eventdbx plugin log --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
+- `eventdbx plugin map --aggregate <name> --field <field> --datatype <type>`  
+  Records the base column type for a field; add `--plugin postgres [--plugin-name <label>]` to override the Postgres mapping only.
+- `eventdbx plugin config postgres --connection <connection-string> [--name <label>] [--disable]`
+- `eventdbx plugin config csv --name <label> --output-dir <dir> [--disable]`
+- `eventdbx plugin config tcp --name <label> --host <hostname> --port <u16> [--disable]`
+- `eventdbx plugin config http --name <label> --endpoint <host|url> [--https] [--header KEY=VALUE]... [--disable]`
+- `eventdbx plugin config json --name <label> --path <file> [--pretty] [--disable]`
+- `eventdbx plugin config log --name <label> --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
+- `eventdbx plugin enable <label>`
+- `eventdbx plugin disable <label>`
+- `eventdbx plugin remove <label>`
+- `eventdbx plugin test`
+- `eventdbx plugin list`
+- `eventdbx plugin queue`
+- `eventdbx plugin replay <plugin-name> <aggregate> [<aggregate_id>]`
 
 Plugins fire after every committed event to keep external systems in sync. Each plugin sends or records different data:
 
-- **Postgres**: Applies schema/base types to create/alter columns and upsert the aggregate row. Payload is the aggregate state at the time of the event.
-- **SQLite**: Mirrors state into a local SQLite file with the same column set as Postgres.
+Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications.
+Use `eventdbx plugin queue` to inspect pending/dead event IDs.
+
+Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instance requires a unique `--name` so you can update, enable, disable, remove, or replay it later. `plugin enable` validates connectivity (creating directories, touching files, or checking network access) before marking the plugin active. Remove a plugin only after disabling it with `plugin disable <name>`. `plugin replay` resends stored events for a single aggregate instance—or every instance of a type—through the selected plugin.
+
+- **Postgres**: Upserts aggregate state into a Postgres table, expanding columns based on schema mappings or `plugin map --plugin postgres` overrides.
 - **CSV**: Appends state snapshots into `<aggregate>.csv`, expanding columns as new fields appear.
 - **TCP**: Writes a single-line JSON `EventRecord` to the configured socket.
-- **HTTP**: POSTs the `EventRecord` JSON to the endpoint with optional headers.
+- **HTTP**: POSTs the `EventRecord` JSON to the endpoint with optional headers; add `--https` during configuration to force HTTPS when the endpoint lacks a scheme.
 - **JSON**: Appends the `EventRecord` JSON (pretty if requested) to the given file.
 - **Log**: Emits a formatted line via `tracing` at the configured level. By default: `aggregate=<type> id=<id> event=<event>`.
 
@@ -235,6 +245,7 @@ curl \
 curl \
   -H "Authorization: Bearer TOKEN" \
   "http://localhost:7070/v1/aggregates/patient/p-001/events?skip=0&take=10"
+
 
 # Health check
 curl http://localhost:7070/health
