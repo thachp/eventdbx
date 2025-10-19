@@ -395,6 +395,7 @@ pub enum PluginConfig {
     Csv(CsvPluginConfig),
     Tcp(TcpPluginConfig),
     Http(HttpPluginConfig),
+    Grpc(GrpcPluginConfig),
     Json(JsonPluginConfig),
     Log(LogPluginConfig),
 }
@@ -406,6 +407,7 @@ impl PluginConfig {
             PluginConfig::Csv(_) => PluginKind::Csv,
             PluginConfig::Tcp(_) => PluginKind::Tcp,
             PluginConfig::Http(_) => PluginKind::Http,
+            PluginConfig::Grpc(_) => PluginKind::Grpc,
             PluginConfig::Json(_) => PluginKind::Json,
             PluginConfig::Log(_) => PluginKind::Log,
         }
@@ -419,6 +421,7 @@ pub enum PluginKind {
     Csv,
     Tcp,
     Http,
+    Grpc,
     Json,
     Log,
 }
@@ -453,6 +456,11 @@ pub struct HttpPluginConfig {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub https: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcPluginConfig {
+    pub endpoint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -156,6 +156,7 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `eventdbx plugin config csv --name <label> --output-dir <dir> [--disable]`
 - `eventdbx plugin config tcp --name <label> --host <hostname> --port <u16> [--disable]`
 - `eventdbx plugin config http --name <label> --endpoint <host|url> [--https] [--header KEY=VALUE]... [--disable]`
+- `eventdbx plugin config grpc --name <label> --endpoint <host|url> [--disable]`
 - `eventdbx plugin config json --name <label> --path <file> [--pretty] [--disable]`
 - `eventdbx plugin config log --name <label> --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
 - `eventdbx plugin enable <label>`
@@ -208,6 +209,22 @@ Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instan
 - **CSV**: Appends state snapshots into `<aggregate>.csv`, expanding columns as new fields appear.
 - **TCP**: Writes a single-line JSON `EventRecord` to the configured socket.
 - **HTTP**: POSTs the `EventRecord` JSON to the endpoint with optional headers; add `--https` during configuration to force HTTPS when the endpoint lacks a scheme.
+- **gRPC**: Sends `EventRecord` batches to a remote gRPC endpoint compatible with the replication `ApplyEvents` API.
+
+Example gRPC configuration:
+
+```bash
+# point at an existing replication-compatible listener
+eventdbx plugin config grpc \
+  --name audit-grpc \
+  --endpoint grpc://replica.internal:8800
+
+# enable the plugin once connectivity is confirmed
+eventdbx plugin enable audit-grpc
+
+# inspect status
+eventdbx plugin list
+```
 - **JSON**: Appends the `EventRecord` JSON (pretty if requested) to the given file.
 - **Log**: Emits a formatted line via `tracing` at the configured level. By default: `aggregate=<type> id=<id> event=<event>`.
 

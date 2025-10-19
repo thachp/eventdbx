@@ -18,6 +18,8 @@ mod tcp;
 use tcp::TcpPlugin;
 mod http;
 use http::HttpPlugin;
+mod grpc;
+use grpc::GrpcPlugin;
 mod json;
 use json::JsonPlugin;
 mod log;
@@ -98,6 +100,10 @@ pub fn establish_connection(definition: &PluginDefinition) -> Result<()> {
             let plugin = HttpPlugin::new(settings.clone());
             plugin.ensure_ready()
         }
+        PluginConfig::Grpc(settings) => {
+            let plugin = GrpcPlugin::new(settings.clone());
+            plugin.ensure_ready()
+        }
         PluginConfig::Json(settings) => {
             let plugin = JsonPlugin::new(settings.clone());
             plugin.ensure_ready()
@@ -120,6 +126,7 @@ pub fn instantiate_plugin(
         PluginConfig::Csv(settings) => Box::new(CsvPlugin::new(settings.clone())),
         PluginConfig::Tcp(settings) => Box::new(TcpPlugin::new(settings.clone())),
         PluginConfig::Http(settings) => Box::new(HttpPlugin::new(settings.clone())),
+        PluginConfig::Grpc(settings) => Box::new(GrpcPlugin::new(settings.clone())),
         PluginConfig::Json(settings) => Box::new(JsonPlugin::new(settings.clone())),
         PluginConfig::Log(settings) => Box::new(LogPlugin::new(settings.clone())),
     }
