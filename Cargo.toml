@@ -54,6 +54,10 @@ async-graphql-axum = "7"
 aes-gcm = "0.10"
 
 [dev-dependencies]
+fake = "3"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+portpicker = "0.1"
+rand = "0.8"
 
 [build-dependencies]
 tonic-build = "0.11"
