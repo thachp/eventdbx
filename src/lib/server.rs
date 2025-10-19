@@ -6,11 +6,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use async_graphql::http::GraphQLPlaygroundConfig;
+use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
     http::HeaderMap,
-    response::IntoResponse,
+    response::{Html, IntoResponse},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,7 @@ use uuid::Uuid;
 use super::{
     config::Config,
     error::{EventError, Result},
+    graphql::{EventSchema, GraphqlState, build_schema},
     plugin::PluginManager,
     replication::{
         ReplicationManager, ReplicationService, proto::replication_server::ReplicationServer,
@@ -38,14 +41,14 @@ use super::{
 };
 
 #[derive(Clone)]
-struct AppState {
-    store: Arc<EventStore>,
-    tokens: Arc<TokenManager>,
-    schemas: Arc<SchemaManager>,
-    restrict: bool,
+pub(crate) struct AppState {
+    pub(crate) store: Arc<EventStore>,
+    pub(crate) tokens: Arc<TokenManager>,
+    pub(crate) schemas: Arc<SchemaManager>,
+    pub(crate) restrict: bool,
+    pub(crate) list_page_size: usize,
+    pub(crate) page_limit: usize,
     plugins: PluginManager,
-    list_page_size: usize,
-    page_limit: usize,
     retry_queue: Arc<PluginRetryQueue>,
     plugin_max_attempts: u32,
     replication: Option<ReplicationManager>,
@@ -240,11 +243,11 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         }
     }
     let state = AppState {
-        store,
+        store: Arc::clone(&store),
         tokens,
-        schemas,
+        schemas: Arc::clone(&schemas),
         restrict: config.restrict,
-        plugins,
+        plugins: plugins.clone(),
         list_page_size: config.list_page_size,
         page_limit: config.page_limit,
         retry_queue,
@@ -254,24 +257,47 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
 
     start_plugin_retry_worker(state.clone());
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/v1/aggregates", get(list_aggregates))
-        .route(
-            "/v1/aggregates/:aggregate_type/:aggregate_id",
-            get(get_aggregate),
-        )
-        .route(
-            "/v1/aggregates/:aggregate_type/:aggregate_id/events",
-            get(list_events),
-        )
-        .route("/v1/events", post(append_event_global))
-        .route(
-            "/v1/aggregates/:aggregate_type/:aggregate_id/verify",
-            get(verify_aggregate),
-        )
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let api_mode = config.api_mode;
+    if !api_mode.rest_enabled() && !api_mode.graphql_enabled() {
+        return Err(EventError::Config(
+            "at least one API surface (REST or GraphQL) must be enabled".to_string(),
+        ));
+    }
+
+    let mut app = Router::new();
+
+    if api_mode.rest_enabled() {
+        let rest_router = Router::new()
+            .route("/health", get(health))
+            .route("/v1/aggregates", get(list_aggregates))
+            .route(
+                "/v1/aggregates/:aggregate_type/:aggregate_id",
+                get(get_aggregate),
+            )
+            .route(
+                "/v1/aggregates/:aggregate_type/:aggregate_id/events",
+                get(list_events),
+            )
+            .route("/v1/events", post(append_event_global))
+            .route(
+                "/v1/aggregates/:aggregate_type/:aggregate_id/verify",
+                get(verify_aggregate),
+            )
+            .with_state(state.clone());
+        app = app.merge(rest_router);
+    }
+
+    if api_mode.graphql_enabled() {
+        let graphql_state = GraphqlState::new(state.clone());
+        let graphql_schema = build_schema(graphql_state);
+        let graphql_router = Router::new()
+            .route("/graphql", get(graphql_playground).post(graphql_handler))
+            .route("/graphql/playground", get(graphql_playground))
+            .layer(Extension(graphql_schema));
+        app = app.merge(graphql_router);
+    }
+
+    let app = app.layer(TraceLayer::new_for_http());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!(
@@ -358,6 +384,21 @@ async fn list_events(
     Ok(Json(filtered))
 }
 
+async fn graphql_handler(
+    Extension(schema): Extension<EventSchema>,
+    headers: HeaderMap,
+    request: GraphQLRequest,
+) -> GraphQLResponse {
+    let request = request.into_inner().data(headers);
+    schema.execute(request).await.into()
+}
+
+async fn graphql_playground() -> impl IntoResponse {
+    Html(async_graphql::http::playground_source(
+        GraphQLPlaygroundConfig::new("/graphql"),
+    ))
+}
+
 #[derive(Deserialize)]
 struct AppendEventGlobalRequest {
     aggregate_type: String,
@@ -408,7 +449,7 @@ struct VerifyResponse {
     merkle_root: String,
 }
 
-fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     let value = headers.get("authorization")?;
     let value = value.to_str().ok()?;
     if let Some(token) = value.strip_prefix("Bearer ") {
@@ -418,7 +459,7 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     }
 }
 
-fn replicate_events(state: &AppState, records: &[EventRecord]) {
+pub(crate) fn replicate_events(state: &AppState, records: &[EventRecord]) {
     if let Some(manager) = &state.replication {
         manager.enqueue(records);
     }
@@ -492,7 +533,7 @@ async fn dispatch_plugin_notification(state: &AppState, record: &EventRecord) ->
     Ok(())
 }
 
-fn notify_plugins(state: &AppState, record: &EventRecord) {
+pub(crate) fn notify_plugins(state: &AppState, record: &EventRecord) {
     if state.plugins.is_empty() {
         return;
     }
