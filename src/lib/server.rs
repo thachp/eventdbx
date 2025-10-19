@@ -215,6 +215,10 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
     match TcpListener::bind(replication_addr).await {
         Ok(listener) => {
             let service = ReplicationServer::new(replication_service.clone());
+            info!(
+                "Replication service listening on {}",
+                config.replication.bind_addr
+            );
             tokio::spawn(async move {
                 let incoming = TcpListenerStream::new(listener);
                 if let Err(err) = tonic::transport::Server::builder()
