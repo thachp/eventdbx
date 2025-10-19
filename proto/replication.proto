@@ -18,6 +18,7 @@ message EventRecord {
   string merkle_root = 5;
   bytes payload = 6;
   bytes metadata = 7;
+  string hash = 8;
 }
 
 message EventBatch {

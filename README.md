@@ -183,8 +183,7 @@ Clearing dead entries prompts for confirmation to avoid accidental removal. Manu
 - `eventdbx remote key [--show-path]`  
   Prints this node's replication public key (generated on first run).
 
-Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration.
-The standby gRPC listener defaults to `127.0.0.1:7443`; override it in `config.toml` via `replication.bind_addr` when you expose the replica on another interface.
+Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. The standby gRPC listener defaults to `127.0.0.1:7443`; override it in `config.toml` via `replication.bind_addr` when you expose the replica on another interface. When the HTTP server processes writes it streams committed events to every configured remote over gRPC using the pinned public keys.
 
 ### Maintenance
 

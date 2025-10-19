@@ -364,6 +364,81 @@ impl EventStore {
         Ok(record)
     }
 
+    pub fn append_replica(&self, record: EventRecord) -> Result<()> {
+        self.ensure_writable()?;
+        let _guard = self.write_lock.lock();
+
+        let aggregate_type = record.aggregate_type.clone();
+        let aggregate_id = record.aggregate_id.clone();
+
+        let mut meta = self
+            .load_meta(&aggregate_type, &aggregate_id)?
+            .unwrap_or_else(|| AggregateMeta::new(aggregate_type.clone(), aggregate_id.clone()));
+
+        if meta.version + 1 != record.version {
+            return Err(EventError::Storage(format!(
+                "replication version mismatch for {}::{} (expected {}, got {})",
+                aggregate_type,
+                aggregate_id,
+                meta.version + 1,
+                record.version
+            )));
+        }
+
+        let mut state = self.load_state_map(&aggregate_type, &aggregate_id)?;
+        let payload_map = payload_to_map(&record.payload);
+
+        let computed_hash = hash_event(
+            &aggregate_type,
+            &aggregate_id,
+            record.version,
+            &record.event_type,
+            &payload_map,
+        );
+
+        if computed_hash != record.hash {
+            return Err(EventError::Storage(format!(
+                "replication hash mismatch for {}::{} v{}",
+                aggregate_type, aggregate_id, record.version
+            )));
+        }
+
+        for (key, value) in payload_map {
+            state.insert(key, value);
+        }
+
+        meta.event_hashes.push(record.hash.clone());
+        meta.version = record.version;
+        meta.merkle_root = compute_merkle_root(&meta.event_hashes);
+
+        if meta.merkle_root != record.merkle_root {
+            return Err(EventError::Storage(format!(
+                "replication merkle root mismatch for {}::{} v{}",
+                aggregate_type, aggregate_id, record.version
+            )));
+        }
+
+        let mut batch = WriteBatch::default();
+        batch_put(
+            &mut batch,
+            event_key(&aggregate_type, &aggregate_id, record.version),
+            serde_json::to_vec(&record)?,
+        )?;
+        batch_put(
+            &mut batch,
+            meta_key(&aggregate_type, &aggregate_id),
+            serde_json::to_vec(&meta)?,
+        )?;
+        batch_put(
+            &mut batch,
+            state_key(&aggregate_type, &aggregate_id),
+            serde_json::to_vec(&state)?,
+        )?;
+
+        self.write_batch(batch)?;
+        Ok(())
+    }
+
     pub fn transaction(&self) -> Result<Transaction<'_>> {
         self.ensure_writable()?;
         let guard = self.write_lock.lock();

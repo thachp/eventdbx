@@ -28,7 +28,9 @@ use super::{
     config::Config,
     error::{EventError, Result},
     plugin::PluginManager,
-    replication::{ReplicationService, proto::replication_server::ReplicationServer},
+    replication::{
+        ReplicationManager, ReplicationService, proto::replication_server::ReplicationServer,
+    },
     schema::SchemaManager,
     store::{self, AggregateState, AppendEvent, EventRecord, EventStore},
     token::{AccessKind, TokenManager},
@@ -45,6 +47,7 @@ struct AppState {
     page_limit: usize,
     retry_queue: Arc<PluginRetryQueue>,
     plugin_max_attempts: u32,
+    replication: Option<ReplicationManager>,
 }
 
 struct PluginRetryQueue {
@@ -195,7 +198,12 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
     let tokens = Arc::new(TokenManager::load(config.tokens_path())?);
     let schemas = Arc::new(SchemaManager::load(config.schema_store_path())?);
     let retry_queue = Arc::new(PluginRetryQueue::new(config.plugin_queue_path()));
-    let replication_service = ReplicationService::new();
+    let replication_service = ReplicationService::new(Arc::clone(&store));
+    let replication_manager = if config.remotes.is_empty() {
+        None
+    } else {
+        Some(ReplicationManager::from_config(&config))
+    };
     let replication_addr: SocketAddr = config.replication.bind_addr.parse().map_err(|err| {
         EventError::Config(format!(
             "invalid replication bind address {}: {}",
@@ -224,6 +232,7 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         page_limit: config.page_limit,
         retry_queue,
         plugin_max_attempts: config.plugin_max_attempts,
+        replication: replication_manager.clone(),
     };
 
     start_plugin_retry_worker(state.clone());
@@ -364,6 +373,7 @@ async fn append_event_global(
     })?;
 
     notify_plugins(&state, &record);
+    replicate_events(&state, std::slice::from_ref(&record));
 
     Ok(Json(record))
 }
@@ -388,6 +398,12 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
         Some(token.trim().to_string())
     } else {
         None
+    }
+}
+
+fn replicate_events(state: &AppState, records: &[EventRecord]) {
+    if let Some(manager) = &state.replication {
+        manager.enqueue(records);
     }
 }
 
