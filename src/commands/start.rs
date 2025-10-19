@@ -314,6 +314,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         api_mode: args.api.map(Into::into),
         hidden_aggregate_types: None,
         hidden_fields: None,
+        grpc: None,
     });
 }
 

@@ -28,6 +28,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::{
+    api_grpc::GrpcApi,
     config::Config,
     error::{EventError, Result},
     graphql::{EventSchema, GraphqlState, build_schema},
@@ -310,6 +311,34 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
 
     start_plugin_retry_worker(state.clone());
 
+    let grpc_enabled = config.grpc.enabled;
+    let grpc_bind_addr = config.grpc.bind_addr.clone();
+    let grpc_handle = if grpc_enabled {
+        let grpc_addr: SocketAddr = grpc_bind_addr.parse().map_err(|err| {
+            EventError::Config(format!(
+                "invalid gRPC bind address {}: {}",
+                config.grpc.bind_addr, err
+            ))
+        })?;
+        let grpc_state = state.clone();
+        Some(tokio::spawn(async move {
+            info!("Starting gRPC API server on {}", grpc_addr);
+            if let Err(err) = tonic::transport::Server::builder()
+                .add_service(GrpcApi::new(grpc_state).into_server())
+                .serve_with_shutdown(grpc_addr, async {
+                    shutdown_signal().await;
+                })
+                .await
+            {
+                warn!("gRPC API server failed: {}", err);
+            } else {
+                info!("gRPC API server stopped");
+            }
+        }))
+    } else {
+        None
+    };
+
     let api_mode = config.api_mode;
     if !api_mode.rest_enabled() && !api_mode.graphql_enabled() {
         return Err(EventError::Config(
@@ -359,10 +388,15 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
     );
 
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|err| EventError::Storage(err.to_string()))?;
+        .await;
+
+    if let Some(handle) = grpc_handle {
+        handle.abort();
+    }
+
+    result.map_err(|err| EventError::Storage(err.to_string()))?;
 
     Ok(())
 }

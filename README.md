@@ -335,6 +335,23 @@ curl \
 
 GraphQL is served on `/graphql`, and an interactive Playground is available via `GET /graphql` or `/graphql/playground`. Supply the same bearer token header used for REST requests.
 
+## gRPC API
+
+Set `grpc.enabled = true` in `config.toml` to expose a gRPC surface (disabled by default). The listener binds to `grpc.bind_addr` (default `127.0.0.1:7442`). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
+
+Example `grpcurl` invocation:
+
+```bash
+grpcurl -H "authorization: Bearer TOKEN" \
+  -d '{
+        "aggregate_type": "patient",
+        "aggregate_id": "p-001",
+        "event_type": "patient-updated",
+        "payload_json": "{\"status\":\"inactive\"}"
+      }' \
+  -plaintext 127.0.0.1:7442 eventdbx.api.EventService/AppendEvent
+```
+
 ### Query example
 
 ```bash

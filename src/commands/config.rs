@@ -57,6 +57,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         api_mode: None,
         hidden_aggregate_types: None,
         hidden_fields: None,
+        grpc: None,
     });
 
     if !was_initialized && !config.is_initialized() {

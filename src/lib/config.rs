@@ -66,6 +66,8 @@ pub struct Config {
     pub replication: ReplicationConfig,
     #[serde(default)]
     pub remotes: BTreeMap<String, RemoteConfig>,
+    #[serde(default)]
+    pub grpc: GrpcApiConfig,
     #[serde(default = "default_api_mode")]
     pub api_mode: ApiMode,
     #[serde(default)]
@@ -92,6 +94,7 @@ impl Default for Config {
             plugin_max_attempts: default_plugin_max_attempts(),
             replication: ReplicationConfig::default(),
             remotes: BTreeMap::new(),
+            grpc: GrpcApiConfig::default(),
             api_mode: default_api_mode(),
             hidden_aggregate_types: Vec::new(),
             hidden_fields: BTreeMap::new(),
@@ -112,6 +115,7 @@ pub struct ConfigUpdate {
     pub api_mode: Option<ApiMode>,
     pub hidden_aggregate_types: Option<Vec<String>>,
     pub hidden_fields: Option<BTreeMap<String, Vec<String>>>,
+    pub grpc: Option<GrpcApiConfigUpdate>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -180,6 +184,14 @@ impl Config {
         }
         if let Some(api_mode) = update.api_mode {
             self.api_mode = api_mode;
+        }
+        if let Some(grpc) = update.grpc {
+            if let Some(enabled) = grpc.enabled {
+                self.grpc.enabled = enabled;
+            }
+            if let Some(bind_addr) = grpc.bind_addr {
+                self.grpc.bind_addr = bind_addr;
+            }
         }
         if let Some(hidden_types) = update.hidden_aggregate_types {
             self.hidden_aggregate_types = hidden_types
@@ -393,6 +405,29 @@ impl Default for ReplicationConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcApiConfig {
+    #[serde(default = "default_grpc_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_grpc_bind_addr")]
+    pub bind_addr: String,
+}
+
+impl Default for GrpcApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_grpc_enabled(),
+            bind_addr: default_grpc_bind_addr(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GrpcApiConfigUpdate {
+    pub enabled: Option<bool>,
+    pub bind_addr: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
     pub endpoint: String,
     pub public_key: String,
@@ -419,6 +454,14 @@ fn default_page_limit() -> usize {
 
 fn default_plugin_max_attempts() -> u32 {
     10
+}
+
+fn default_grpc_enabled() -> bool {
+    false
+}
+
+fn default_grpc_bind_addr() -> String {
+    "127.0.0.1:7442".to_string()
 }
 
 fn default_api_mode() -> ApiMode {
