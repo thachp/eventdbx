@@ -20,6 +20,7 @@ use tokio::{
     sync::Notify,
     time::{Duration, sleep},
 };
+use tokio_stream::wrappers::TcpListenerStream;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -211,17 +212,29 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         ))
     })?;
 
-    let replication_server = tonic::transport::Server::builder()
-        .add_service(ReplicationServer::new(replication_service.clone()))
-        .serve_with_shutdown(replication_addr, async {
-            shutdown_signal().await;
-        });
-
-    tokio::spawn(async move {
-        if let Err(err) = replication_server.await {
-            tracing::error!("replication server failed: {}", err);
+    match TcpListener::bind(replication_addr).await {
+        Ok(listener) => {
+            let service = ReplicationServer::new(replication_service.clone());
+            tokio::spawn(async move {
+                let incoming = TcpListenerStream::new(listener);
+                if let Err(err) = tonic::transport::Server::builder()
+                    .add_service(service)
+                    .serve_with_incoming_shutdown(incoming, async {
+                        shutdown_signal().await;
+                    })
+                    .await
+                {
+                    tracing::error!("replication server failed: {}", err);
+                }
+            });
         }
-    });
+        Err(err) => {
+            warn!(
+                "replication listener disabled ({}): {}",
+                config.replication.bind_addr, err
+            );
+        }
+    }
     let state = AppState {
         store,
         tokens,

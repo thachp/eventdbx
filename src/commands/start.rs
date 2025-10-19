@@ -193,6 +193,10 @@ pub fn destroy(config_path: Option<PathBuf>, args: DestroyArgs) -> Result<()> {
 
 async fn start_foreground(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     let (config, _) = load_and_update_config(config_path, &args)?;
+    eprintln!(
+        "configuration loaded; starting server (pid={})",
+        std::process::id()
+    );
     let plugins = PluginManager::from_config(&config)?;
     server::run(config, plugins).await?;
     Ok(())

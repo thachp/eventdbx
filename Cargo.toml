@@ -48,7 +48,7 @@ base64 = "0.21"
 tonic = { version = "0.11", features = ["tls", "tls-roots", "transport"] }
 prost = "0.12"
 tracing-futures = "0.2"
-tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-stream = { version = "0.1", features = ["sync", "net"] }
 
 [dev-dependencies]
 
