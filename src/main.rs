@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         Commands::Schema { command } => commands::schema::execute(config, command)?,
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
-        Commands::Remote { command } => commands::remote::execute(config, command)?,
+        Commands::Remote { command } => commands::remote::execute(config, command).await?,
         Commands::Backup(args) => commands::system::backup(config, args)?,
         Commands::Restore(args) => commands::system::restore(config, args)?,
         Commands::InternalServer => commands::start::run_internal(config).await?,
