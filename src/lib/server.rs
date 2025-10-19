@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs,
     net::SocketAddr,
     path::PathBuf,
@@ -52,6 +52,30 @@ pub(crate) struct AppState {
     retry_queue: Arc<PluginRetryQueue>,
     plugin_max_attempts: u32,
     replication: Option<ReplicationManager>,
+    hidden_aggregates: Arc<HashSet<String>>,
+    hidden_fields: Arc<HashMap<String, HashSet<String>>>,
+}
+
+impl AppState {
+    pub(crate) fn is_hidden_aggregate(&self, aggregate_type: &str) -> bool {
+        self.hidden_aggregates.contains(aggregate_type)
+    }
+
+    pub(crate) fn sanitize_aggregate(&self, mut aggregate: AggregateState) -> AggregateState {
+        aggregate.state = self.filter_state_map(&aggregate.aggregate_type, aggregate.state);
+        aggregate
+    }
+
+    fn filter_state_map(
+        &self,
+        aggregate_type: &str,
+        mut state: BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        if let Some(fields) = self.hidden_fields.get(aggregate_type) {
+            state.retain(|key, _| !fields.contains(key));
+        }
+        state
+    }
 }
 
 struct PluginRetryQueue {
@@ -242,6 +266,26 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
             );
         }
     }
+    let hidden_aggregates: HashSet<String> = config
+        .hidden_aggregate_types
+        .iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    let hidden_fields: HashMap<String, HashSet<String>> = config
+        .hidden_fields
+        .iter()
+        .map(|(aggregate, fields)| {
+            let field_set: HashSet<String> = fields
+                .iter()
+                .map(|field| field.trim().to_string())
+                .filter(|field| !field.is_empty())
+                .collect();
+            (aggregate.trim().to_string(), field_set)
+        })
+        .filter(|(_, fields)| !fields.is_empty())
+        .collect();
+
     let state = AppState {
         store: Arc::clone(&store),
         tokens,
@@ -253,6 +297,8 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         retry_queue,
         plugin_max_attempts: config.plugin_max_attempts,
         replication: replication_manager.clone(),
+        hidden_aggregates: Arc::new(hidden_aggregates),
+        hidden_fields: Arc::new(hidden_fields),
     };
 
     start_plugin_retry_worker(state.clone());
@@ -343,18 +389,28 @@ async fn list_aggregates(
     if take > state.page_limit {
         take = state.page_limit;
     }
-    let aggregates = state.store.aggregates_paginated(skip, Some(take));
-    Ok(Json(aggregates))
+    let mut aggregates = state.store.aggregates();
+    aggregates.retain(|aggregate| !state.is_hidden_aggregate(&aggregate.aggregate_type));
+    let page = aggregates
+        .into_iter()
+        .skip(skip)
+        .take(take)
+        .map(|aggregate| state.sanitize_aggregate(aggregate))
+        .collect::<Vec<_>>();
+    Ok(Json(page))
 }
 
 async fn get_aggregate(
     State(state): State<AppState>,
     Path((aggregate_type, aggregate_id)): Path<(String, String)>,
 ) -> Result<Json<AggregateState>> {
+    if state.is_hidden_aggregate(&aggregate_type) {
+        return Err(EventError::AggregateNotFound);
+    }
     let aggregate = state
         .store
         .get_aggregate_state(&aggregate_type, &aggregate_id)?;
-    Ok(Json(aggregate))
+    Ok(Json(state.sanitize_aggregate(aggregate)))
 }
 
 #[derive(Deserialize, Default)]
@@ -370,6 +426,9 @@ async fn list_events(
     Path((aggregate_type, aggregate_id)): Path<(String, String)>,
     Query(params): Query<EventsQuery>,
 ) -> Result<Json<Vec<EventRecord>>> {
+    if state.is_hidden_aggregate(&aggregate_type) {
+        return Err(EventError::AggregateNotFound);
+    }
     let skip = params.skip.unwrap_or(0);
     let mut take = params.take.unwrap_or(state.page_limit);
     if take == 0 {

@@ -61,6 +61,8 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         page_limit,
         plugin_max_attempts,
         api_mode: None,
+        hidden_aggregate_types: None,
+        hidden_fields: None,
     });
 
     if !was_initialized && !config.is_initialized() {

@@ -66,6 +66,10 @@ pub struct Config {
     pub remotes: BTreeMap<String, RemoteConfig>,
     #[serde(default = "default_api_mode")]
     pub api_mode: ApiMode,
+    #[serde(default)]
+    pub hidden_aggregate_types: Vec<String>,
+    #[serde(default)]
+    pub hidden_fields: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Config {
@@ -88,6 +92,8 @@ impl Default for Config {
             replication: ReplicationConfig::default(),
             remotes: BTreeMap::new(),
             api_mode: default_api_mode(),
+            hidden_aggregate_types: Vec::new(),
+            hidden_fields: BTreeMap::new(),
         }
     }
 }
@@ -104,6 +110,8 @@ pub struct ConfigUpdate {
     pub page_limit: Option<usize>,
     pub plugin_max_attempts: Option<u32>,
     pub api_mode: Option<ApiMode>,
+    pub hidden_aggregate_types: Option<Vec<String>>,
+    pub hidden_fields: Option<BTreeMap<String, Vec<String>>>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -176,7 +184,42 @@ impl Config {
         if let Some(api_mode) = update.api_mode {
             self.api_mode = api_mode;
         }
+        if let Some(hidden_types) = update.hidden_aggregate_types {
+            self.hidden_aggregate_types = hidden_types
+                .into_iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect();
+        }
+        if let Some(hidden_fields) = update.hidden_fields {
+            let mut normalized = BTreeMap::new();
+            for (aggregate, fields) in hidden_fields {
+                let aggregate = aggregate.trim();
+                if aggregate.is_empty() {
+                    continue;
+                }
+                let mut normalized_fields: Vec<String> = fields
+                    .into_iter()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .collect();
+                if normalized_fields.is_empty() {
+                    continue;
+                }
+                normalized_fields.sort();
+                normalized_fields.dedup();
+                normalized.insert(aggregate.to_string(), normalized_fields);
+            }
+            self.hidden_fields = normalized;
+        }
         self.updated_at = Utc::now();
+    }
+
+    pub fn is_field_hidden(&self, aggregate: &str, field: &str) -> bool {
+        self.hidden_fields
+            .get(aggregate)
+            .map(|fields| fields.iter().any(|item| item == field))
+            .unwrap_or(false)
     }
 
     pub fn set_column_type(&mut self, aggregate: &str, field: &str, data_type: String) {

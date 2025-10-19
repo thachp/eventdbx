@@ -54,8 +54,14 @@ impl QueryRoot {
         if take > app.page_limit {
             take = app.page_limit;
         }
-        let aggregates = app.store.aggregates_paginated(skip, Some(take));
-        Ok(aggregates.into_iter().map(Into::into).collect())
+        let mut aggregates = app.store.aggregates();
+        aggregates.retain(|aggregate| !app.is_hidden_aggregate(&aggregate.aggregate_type));
+        Ok(aggregates
+            .into_iter()
+            .skip(skip)
+            .take(take)
+            .map(|aggregate| app.sanitize_aggregate(aggregate).into())
+            .collect())
     }
 
     async fn aggregate(
@@ -66,11 +72,14 @@ impl QueryRoot {
     ) -> GqlResult<Option<Aggregate>> {
         let state = ctx.data::<GraphqlState>()?;
         let app = &state.app;
+        if app.is_hidden_aggregate(&aggregate_type) {
+            return Ok(None);
+        }
         match app
             .store
             .get_aggregate_state(&aggregate_type, &aggregate_id)
         {
-            Ok(state) => Ok(Some(state.into())),
+            Ok(state) => Ok(Some(app.sanitize_aggregate(state).into())),
             Err(crate::error::EventError::AggregateNotFound) => Ok(None),
             Err(err) => Err(err.into()),
         }
@@ -86,6 +95,9 @@ impl QueryRoot {
     ) -> GqlResult<Vec<Event>> {
         let state = ctx.data::<GraphqlState>()?;
         let app = &state.app;
+        if app.is_hidden_aggregate(&aggregate_type) {
+            return Err(EventError::AggregateNotFound.into());
+        }
         let skip = skip.unwrap_or(0);
         let mut take = take.unwrap_or(app.page_limit);
         if take == 0 {
@@ -113,6 +125,9 @@ impl QueryRoot {
     ) -> GqlResult<VerifyResult> {
         let state = ctx.data::<GraphqlState>()?;
         let app = &state.app;
+        if app.is_hidden_aggregate(&aggregate_type) {
+            return Err(EventError::AggregateNotFound.into());
+        }
         let merkle = app.store.verify(&aggregate_type, &aggregate_id)?;
         Ok(VerifyResult {
             merkle_root: merkle,
