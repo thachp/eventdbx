@@ -92,6 +92,9 @@ pub struct RemotePushArgs {
     /// Limit the push to specific aggregate types
     #[arg(long = "aggregate", value_name = "TYPE")]
     pub aggregates: Vec<String>,
+    /// Limit the push to specific aggregate identifiers (TYPE:ID)
+    #[arg(long = "aggregate-id", value_name = "TYPE:ID")]
+    pub aggregate_ids: Vec<String>,
 }
 
 #[derive(Args)]
@@ -107,6 +110,9 @@ pub struct RemotePullArgs {
     /// Limit the pull to specific aggregate types
     #[arg(long = "aggregate", value_name = "TYPE")]
     pub aggregates: Vec<String>,
+    /// Limit the pull to specific aggregate identifiers (TYPE:ID)
+    #[arg(long = "aggregate-id", value_name = "TYPE:ID")]
+    pub aggregate_ids: Vec<String>,
 }
 
 pub fn execute(config_path: Option<PathBuf>, command: RemoteCommands) -> Result<()> {
@@ -232,7 +238,7 @@ fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Result<()>
     let store = Arc::new(EventStore::open_read_only(config.event_store_path())?);
     let local_positions = store.aggregate_positions()?;
 
-    let filter = normalize_filter(&args.aggregates);
+    let filter = normalize_filter(&args.aggregates, &args.aggregate_ids)?;
 
     let runtime = Runtime::new()?;
     runtime.block_on(push_remote_async(
@@ -257,7 +263,7 @@ fn pull_remote(config_path: Option<PathBuf>, args: RemotePullArgs) -> Result<()>
     let store = Arc::new(EventStore::open(config.event_store_path())?);
     let local_positions = store.aggregate_positions()?;
 
-    let filter = normalize_filter(&args.aggregates);
+    let filter = normalize_filter(&args.aggregates, &args.aggregate_ids)?;
 
     let runtime = Runtime::new()?;
     runtime.block_on(pull_remote_async(
@@ -291,13 +297,56 @@ fn decode_public_key(input: &str) -> Result<Vec<u8>> {
         .map_err(|err| anyhow!("invalid base64 public key: {}", err))
 }
 
-fn normalize_filter(aggregates: &[String]) -> Option<HashSet<String>> {
-    let set: HashSet<String> = aggregates
+fn normalize_filter(
+    aggregates: &[String],
+    aggregate_ids: &[String],
+) -> Result<Option<ReplicationFilter>> {
+    let mut aggregate_types: HashSet<String> = aggregates
         .iter()
-        .map(|agg| agg.trim().to_string())
+        .map(|agg| agg.trim())
         .filter(|agg| !agg.is_empty())
+        .map(|agg| agg.to_string())
         .collect();
-    if set.is_empty() { None } else { Some(set) }
+
+    let mut id_map: HashMap<String, HashSet<String>> = HashMap::new();
+    for spec in aggregate_ids {
+        let trimmed = spec.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let (aggregate_type, aggregate_id) = if let Some((ty, id)) = trimmed.split_once("::") {
+            (ty, id)
+        } else if let Some((ty, id)) = trimmed.split_once(':') {
+            (ty, id)
+        } else {
+            bail!(
+                "aggregate id specification '{}' must be in TYPE:ID or TYPE::ID format",
+                spec
+            );
+        };
+
+        let ty = aggregate_type.trim();
+        let id = aggregate_id.trim();
+        if ty.is_empty() || id.is_empty() {
+            bail!("aggregate id specification '{}' has empty type or id", spec);
+        }
+
+        aggregate_types.insert(ty.to_string());
+        id_map
+            .entry(ty.to_string())
+            .or_default()
+            .insert(id.to_string());
+    }
+
+    if aggregate_types.is_empty() && id_map.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(ReplicationFilter {
+            aggregate_types,
+            aggregate_ids: id_map,
+        }))
+    }
 }
 
 async fn push_remote_async(
@@ -307,7 +356,7 @@ async fn push_remote_async(
     remote_name: String,
     dry_run: bool,
     batch_size: usize,
-    filter: Option<HashSet<String>>,
+    filter: Option<ReplicationFilter>,
 ) -> Result<()> {
     let mut client = connect_client(&remote).await?;
     let response = client
@@ -316,7 +365,7 @@ async fn push_remote_async(
         .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?
         .into_inner();
 
-    let filter_ref = filter.as_ref().map(|set| set as &HashSet<String>);
+    let filter_ref = filter.as_ref();
     let remote_map = proto_positions_to_map(&response.positions, filter_ref);
     let local_map = positions_to_map(&local_positions, filter_ref);
 
@@ -390,7 +439,7 @@ async fn pull_remote_async(
     remote_name: String,
     dry_run: bool,
     batch_size: usize,
-    filter: Option<HashSet<String>>,
+    filter: Option<ReplicationFilter>,
 ) -> Result<()> {
     let mut client = connect_client(&remote).await?;
     let response = client
@@ -399,7 +448,7 @@ async fn pull_remote_async(
         .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?
         .into_inner();
 
-    let filter_ref = filter.as_ref().map(|set| set as &HashSet<String>);
+    let filter_ref = filter.as_ref();
     let remote_map = proto_positions_to_map(&response.positions, filter_ref);
     let local_map = positions_to_map(&local_positions, filter_ref);
 
@@ -472,14 +521,35 @@ async fn connect_client(remote: &RemoteConfig) -> Result<ReplicationClient<Chann
     Ok(ReplicationClient::new(channel))
 }
 
+#[derive(Debug, Clone)]
+struct ReplicationFilter {
+    aggregate_types: HashSet<String>,
+    aggregate_ids: HashMap<String, HashSet<String>>,
+}
+
+impl ReplicationFilter {
+    fn includes(&self, aggregate_type: &str, aggregate_id: &str) -> bool {
+        if let Some(ids) = self.aggregate_ids.get(aggregate_type) {
+            return ids.contains(aggregate_id);
+        }
+        if !self.aggregate_types.is_empty() {
+            return self.aggregate_types.contains(aggregate_type);
+        }
+        if !self.aggregate_ids.is_empty() {
+            return false;
+        }
+        true
+    }
+}
+
 fn proto_positions_to_map(
     positions: &[AggregatePosition],
-    filter: Option<&HashSet<String>>,
+    filter: Option<&ReplicationFilter>,
 ) -> HashMap<(String, String), u64> {
     positions
         .iter()
         .filter(|pos| match filter {
-            Some(set) => set.contains(&pos.aggregate_type),
+            Some(filter) => filter.includes(&pos.aggregate_type, &pos.aggregate_id),
             None => true,
         })
         .map(|pos| {
@@ -493,12 +563,12 @@ fn proto_positions_to_map(
 
 fn positions_to_map(
     entries: &[AggregatePositionEntry],
-    filter: Option<&HashSet<String>>,
+    filter: Option<&ReplicationFilter>,
 ) -> HashMap<(String, String), u64> {
     entries
         .iter()
         .filter(|entry| match filter {
-            Some(set) => set.contains(&entry.aggregate_type),
+            Some(filter) => filter.includes(&entry.aggregate_type, &entry.aggregate_id),
             None => true,
         })
         .map(|entry| {

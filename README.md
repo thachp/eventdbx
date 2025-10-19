@@ -182,12 +182,12 @@ Clearing dead entries prompts for confirmation to avoid accidental removal. Manu
   Displays the endpoint and pinned key for a remote.
 - `eventdbx remote key [--show-path]`  
   Prints this node's replication public key (generated on first run).
-- `eventdbx remote push <name> [--dry-run] [--batch-size <n>] [--aggregate <type>...]`  
+- `eventdbx remote push <name> [--dry-run] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
   Streams local events to the remote in fast-forward mode; dry runs report pending changes.
-- `eventdbx remote pull <name> [--dry-run] [--batch-size <n>] [--aggregate <type>...]`  
+- `eventdbx remote pull <name> [--dry-run] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
   Fast-forwards the local node from the remote, reporting changes in dry-run mode.
 
-Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. The standby gRPC listener defaults to `127.0.0.1:7443`; override it in `config.toml` via `replication.bind_addr` when you expose the replica on another interface. When the HTTP server processes writes it streams committed events to every configured remote over gRPC using the pinned public keys.
+Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. The standby gRPC listener defaults to `127.0.0.1:7443`; override it in `config.toml` via `replication.bind_addr` when you expose the replica on another interface. When the HTTP server processes writes it streams committed events to every configured remote over gRPC using the pinned public keys. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, and `--aggregate-id TYPE:ID` to target individual aggregates.
 Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data.
 
 ### Maintenance
