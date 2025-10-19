@@ -45,8 +45,16 @@ tempfile = "3.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.21"
+tonic = { version = "0.11", features = ["tls", "tls-roots", "transport"] }
+prost = "0.12"
+tracing-futures = "0.2"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
+
+[build-dependencies]
+tonic-build = "0.11"
+protoc-bin-vendored = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -2,6 +2,7 @@ pub mod config;
 pub mod error;
 pub mod merkle;
 pub mod plugin;
+pub mod replication;
 pub mod restrict;
 pub mod schema;
 pub mod server;

@@ -28,6 +28,7 @@ use super::{
     config::Config,
     error::{EventError, Result},
     plugin::PluginManager,
+    replication::{ReplicationService, proto::replication_server::ReplicationServer},
     schema::SchemaManager,
     store::{self, AggregateState, AppendEvent, EventRecord, EventStore},
     token::{AccessKind, TokenManager},
@@ -194,6 +195,25 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
     let tokens = Arc::new(TokenManager::load(config.tokens_path())?);
     let schemas = Arc::new(SchemaManager::load(config.schema_store_path())?);
     let retry_queue = Arc::new(PluginRetryQueue::new(config.plugin_queue_path()));
+    let replication_service = ReplicationService::new();
+    let replication_addr: SocketAddr = config.replication.bind_addr.parse().map_err(|err| {
+        EventError::Config(format!(
+            "invalid replication bind address {}: {}",
+            config.replication.bind_addr, err
+        ))
+    })?;
+
+    let replication_server = tonic::transport::Server::builder()
+        .add_service(ReplicationServer::new(replication_service.clone()))
+        .serve_with_shutdown(replication_addr, async {
+            shutdown_signal().await;
+        });
+
+    tokio::spawn(async move {
+        if let Err(err) = replication_server.await {
+            tracing::error!("replication server failed: {}", err);
+        }
+    });
     let state = AppState {
         store,
         tokens,

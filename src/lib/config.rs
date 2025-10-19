@@ -306,12 +306,15 @@ impl Config {
 pub struct ReplicationConfig {
     #[serde(default = "default_identity_key")]
     pub identity_key: PathBuf,
+    #[serde(default = "default_replication_bind")]
+    pub bind_addr: String,
 }
 
 impl Default for ReplicationConfig {
     fn default() -> Self {
         Self {
             identity_key: default_identity_key(),
+            bind_addr: default_replication_bind(),
         }
     }
 }
@@ -347,6 +350,10 @@ fn default_plugin_max_attempts() -> u32 {
 
 fn default_identity_key() -> PathBuf {
     PathBuf::from("replication.key")
+}
+
+fn default_replication_bind() -> String {
+    "127.0.0.1:7443".to_string()
 }
 
 fn deserialize_restrict<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
