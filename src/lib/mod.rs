@@ -1,4 +1,5 @@
 pub mod config;
+pub mod encryption;
 pub mod error;
 pub mod graphql;
 pub mod merkle;

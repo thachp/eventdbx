@@ -222,8 +222,15 @@ struct QueueEntry {
 }
 
 pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
-    let store = Arc::new(EventStore::open(config.event_store_path())?);
-    let tokens = Arc::new(TokenManager::load(config.tokens_path())?);
+    let encryption = config.encryption_key()?;
+    let store = Arc::new(EventStore::open(
+        config.event_store_path(),
+        encryption.clone(),
+    )?);
+    let tokens = Arc::new(TokenManager::load(
+        config.tokens_path(),
+        encryption.clone(),
+    )?);
     let schemas = Arc::new(SchemaManager::load(config.schema_store_path())?);
     let retry_queue = Arc::new(PluginRetryQueue::new(config.plugin_queue_path()));
     let replication_service = ReplicationService::new(Arc::clone(&store));

@@ -14,9 +14,6 @@ pub struct ConfigArgs {
     pub data_dir: Option<PathBuf>,
 
     #[arg(long)]
-    pub master_key: Option<String>,
-
-    #[arg(long)]
     pub memory_threshold: Option<usize>,
 
     #[arg(long, alias = "dek")]
@@ -39,7 +36,6 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
     let ConfigArgs {
         port,
         data_dir,
-        master_key,
         memory_threshold,
         data_encryption_key,
         list_page_size,
@@ -47,13 +43,11 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         plugin_max_attempts,
     } = args;
 
-    let master_key = normalize_secret(master_key);
     let data_encryption_key = normalize_secret(data_encryption_key);
 
     config.apply_update(ConfigUpdate {
         port,
         data_dir,
-        master_key,
         memory_threshold,
         data_encryption_key,
         restrict: None,
@@ -67,7 +61,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
 
     if !was_initialized && !config.is_initialized() {
         return Err(anyhow!(
-            "initial setup requires both --master-key and --dek to be provided"
+            "initial setup requires --dek to be provided (32-byte base64 value)"
         ));
     }
 
@@ -83,7 +77,7 @@ pub fn ensure_secrets_configured(config: &Config) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow!(
-            "master key and data encryption key must be configured.\nRun `eventdbx config --master-key <value> --dek <value>` during initial setup."
+            "data encryption key must be configured.\nRun `eventdbx config --dek <value>` during initial setup."
         ))
     }
 }

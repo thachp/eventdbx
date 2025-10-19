@@ -1,11 +1,17 @@
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::error::{EventError, Result};
+use super::{
+    encryption::{self, Encryptor},
+    error::{EventError, Result},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -58,27 +64,33 @@ pub struct IssueTokenInput {
 pub struct TokenManager {
     path: PathBuf,
     records: RwLock<Vec<TokenRecord>>,
+    encryptor: Option<Encryptor>,
 }
 
 impl TokenManager {
-    pub fn load(path: PathBuf) -> Result<Self> {
+    pub fn load(path: PathBuf, encryptor: Option<Encryptor>) -> Result<Self> {
         if !path.exists() {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(&path, "[]")?;
+            if let Some(enc) = &encryptor {
+                let payload = serde_json::to_vec(&Vec::<TokenRecord>::new())?;
+                let encrypted = enc.encrypt_to_string(&payload)?;
+                fs::write(&path, encrypted)?;
+            } else {
+                fs::write(&path, "[]")?;
+            }
         }
 
-        let contents = fs::read_to_string(&path)?;
-        let records: Vec<TokenRecord> = if contents.trim().is_empty() {
-            Vec::new()
-        } else {
-            serde_json::from_str(&contents)?
-        };
+        let (records, upgraded) = read_records(&path, encryptor.as_ref())?;
+        if upgraded {
+            write_records(&path, &records, encryptor.as_ref())?;
+        }
 
         Ok(Self {
             path,
             records: RwLock::new(records),
+            encryptor,
         })
     }
 
@@ -203,32 +215,76 @@ impl TokenManager {
     }
 
     fn persist(&self, records: &[TokenRecord]) -> Result<()> {
-        let payload = serde_json::to_string_pretty(records)?;
-        fs::write(&self.path, payload)?;
-        Ok(())
+        write_records(&self.path, records, self.encryptor.as_ref())
     }
 
     fn refresh_from_disk(&self) -> Result<()> {
-        let contents = match fs::read_to_string(&self.path) {
-            Ok(data) => data,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                if let Some(parent) = self.path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&self.path, "[]")?;
-                String::new()
-            }
-            Err(err) => return Err(EventError::Io(err)),
-        };
-
-        let parsed: Vec<TokenRecord> = if contents.trim().is_empty() {
-            Vec::new()
-        } else {
-            serde_json::from_str(&contents)?
-        };
-
+        let (parsed, upgraded) = read_records(&self.path, self.encryptor.as_ref())?;
+        if upgraded {
+            write_records(&self.path, &parsed, self.encryptor.as_ref())?;
+        }
         let mut records = self.records.write();
         *records = parsed;
         Ok(())
     }
+}
+
+fn read_records(path: &Path, encryptor: Option<&Encryptor>) -> Result<(Vec<TokenRecord>, bool)> {
+    let contents = match fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let empty: Vec<TokenRecord> = Vec::new();
+            write_records(path, &empty, encryptor)?;
+            return Ok((Vec::new(), false));
+        }
+        Err(err) => return Err(EventError::Io(err)),
+    };
+
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+
+    if let Some(enc) = encryptor {
+        if encryption::is_encrypted_blob(trimmed) {
+            let bytes = enc.decrypt_from_str(trimmed)?;
+            if bytes.is_empty() {
+                return Ok((Vec::new(), false));
+            }
+            let records = serde_json::from_slice(&bytes)?;
+            Ok((records, false))
+        } else {
+            let records = serde_json::from_str(trimmed)?;
+            Ok((records, true))
+        }
+    } else {
+        if encryption::is_encrypted_blob(trimmed) {
+            return Err(EventError::Config(
+                "data encryption key must be configured to read encrypted tokens".to_string(),
+            ));
+        }
+        let records = serde_json::from_str(trimmed)?;
+        Ok((records, false))
+    }
+}
+
+fn write_records(
+    path: &Path,
+    records: &[TokenRecord],
+    encryptor: Option<&Encryptor>,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let payload = serde_json::to_vec(records)?;
+    if let Some(enc) = encryptor {
+        let encrypted = enc.encrypt_to_string(&payload)?;
+        fs::write(path, encrypted)?;
+    } else {
+        fs::write(path, payload)?;
+    }
+    Ok(())
 }

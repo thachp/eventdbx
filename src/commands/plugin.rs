@@ -923,7 +923,7 @@ fn replay_blocking(
     aggregate_id: Option<String>,
 ) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
-    let store = EventStore::open(config.event_store_path())?;
+    let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
     let schema_manager = SchemaManager::load(config.schema_store_path())?;
 
     let plugin_defs = config.load_plugins()?;
@@ -1103,8 +1103,8 @@ fn retry_dead_events(
         return Ok(());
     }
 
-    let store =
-        EventStore::open_read_only(config.event_store_path()).map_err(anyhow::Error::from)?;
+    let store = EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)
+        .map_err(anyhow::Error::from)?;
     let schema_manager = SchemaManager::load(config.schema_store_path())?;
 
     let base_types: Arc<ColumnTypes> = Arc::new(config.column_types.clone());

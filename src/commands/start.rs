@@ -280,7 +280,6 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
     config.apply_update(ConfigUpdate {
         port: args.port,
         data_dir: args.data_dir.clone(),
-        master_key: None,
         memory_threshold: None,
         data_encryption_key: None,
         restrict: Some(args.restrict),

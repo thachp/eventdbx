@@ -177,7 +177,8 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 return Ok(());
             }
 
-            let store = EventStore::open_read_only(config.event_store_path())?;
+            let store =
+                EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
             let take = args.take.or(Some(config.list_page_size));
             for aggregate in store.aggregates_paginated(args.skip, take) {
                 println!(
@@ -191,7 +192,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
         }
         AggregateCommands::Remove(args) => {
-            let store = EventStore::open(config.event_store_path())?;
+            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
             store.remove_aggregate(&args.aggregate, &args.aggregate_id)?;
             println!(
                 "aggregate_type={} aggregate_id={} removed",
@@ -199,7 +200,8 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             );
         }
         AggregateCommands::Get(args) => {
-            let store = EventStore::open_read_only(config.event_store_path())?;
+            let store =
+                EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
             let mut state = store.get_aggregate_state(&args.aggregate, &args.aggregate_id)?;
             let mut events_cache = None;
 
@@ -258,7 +260,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
 
             if stage {
-                let store = EventStore::open(config.event_store_path())?;
+                let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
                 {
                     let mut tx = store.transaction()?;
                     tx.append(AppendEvent {
@@ -283,7 +285,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 return Ok(());
             }
 
-            let store = EventStore::open(config.event_store_path())?;
+            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
             let plugins = PluginManager::from_config(&config)?;
             let record = store.append(AppendEvent {
                 aggregate_type: aggregate.clone(),
@@ -315,7 +317,8 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
         }
         AggregateCommands::Replay(args) => {
-            let store = EventStore::open_read_only(config.event_store_path())?;
+            let store =
+                EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
             let events = store.list_events(&args.aggregate, &args.aggregate_id)?;
             let iter = events.into_iter().skip(args.skip);
             let events: Vec<_> = if let Some(limit) = args.take {
@@ -329,7 +332,8 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
         }
         AggregateCommands::Verify(args) => {
-            let store = EventStore::open_read_only(config.event_store_path())?;
+            let store =
+                EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
             let merkle_root = store.verify(&args.aggregate, &args.aggregate_id)?;
             println!(
                 "aggregate_type={} aggregate_id={} merkle_root={}",
@@ -337,13 +341,13 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             );
         }
         AggregateCommands::Snapshot(args) => {
-            let store = EventStore::open(config.event_store_path())?;
+            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
             let snapshot =
                 store.create_snapshot(&args.aggregate, &args.aggregate_id, args.comment.clone())?;
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
         }
         AggregateCommands::Archive(args) => {
-            let store = EventStore::open(config.event_store_path())?;
+            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
@@ -359,7 +363,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             );
         }
         AggregateCommands::Restore(args) => {
-            let store = EventStore::open(config.event_store_path())?;
+            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
@@ -383,7 +387,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
 
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
-            let store = EventStore::open(config.event_store_path())?;
+            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
             let plugins = PluginManager::from_config(&config)?;
             let mut tx = store.transaction()?;
 

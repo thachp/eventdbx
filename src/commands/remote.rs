@@ -234,7 +234,10 @@ async fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Resu
         .cloned()
         .ok_or_else(|| anyhow!("no remote named '{}' is configured", args.name))?;
 
-    let store = Arc::new(EventStore::open_read_only(config.event_store_path())?);
+    let store = Arc::new(EventStore::open_read_only(
+        config.event_store_path(),
+        config.encryption_key()?,
+    )?);
     let local_positions = store.aggregate_positions()?;
 
     let filter = normalize_filter(&args.aggregates, &args.aggregate_ids)?;
@@ -259,7 +262,10 @@ async fn pull_remote(config_path: Option<PathBuf>, args: RemotePullArgs) -> Resu
         .cloned()
         .ok_or_else(|| anyhow!("no remote named '{}' is configured", args.name))?;
 
-    let store = Arc::new(EventStore::open(config.event_store_path())?);
+    let store = Arc::new(EventStore::open(
+        config.event_store_path(),
+        config.encryption_key()?,
+    )?);
     let local_positions = store.aggregate_positions()?;
 
     let filter = normalize_filter(&args.aggregates, &args.aggregate_ids)?;
