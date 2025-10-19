@@ -1,3 +1,4 @@
+pub mod api_grpc;
 pub mod config;
 pub mod encryption;
 pub mod error;

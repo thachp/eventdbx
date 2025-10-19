@@ -47,7 +47,7 @@ Follow the steps below to spin up EventDBX locally. All commands are expected to
    - Omit `--foreground` to daemonise the process.
    - Use `--data-dir <path>` to override the default `./.eventdbx` directory.
    - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
-   - Choose the HTTP surface with `--api graphQL`, `--api rest`, or `--api both` (default).
+  - Choose the API surface with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). `--api grpc`/`--api all` automatically flip the gRPC listener on for the current session; persistently enable it by setting `grpc.enabled = true` in `config.toml`.
 
 6. **Define a schema (recommended when running in restricted mode)**
 
@@ -334,6 +334,23 @@ curl \
 ## GraphQL API
 
 GraphQL is served on `/graphql`, and an interactive Playground is available via `GET /graphql` or `/graphql/playground`. Supply the same bearer token header used for REST requests.
+
+## gRPC API
+
+Set `grpc.enabled = true` in `config.toml` to expose a gRPC surface (disabled by default). The listener binds to `grpc.bind_addr` (default `127.0.0.1:7442`). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
+
+Example `grpcurl` invocation:
+
+```bash
+grpcurl -H "authorization: Bearer TOKEN" \
+  -d '{
+        "aggregate_type": "patient",
+        "aggregate_id": "p-001",
+        "event_type": "patient-updated",
+        "payload_json": "{\"status\":\"inactive\"}"
+      }' \
+  -plaintext 127.0.0.1:7442 eventdbx.api.EventService/AppendEvent
+```
 
 ### Query example
 

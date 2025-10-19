@@ -56,7 +56,8 @@ impl Default for StartArgs {
 pub enum ApiModeArg {
     Rest,
     Graphql,
-    Both,
+    Grpc,
+    All,
 }
 
 impl From<ApiModeArg> for ApiMode {
@@ -64,7 +65,8 @@ impl From<ApiModeArg> for ApiMode {
         match value {
             ApiModeArg::Rest => ApiMode::Rest,
             ApiModeArg::Graphql => ApiMode::Graphql,
-            ApiModeArg::Both => ApiMode::Both,
+            ApiModeArg::Grpc => ApiMode::Grpc,
+            ApiModeArg::All => ApiMode::All,
         }
     }
 }
@@ -302,6 +304,7 @@ fn load_and_update_config(
 }
 
 fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
+    let api_override = args.api.map(ApiMode::from);
     config.apply_update(ConfigUpdate {
         port: args.port,
         data_dir: args.data_dir.clone(),
@@ -311,10 +314,16 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         list_page_size: None,
         page_limit: None,
         plugin_max_attempts: None,
-        api_mode: args.api.map(Into::into),
+        api_mode: api_override,
         hidden_aggregate_types: None,
         hidden_fields: None,
+        grpc: None,
     });
+    if let Some(mode) = api_override {
+        if mode.grpc_enabled() {
+            config.grpc.enabled = true;
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

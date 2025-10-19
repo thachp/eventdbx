@@ -7,6 +7,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile(&["proto/replication.proto"], &["proto"])?;
+        .compile(&["proto/replication.proto", "proto/api.proto"], &["proto"])?;
     Ok(())
 }
