@@ -311,7 +311,8 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
 
     start_plugin_retry_worker(state.clone());
 
-    let grpc_enabled = config.grpc.enabled;
+    let api_mode = config.api_mode;
+    let grpc_enabled = config.grpc.enabled || api_mode.grpc_enabled();
     let grpc_bind_addr = config.grpc.bind_addr.clone();
     let grpc_handle = if grpc_enabled {
         let grpc_addr: SocketAddr = grpc_bind_addr.parse().map_err(|err| {
@@ -339,10 +340,9 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         None
     };
 
-    let api_mode = config.api_mode;
-    if !api_mode.rest_enabled() && !api_mode.graphql_enabled() {
+    if !api_mode.rest_enabled() && !api_mode.graphql_enabled() && !grpc_enabled {
         return Err(EventError::Config(
-            "at least one API surface (REST or GraphQL) must be enabled".to_string(),
+            "at least one API surface (REST, GraphQL, or gRPC) must be enabled".to_string(),
         ));
     }
 

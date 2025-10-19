@@ -47,7 +47,7 @@ Follow the steps below to spin up EventDBX locally. All commands are expected to
    - Omit `--foreground` to daemonise the process.
    - Use `--data-dir <path>` to override the default `./.eventdbx` directory.
    - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
-   - Choose the HTTP surface with `--api graphQL`, `--api rest`, or `--api both` (default).
+  - Choose the API surface with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). `--api grpc`/`--api all` automatically flip the gRPC listener on for the current session; persistently enable it by setting `grpc.enabled = true` in `config.toml`.
 
 6. **Define a schema (recommended when running in restricted mode)**
 

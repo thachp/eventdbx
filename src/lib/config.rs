@@ -26,16 +26,21 @@ pub const DEFAULT_MEMORY_THRESHOLD: usize = 10_000;
 pub enum ApiMode {
     Rest,
     Graphql,
-    Both,
+    Grpc,
+    All,
 }
 
 impl ApiMode {
     pub fn rest_enabled(self) -> bool {
-        matches!(self, ApiMode::Rest | ApiMode::Both)
+        matches!(self, ApiMode::Rest | ApiMode::All)
     }
 
     pub fn graphql_enabled(self) -> bool {
-        matches!(self, ApiMode::Graphql | ApiMode::Both)
+        matches!(self, ApiMode::Graphql | ApiMode::All)
+    }
+
+    pub fn grpc_enabled(self) -> bool {
+        matches!(self, ApiMode::Grpc | ApiMode::All)
     }
 }
 
@@ -465,7 +470,7 @@ fn default_grpc_bind_addr() -> String {
 }
 
 fn default_api_mode() -> ApiMode {
-    ApiMode::Both
+    ApiMode::All
 }
 
 fn default_identity_key() -> PathBuf {
