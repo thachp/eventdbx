@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand};
 
 use eventdbx::{
-    config::load_or_default,
+    config::{ConfigUpdate, load_or_default},
     schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
 };
 
@@ -18,6 +18,8 @@ pub enum SchemaCommands {
     Remove(SchemaRemoveEventArgs),
     /// List available schemas
     List,
+    /// Hide a field from aggregate detail responses
+    Hide(SchemaHideArgs),
     /// Fallback handler for positional aggregate commands
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -54,12 +56,23 @@ pub struct SchemaRemoveEventArgs {
     pub event: String,
 }
 
-pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<()> {
-    let (config, _) = load_or_default(config_path)?;
-    let manager = SchemaManager::load(config.schema_store_path())?;
+#[derive(Args)]
+pub struct SchemaHideArgs {
+    /// Aggregate name
+    #[arg(long)]
+    pub aggregate: String,
 
+    /// Field/property name to hide
+    #[arg(long)]
+    pub field: String,
+}
+
+pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<()> {
     match command {
+        SchemaCommands::Hide(args) => hide_field(config_path, args),
         SchemaCommands::Create(args) => {
+            let (config, _) = load_or_default(config_path)?;
+            let manager = SchemaManager::load(config.schema_store_path())?;
             let schema = manager.create(CreateSchemaInput {
                 aggregate: args.aggregate,
                 events: args.events,
@@ -71,8 +84,11 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                 schema.events.len(),
                 schema.snapshot_threshold
             );
+            Ok(())
         }
         SchemaCommands::Add(args) => {
+            let (config, _) = load_or_default(config_path)?;
+            let manager = SchemaManager::load(config.schema_store_path())?;
             manager.get(&args.aggregate)?;
             let mut update = SchemaUpdate::default();
             for event in &args.events {
@@ -85,8 +101,11 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                 args.events.join(","),
                 schema.events.len()
             );
+            Ok(())
         }
         SchemaCommands::Remove(args) => {
+            let (config, _) = load_or_default(config_path)?;
+            let manager = SchemaManager::load(config.schema_store_path())?;
             let schema = manager.remove_event(&args.aggregate, &args.event)?;
             println!(
                 "schema={} removed_event={} remaining_events={}",
@@ -94,8 +113,11 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                 args.event,
                 schema.events.len()
             );
+            Ok(())
         }
         SchemaCommands::List => {
+            let (config, _) = load_or_default(config_path)?;
+            let manager = SchemaManager::load(config.schema_store_path())?;
             for schema in manager.list() {
                 println!(
                     "schema={} events={} locked={} snapshot_threshold={:?}",
@@ -105,28 +127,69 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                     schema.snapshot_threshold
                 );
             }
+            Ok(())
         }
-        SchemaCommands::External(args) => match args.as_slice() {
-            [] => {
-                return Err(anyhow::anyhow!(
+        SchemaCommands::External(args) => {
+            let (config, _) = load_or_default(config_path)?;
+            let manager = SchemaManager::load(config.schema_store_path())?;
+            match args.as_slice() {
+                [] => Err(anyhow!(
                     "missing aggregate name; try `eventdbx schema <aggregate>`"
-                ));
-            }
-            [aggregate] => {
-                let schema = manager.get(aggregate)?;
-                println!("{}", serde_json::to_string_pretty(&schema)?);
-            }
-            [command, aggregate] if command.eq_ignore_ascii_case("show") => {
-                let schema = manager.get(aggregate)?;
-                println!("{}", serde_json::to_string_pretty(&schema)?);
-            }
-            _ => {
-                return Err(anyhow::anyhow!(
+                )),
+                [aggregate] => {
+                    let schema = manager.get(aggregate)?;
+                    println!("{}", serde_json::to_string_pretty(&schema)?);
+                    Ok(())
+                }
+                [command, aggregate] if command.eq_ignore_ascii_case("show") => {
+                    let schema = manager.get(aggregate)?;
+                    println!("{}", serde_json::to_string_pretty(&schema)?);
+                    Ok(())
+                }
+                _ => Err(anyhow!(
                     "unsupported schema command; available subcommands are create, add, remove, list"
-                ));
+                )),
             }
-        },
+        }
+    }
+}
+
+fn hide_field(config_path: Option<PathBuf>, args: SchemaHideArgs) -> Result<()> {
+    let (mut config, path) = load_or_default(config_path)?;
+    let manager = SchemaManager::load(config.schema_store_path())?;
+
+    let aggregate = args.aggregate.trim();
+    if aggregate.is_empty() {
+        return Err(anyhow!("aggregate name cannot be empty"));
+    }
+    let field = args.field.trim();
+    if field.is_empty() {
+        return Err(anyhow!("field name cannot be empty"));
     }
 
+    // Ensure aggregate exists (best-effort)
+    if manager.get(aggregate).is_err() {
+        tracing::warn!(
+            "hiding field `{}` for unknown aggregate `{}`; field visibility will still be enforced",
+            field,
+            aggregate
+        );
+    }
+
+    let mut hidden_fields = config.hidden_fields.clone();
+    let entry = hidden_fields.entry(aggregate.to_string()).or_default();
+    if !entry.iter().any(|existing| existing == field) {
+        entry.push(field.to_string());
+        entry.sort();
+        entry.dedup();
+    }
+
+    config.apply_update(ConfigUpdate {
+        hidden_fields: Some(hidden_fields),
+        ..ConfigUpdate::default()
+    });
+    config.save(&path)?;
+
+    println!("aggregate={} field={} hidden", aggregate, field);
     Ok(())
 }
