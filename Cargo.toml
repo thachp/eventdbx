@@ -51,6 +51,7 @@ tracing-futures = "0.2"
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
 async-graphql = { version = "7", features = ["chrono", "uuid"] }
 async-graphql-axum = "7"
+aes-gcm = "0.10"
 
 [dev-dependencies]
 

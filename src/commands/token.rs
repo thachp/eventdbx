@@ -56,7 +56,8 @@ pub struct TokenRefreshArgs {
 
 pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
-    let manager = TokenManager::load(config.tokens_path())?;
+    let encryptor = config.encryption_key()?;
+    let manager = TokenManager::load(config.tokens_path(), encryptor)?;
 
     match command {
         TokenCommands::Generate(args) => {

@@ -8,6 +8,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
+    encryption::{self, Encryptor},
     error::{EventError, Result},
     merkle::{compute_merkle_root, empty_root},
     token::TokenGrant,
@@ -61,7 +62,8 @@ impl<'a> Transaction<'a> {
             return Err(EventError::AggregateArchived);
         }
         let record = apply_event(meta, state, input);
-        let event_value = serde_json::to_vec(&record)?;
+        let stored_record = self.store.encode_record(&record)?;
+        let event_value = serde_json::to_vec(&stored_record)?;
 
         self.pending_events.push(PendingEvent {
             key: event_key(&record.aggregate_type, &record.aggregate_id, record.version),
@@ -276,6 +278,7 @@ pub struct EventStore {
     db: DBWithThreadMode<MultiThreaded>,
     write_lock: Mutex<()>,
     read_only: bool,
+    encryptor: Option<Encryptor>,
 }
 
 pub struct Transaction<'a> {
@@ -306,7 +309,7 @@ pub struct AggregatePositionEntry {
 }
 
 impl EventStore {
-    pub fn open(path: PathBuf) -> Result<Self> {
+    pub fn open(path: PathBuf, encryptor: Option<Encryptor>) -> Result<Self> {
         let mut options = Options::default();
         options.create_if_missing(true);
         let db = DBWithThreadMode::<MultiThreaded>::open(&options, path)
@@ -316,10 +319,11 @@ impl EventStore {
             db,
             write_lock: Mutex::new(()),
             read_only: false,
+            encryptor,
         })
     }
 
-    pub fn open_read_only(path: PathBuf) -> Result<Self> {
+    pub fn open_read_only(path: PathBuf, encryptor: Option<Encryptor>) -> Result<Self> {
         let mut options = Options::default();
         options.create_if_missing(false);
         let db = DBWithThreadMode::<MultiThreaded>::open_for_read_only(&options, path, false)
@@ -329,6 +333,7 @@ impl EventStore {
             db,
             write_lock: Mutex::new(()),
             read_only: true,
+            encryptor,
         })
     }
 
@@ -348,12 +353,13 @@ impl EventStore {
         }
         let mut state = self.load_state_map(&aggregate_type, &aggregate_id)?;
         let record = apply_event(&mut meta, &mut state, input);
+        let stored_record = self.encode_record(&record)?;
 
         let mut batch = WriteBatch::default();
         batch_put(
             &mut batch,
             event_key(&record.aggregate_type, &record.aggregate_id, record.version),
-            serde_json::to_vec(&record)?,
+            serde_json::to_vec(&stored_record)?,
         )?;
         batch_put(
             &mut batch,
@@ -425,11 +431,13 @@ impl EventStore {
             )));
         }
 
+        let stored_record = self.encode_record(&record)?;
+
         let mut batch = WriteBatch::default();
         batch_put(
             &mut batch,
             event_key(&aggregate_type, &aggregate_id, record.version),
-            serde_json::to_vec(&record)?,
+            serde_json::to_vec(&stored_record)?,
         )?;
         batch_put(
             &mut batch,
@@ -501,6 +509,7 @@ impl EventStore {
                 break;
             }
             let record: EventRecord = serde_json::from_slice(&value)?;
+            let record = self.decode_record(record)?;
             events.push(record);
         }
 
@@ -527,6 +536,7 @@ impl EventStore {
                 break;
             }
             let record: EventRecord = serde_json::from_slice(&value)?;
+            let record = self.decode_record(record)?;
             if record.version <= from_version {
                 continue;
             }
@@ -632,6 +642,38 @@ impl EventStore {
 
         drop(meta);
         self.get_aggregate_state(aggregate_type, aggregate_id)
+    }
+
+    fn encode_record(&self, record: &EventRecord) -> Result<EventRecord> {
+        if let Some(enc) = &self.encryptor {
+            if encryption::extract_encrypted_value(&record.payload).is_some() {
+                return Ok(record.clone());
+            }
+            let payload_bytes = serde_json::to_vec(&record.payload)?;
+            let ciphertext = enc.encrypt_to_string(&payload_bytes)?;
+            let mut stored = record.clone();
+            stored.payload = encryption::wrap_encrypted_value(ciphertext);
+            Ok(stored)
+        } else {
+            Ok(record.clone())
+        }
+    }
+
+    fn decode_record(&self, mut record: EventRecord) -> Result<EventRecord> {
+        if let Some(enc) = &self.encryptor {
+            if let Some(ciphertext) = encryption::extract_encrypted_value(&record.payload) {
+                let bytes = enc.decrypt_from_str(ciphertext)?;
+                record.payload = serde_json::from_slice(&bytes)?;
+            }
+            Ok(record)
+        } else {
+            if encryption::extract_encrypted_value(&record.payload).is_some() {
+                return Err(EventError::Config(
+                    "data encryption key must be configured to read encrypted events".to_string(),
+                ));
+            }
+            Ok(record)
+        }
     }
 
     fn ensure_writable(&self) -> Result<()> {
@@ -933,7 +975,7 @@ mod tests {
         let path = dir.path().join("event_store");
 
         {
-            let store = EventStore::open(path.clone()).unwrap();
+            let store = EventStore::open(path.clone(), None).unwrap();
 
             let payload = serde_json::json!({ "name": "Alice" });
 
@@ -964,7 +1006,7 @@ mod tests {
     fn transaction_appends_multiple_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
-        let store = EventStore::open(path).unwrap();
+        let store = EventStore::open(path, None).unwrap();
 
         let mut tx = store.transaction().unwrap();
         let first = tx
@@ -1010,7 +1052,7 @@ mod tests {
     fn transaction_without_commit_discards_changes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
-        let store = EventStore::open(path.clone()).unwrap();
+        let store = EventStore::open(path.clone(), None).unwrap();
 
         {
             let mut tx = store.transaction().unwrap();
@@ -1032,7 +1074,7 @@ mod tests {
     fn snapshots_and_archive_flow() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
-        let store = EventStore::open(path).unwrap();
+        let store = EventStore::open(path, None).unwrap();
 
         let payload = serde_json::json!({ "status": "active" });
 

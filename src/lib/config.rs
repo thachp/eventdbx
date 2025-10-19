@@ -13,7 +13,10 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use super::error::{EventError, Result};
+use super::{
+    encryption::Encryptor,
+    error::{EventError, Result},
+};
 
 pub const DEFAULT_PORT: u16 = 7070;
 pub const DEFAULT_MEMORY_THRESHOLD: usize = 10_000;
@@ -40,7 +43,6 @@ impl ApiMode {
 pub struct Config {
     pub port: u16,
     pub data_dir: PathBuf,
-    pub master_key: Option<String>,
     pub memory_threshold: usize,
     pub data_encryption_key: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -78,7 +80,6 @@ impl Default for Config {
         Self {
             port: DEFAULT_PORT,
             data_dir: default_data_dir(),
-            master_key: None,
             memory_threshold: DEFAULT_MEMORY_THRESHOLD,
             data_encryption_key: None,
             created_at: now,
@@ -102,7 +103,6 @@ impl Default for Config {
 pub struct ConfigUpdate {
     pub port: Option<u16>,
     pub data_dir: Option<PathBuf>,
-    pub master_key: Option<String>,
     pub memory_threshold: Option<usize>,
     pub data_encryption_key: Option<String>,
     pub restrict: Option<bool>,
@@ -159,9 +159,6 @@ impl Config {
         }
         if let Some(dir) = update.data_dir {
             self.data_dir = dir;
-        }
-        if let Some(master_key) = update.master_key {
-            self.master_key = Some(master_key);
         }
         if let Some(threshold) = update.memory_threshold {
             self.memory_threshold = threshold;
@@ -334,15 +331,22 @@ impl Config {
     }
 
     pub fn is_initialized(&self) -> bool {
-        self.master_key
+        self.data_encryption_key
             .as_ref()
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
-            && self
-                .data_encryption_key
-                .as_ref()
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
+    }
+
+    pub fn encryption_key(&self) -> Result<Option<Encryptor>> {
+        match self
+            .data_encryption_key
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            Some(value) => Ok(Some(Encryptor::new_from_base64(value)?)),
+            None => Ok(None),
+        }
     }
 
     pub fn load_plugins(&self) -> Result<Vec<PluginDefinition>> {
