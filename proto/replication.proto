@@ -1,0 +1,71 @@
+syntax = "proto3";
+package eventdbx.replication;
+
+message SnapshotRequest {
+  string remote_name = 1;
+}
+
+message SnapshotChunk {
+  bytes data = 1;
+  bool eof = 2;
+}
+
+message EventRecord {
+  string aggregate_type = 1;
+  string aggregate_id = 2;
+  string event_type = 3;
+  uint64 version = 4;
+  string merkle_root = 5;
+  bytes payload = 6;
+  bytes metadata = 7;
+  string hash = 8;
+}
+
+message EventBatch {
+  repeated EventRecord events = 1;
+  uint64 sequence = 2;
+}
+
+message ReplicationAck {
+  uint64 applied_sequence = 1;
+}
+
+message HeartbeatRequest {
+  string remote_name = 1;
+}
+
+message HeartbeatResponse {
+  uint64 applied_sequence = 1;
+  uint64 pending_events = 2;
+}
+
+message AggregatePosition {
+  string aggregate_type = 1;
+  string aggregate_id = 2;
+  uint64 version = 3;
+}
+
+message ListPositionsRequest {}
+
+message ListPositionsResponse {
+  repeated AggregatePosition positions = 1;
+}
+
+message PullEventsRequest {
+  string aggregate_type = 1;
+  string aggregate_id = 2;
+  uint64 from_version = 3;
+  uint64 limit = 4;
+}
+
+message PullEventsResponse {
+  repeated EventRecord events = 1;
+}
+
+service Replication {
+  rpc BootstrapSnapshot(SnapshotRequest) returns (stream SnapshotChunk);
+  rpc ApplyEvents(stream EventBatch) returns (ReplicationAck);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc ListPositions(ListPositionsRequest) returns (ListPositionsResponse);
+  rpc PullEvents(PullEventsRequest) returns (PullEventsResponse);
+}

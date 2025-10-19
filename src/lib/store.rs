@@ -298,6 +298,13 @@ pub struct SnapshotRecord {
     pub comment: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AggregatePositionEntry {
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    pub version: u64,
+}
+
 impl EventStore {
     pub fn open(path: PathBuf) -> Result<Self> {
         let mut options = Options::default();
@@ -364,6 +371,81 @@ impl EventStore {
         Ok(record)
     }
 
+    pub fn append_replica(&self, record: EventRecord) -> Result<()> {
+        self.ensure_writable()?;
+        let _guard = self.write_lock.lock();
+
+        let aggregate_type = record.aggregate_type.clone();
+        let aggregate_id = record.aggregate_id.clone();
+
+        let mut meta = self
+            .load_meta(&aggregate_type, &aggregate_id)?
+            .unwrap_or_else(|| AggregateMeta::new(aggregate_type.clone(), aggregate_id.clone()));
+
+        if meta.version + 1 != record.version {
+            return Err(EventError::Storage(format!(
+                "replication version mismatch for {}::{} (expected {}, got {})",
+                aggregate_type,
+                aggregate_id,
+                meta.version + 1,
+                record.version
+            )));
+        }
+
+        let mut state = self.load_state_map(&aggregate_type, &aggregate_id)?;
+        let payload_map = payload_to_map(&record.payload);
+
+        let computed_hash = hash_event(
+            &aggregate_type,
+            &aggregate_id,
+            record.version,
+            &record.event_type,
+            &payload_map,
+        );
+
+        if computed_hash != record.hash {
+            return Err(EventError::Storage(format!(
+                "replication hash mismatch for {}::{} v{}",
+                aggregate_type, aggregate_id, record.version
+            )));
+        }
+
+        for (key, value) in payload_map {
+            state.insert(key, value);
+        }
+
+        meta.event_hashes.push(record.hash.clone());
+        meta.version = record.version;
+        meta.merkle_root = compute_merkle_root(&meta.event_hashes);
+
+        if meta.merkle_root != record.merkle_root {
+            return Err(EventError::Storage(format!(
+                "replication merkle root mismatch for {}::{} v{}",
+                aggregate_type, aggregate_id, record.version
+            )));
+        }
+
+        let mut batch = WriteBatch::default();
+        batch_put(
+            &mut batch,
+            event_key(&aggregate_type, &aggregate_id, record.version),
+            serde_json::to_vec(&record)?,
+        )?;
+        batch_put(
+            &mut batch,
+            meta_key(&aggregate_type, &aggregate_id),
+            serde_json::to_vec(&meta)?,
+        )?;
+        batch_put(
+            &mut batch,
+            state_key(&aggregate_type, &aggregate_id),
+            serde_json::to_vec(&state)?,
+        )?;
+
+        self.write_batch(batch)?;
+        Ok(())
+    }
+
     pub fn transaction(&self) -> Result<Transaction<'_>> {
         self.ensure_writable()?;
         let guard = self.write_lock.lock();
@@ -420,6 +502,40 @@ impl EventStore {
             }
             let record: EventRecord = serde_json::from_slice(&value)?;
             events.push(record);
+        }
+
+        Ok(events)
+    }
+
+    pub fn events_after(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        from_version: u64,
+        limit: Option<usize>,
+    ) -> Result<Vec<EventRecord>> {
+        let start_key = event_key(aggregate_type, aggregate_id, from_version + 1);
+        let prefix = event_prefix(aggregate_type, aggregate_id);
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(start_key.as_slice(), Direction::Forward));
+
+        let mut events = Vec::new();
+        for item in iter {
+            let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            let record: EventRecord = serde_json::from_slice(&value)?;
+            if record.version <= from_version {
+                continue;
+            }
+            events.push(record);
+            if let Some(limit) = limit {
+                if events.len() >= limit {
+                    break;
+                }
+            }
         }
 
         Ok(events)
@@ -589,6 +705,33 @@ impl EventStore {
         }
 
         items
+    }
+
+    pub fn aggregate_positions(&self) -> Result<Vec<AggregatePositionEntry>> {
+        let prefix = meta_prefix();
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+        let mut items = Vec::new();
+
+        for item in iter {
+            let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            if key.len() > prefix.len() && key[prefix.len()] != SEP {
+                break;
+            }
+
+            let meta: AggregateMeta = serde_json::from_slice(&value)?;
+            items.push(AggregatePositionEntry {
+                aggregate_type: meta.aggregate_type,
+                aggregate_id: meta.aggregate_id,
+                version: meta.version,
+            });
+        }
+
+        Ok(items)
     }
 
     fn load_meta(&self, aggregate_type: &str, aggregate_id: &str) -> Result<Option<AggregateMeta>> {

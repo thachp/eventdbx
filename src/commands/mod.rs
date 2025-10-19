@@ -1,6 +1,7 @@
 pub mod aggregate;
 pub mod config;
 pub mod plugin;
+pub mod remote;
 pub mod schema;
 pub mod start;
 pub mod system;

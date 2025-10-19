@@ -170,11 +170,31 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 
 Clearing dead entries prompts for confirmation to avoid accidental removal. Manual retries run the failed events immediately; use `--event-id` to target a specific entry.
 
-### System
+### Replication
 
-- `eventdbx system backup --output <path> [--force]`  
+- `eventdbx remote add <name> <endpoint> --public-key <base64>`  
+  Registers a standby and pins its Ed25519 public key.
+- `eventdbx remote rm <name>`  
+  Removes a configured remote.
+- `eventdbx remote ls`  
+  Lists remotes with their endpoints.
+- `eventdbx remote show <name>`  
+  Displays the endpoint and pinned key for a remote.
+- `eventdbx remote key [--show-path]`  
+  Prints this node's replication public key (generated on first run).
+- `eventdbx remote push <name> [--dry-run] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
+  Streams local events to the remote in fast-forward mode; dry runs report pending changes.
+- `eventdbx remote pull <name> [--dry-run] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
+  Fast-forwards the local node from the remote, reporting changes in dry-run mode.
+
+Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. The standby gRPC listener defaults to `127.0.0.1:7443`; override it in `config.toml` via `replication.bind_addr` when you expose the replica on another interface. When the HTTP server processes writes it streams committed events to every configured remote over gRPC using the pinned public keys. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, and `--aggregate-id TYPE:ID` to target individual aggregates.
+Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data.
+
+### Maintenance
+
+- `eventdbx backup --output <path> [--force]`  
   Creates a compressed archive with the entire EventDBX data directory and configuration. Stop the server before running a backup to avoid partial snapshots.
-- `eventdbx system restore --input <path> [--data-dir <path>] [--force]`  
+- `eventdbx restore --input <path> [--data-dir <path>] [--force]`  
   Restores data from a backup archive. Use `--data-dir` to override the stored location, and `--force` to overwrite non-empty destinations. The server must be stopped before restoring.
 
 Plugins fire after every committed event to keep external systems in sync. Each plugin sends or records different data:
