@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "eventdbx"
-version = "1.4.3"
+version = "1.5.3"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
