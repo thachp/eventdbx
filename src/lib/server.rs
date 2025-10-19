@@ -324,16 +324,16 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
             .route("/health", get(health))
             .route("/v1/aggregates", get(list_aggregates))
             .route(
-                "/v1/aggregates/:aggregate_type/:aggregate_id",
+                "/v1/aggregates/{aggregate_type}/{aggregate_id}",
                 get(get_aggregate),
             )
             .route(
-                "/v1/aggregates/:aggregate_type/:aggregate_id/events",
+                "/v1/aggregates/{aggregate_type}/{aggregate_id}/events",
                 get(list_events),
             )
             .route("/v1/events", post(append_event_global))
             .route(
-                "/v1/aggregates/:aggregate_type/:aggregate_id/verify",
+                "/v1/aggregates/{aggregate_type}/{aggregate_id}/verify",
                 get(verify_aggregate),
             )
             .with_state(state.clone());

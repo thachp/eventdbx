@@ -245,9 +245,31 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     command.stderr(Stdio::null());
     command.env(RESTRICT_ENV, restrict::as_str(args.restrict));
 
-    let child = command.spawn()?;
+    let mut child = command.spawn()?;
     let pid = child.id();
-    drop(child);
+
+    let wait_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let message = if let Some(code) = status.code() {
+                format!(
+                    "EventDBX server failed to start (process exited with status {code}). \
+                     Re-run with `eventdbx start --foreground` for details."
+                )
+            } else {
+                "EventDBX server failed to start (process terminated unexpectedly). \
+                 Re-run with `eventdbx start --foreground` for details."
+                    .to_string()
+            };
+            return Err(anyhow!(message));
+        }
+
+        if Instant::now() >= wait_deadline {
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
 
     let started_at = chrono::Utc::now();
     let record = PidRecord {
@@ -255,6 +277,9 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
         started_at: Some(started_at),
     };
     write_pid_record(&pid_path, &record)?;
+
+    drop(child);
+
     println!(
         "EventDBX server is running on port {} (pid {}) since {} (restrict={})",
         config.port,
