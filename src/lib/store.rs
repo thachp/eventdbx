@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, str};
 
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, MutexGuard};
@@ -99,7 +99,7 @@ impl<'a> Transaction<'a> {
 
         for (key, state) in state_cache {
             let (aggregate_type, aggregate_id) = key.parts();
-            let state_bytes = serde_json::to_vec(&state)?;
+            let state_bytes = self.store.encode_state_map(&state)?;
             batch_put(
                 &mut batch,
                 state_key(aggregate_type, aggregate_id),
@@ -354,6 +354,7 @@ impl EventStore {
         let mut state = self.load_state_map(&aggregate_type, &aggregate_id)?;
         let record = apply_event(&mut meta, &mut state, input);
         let stored_record = self.encode_record(&record)?;
+        let encoded_state = self.encode_state_map(&state)?;
 
         let mut batch = WriteBatch::default();
         batch_put(
@@ -369,7 +370,7 @@ impl EventStore {
         batch_put(
             &mut batch,
             state_key(&record.aggregate_type, &record.aggregate_id),
-            serde_json::to_vec(&state)?,
+            encoded_state,
         )?;
 
         self.write_batch(batch)?;
@@ -447,7 +448,7 @@ impl EventStore {
         batch_put(
             &mut batch,
             state_key(&aggregate_type, &aggregate_id),
-            serde_json::to_vec(&state)?,
+            self.encode_state_map(&state)?,
         )?;
 
         self.write_batch(batch)?;
@@ -676,6 +677,40 @@ impl EventStore {
         }
     }
 
+    fn encode_state_map(&self, state: &BTreeMap<String, String>) -> Result<Vec<u8>> {
+        let json = serde_json::to_vec(state)?;
+        if let Some(enc) = &self.encryptor {
+            let ciphertext = enc.encrypt_to_string(&json)?;
+            Ok(ciphertext.into_bytes())
+        } else {
+            Ok(json)
+        }
+    }
+
+    fn decode_state_map(&self, bytes: &[u8]) -> Result<BTreeMap<String, String>> {
+        if let Some(enc) = &self.encryptor {
+            let text = str::from_utf8(bytes).map_err(|err| EventError::Storage(err.to_string()))?;
+            if encryption::is_encrypted_blob(text.trim()) {
+                let decrypted = enc.decrypt_from_str(text.trim())?;
+                Ok(serde_json::from_slice(&decrypted)?)
+            } else if text.trim().is_empty() {
+                Ok(BTreeMap::new())
+            } else {
+                Ok(serde_json::from_str(text)?)
+            }
+        } else {
+            if let Ok(text) = str::from_utf8(bytes) {
+                if encryption::is_encrypted_blob(text.trim()) {
+                    return Err(EventError::Config(
+                        "data encryption key must be configured to read encrypted aggregates"
+                            .to_string(),
+                    ));
+                }
+            }
+            Ok(serde_json::from_slice(bytes)?)
+        }
+    }
+
     fn ensure_writable(&self) -> Result<()> {
         if self.read_only {
             Err(EventError::Storage(
@@ -857,7 +892,7 @@ impl EventStore {
             .get(key)
             .map_err(|err| EventError::Storage(err.to_string()))?;
         if let Some(value) = value {
-            Ok(serde_json::from_slice(&value)?)
+            self.decode_state_map(&value)
         } else {
             Ok(BTreeMap::new())
         }
