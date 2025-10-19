@@ -5,9 +5,10 @@ pub mod proto {
 use std::{sync::Arc, time::Duration};
 
 use proto::{
-    EventBatch, EventRecord as ProtoEventRecord, HeartbeatRequest, HeartbeatResponse,
-    ReplicationAck, SnapshotChunk, SnapshotRequest, replication_client::ReplicationClient,
-    replication_server::Replication,
+    AggregatePosition, EventBatch, EventRecord as ProtoEventRecord, HeartbeatRequest,
+    HeartbeatResponse, ListPositionsRequest, ListPositionsResponse, PullEventsRequest,
+    PullEventsResponse, ReplicationAck, SnapshotChunk, SnapshotRequest,
+    replication_client::ReplicationClient, replication_server::Replication,
 };
 use tokio::{sync::mpsc, time::sleep};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -93,6 +94,60 @@ impl Replication for ReplicationService {
         Ok(Response::new(HeartbeatResponse {
             applied_sequence: applied,
             pending_events: 0,
+        }))
+    }
+
+    async fn list_positions(
+        &self,
+        _request: Request<ListPositionsRequest>,
+    ) -> std::result::Result<Response<ListPositionsResponse>, Status> {
+        let positions = self
+            .store
+            .aggregate_positions()
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        let proto_positions = positions
+            .into_iter()
+            .map(|entry| AggregatePosition {
+                aggregate_type: entry.aggregate_type,
+                aggregate_id: entry.aggregate_id,
+                version: entry.version,
+            })
+            .collect();
+
+        Ok(Response::new(ListPositionsResponse {
+            positions: proto_positions,
+        }))
+    }
+
+    async fn pull_events(
+        &self,
+        request: Request<PullEventsRequest>,
+    ) -> std::result::Result<Response<PullEventsResponse>, Status> {
+        let req = request.into_inner();
+        let limit = if req.limit == 0 {
+            None
+        } else {
+            Some(req.limit as usize)
+        };
+
+        let events = self
+            .store
+            .events_after(
+                &req.aggregate_type,
+                &req.aggregate_id,
+                req.from_version,
+                limit,
+            )
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        let proto_events = events
+            .into_iter()
+            .map(|event| convert_event(&event).map_err(|err| Status::internal(err.to_string())))
+            .collect::<std::result::Result<Vec<_>, Status>>()?;
+
+        Ok(Response::new(PullEventsResponse {
+            events: proto_events,
         }))
     }
 }
@@ -254,7 +309,7 @@ impl RemoteWorker {
     }
 }
 
-fn convert_event(record: &EventRecord) -> Result<ProtoEventRecord> {
+pub fn convert_event(record: &EventRecord) -> Result<ProtoEventRecord> {
     let payload = serde_json::to_vec(&record.payload)?;
     let metadata = serde_json::to_vec(&record.metadata)?;
 
@@ -270,7 +325,7 @@ fn convert_event(record: &EventRecord) -> Result<ProtoEventRecord> {
     })
 }
 
-fn decode_event(proto: &ProtoEventRecord) -> Result<EventRecord> {
+pub fn decode_event(proto: &ProtoEventRecord) -> Result<EventRecord> {
     let payload: serde_json::Value = serde_json::from_slice(&proto.payload)?;
     let metadata: EventMetadata = serde_json::from_slice(&proto.metadata)?;
 
@@ -286,7 +341,7 @@ fn decode_event(proto: &ProtoEventRecord) -> Result<EventRecord> {
     })
 }
 
-fn normalize_endpoint(endpoint: &str) -> Result<String> {
+pub fn normalize_endpoint(endpoint: &str) -> Result<String> {
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         return Ok(endpoint.to_string());
     }

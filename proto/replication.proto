@@ -39,8 +39,33 @@ message HeartbeatResponse {
   uint64 pending_events = 2;
 }
 
+message AggregatePosition {
+  string aggregate_type = 1;
+  string aggregate_id = 2;
+  uint64 version = 3;
+}
+
+message ListPositionsRequest {}
+
+message ListPositionsResponse {
+  repeated AggregatePosition positions = 1;
+}
+
+message PullEventsRequest {
+  string aggregate_type = 1;
+  string aggregate_id = 2;
+  uint64 from_version = 3;
+  uint64 limit = 4;
+}
+
+message PullEventsResponse {
+  repeated EventRecord events = 1;
+}
+
 service Replication {
   rpc BootstrapSnapshot(SnapshotRequest) returns (stream SnapshotChunk);
   rpc ApplyEvents(stream EventBatch) returns (ReplicationAck);
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc ListPositions(ListPositionsRequest) returns (ListPositionsResponse);
+  rpc PullEvents(PullEventsRequest) returns (PullEventsResponse);
 }

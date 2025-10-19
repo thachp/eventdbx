@@ -298,6 +298,13 @@ pub struct SnapshotRecord {
     pub comment: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AggregatePositionEntry {
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    pub version: u64,
+}
+
 impl EventStore {
     pub fn open(path: PathBuf) -> Result<Self> {
         let mut options = Options::default();
@@ -500,6 +507,40 @@ impl EventStore {
         Ok(events)
     }
 
+    pub fn events_after(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        from_version: u64,
+        limit: Option<usize>,
+    ) -> Result<Vec<EventRecord>> {
+        let start_key = event_key(aggregate_type, aggregate_id, from_version + 1);
+        let prefix = event_prefix(aggregate_type, aggregate_id);
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(start_key.as_slice(), Direction::Forward));
+
+        let mut events = Vec::new();
+        for item in iter {
+            let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            let record: EventRecord = serde_json::from_slice(&value)?;
+            if record.version <= from_version {
+                continue;
+            }
+            events.push(record);
+            if let Some(limit) = limit {
+                if events.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        Ok(events)
+    }
+
     pub fn list_aggregate_ids(&self, aggregate_type: &str) -> Result<Vec<String>> {
         let mut prefix = key_with_segments(&[PREFIX_META, aggregate_type]);
         prefix.push(SEP);
@@ -664,6 +705,33 @@ impl EventStore {
         }
 
         items
+    }
+
+    pub fn aggregate_positions(&self) -> Result<Vec<AggregatePositionEntry>> {
+        let prefix = meta_prefix();
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+        let mut items = Vec::new();
+
+        for item in iter {
+            let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            if key.len() > prefix.len() && key[prefix.len()] != SEP {
+                break;
+            }
+
+            let meta: AggregateMeta = serde_json::from_slice(&value)?;
+            items.push(AggregatePositionEntry {
+                aggregate_type: meta.aggregate_type,
+                aggregate_id: meta.aggregate_id,
+                version: meta.version,
+            });
+        }
+
+        Ok(items)
     }
 
     fn load_meta(&self, aggregate_type: &str, aggregate_id: &str) -> Result<Option<AggregateMeta>> {
