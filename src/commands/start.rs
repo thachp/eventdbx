@@ -8,11 +8,11 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 use eventdbx::{
-    config::{Config, ConfigUpdate, load_or_default},
+    config::{ApiMode, Config, ConfigUpdate, load_or_default},
     plugin::PluginManager,
     restrict::{self, RESTRICT_ENV},
     server,
@@ -35,6 +35,9 @@ pub struct StartArgs {
     /// Require schema enforcement (use `--restrict=false` to disable)
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub restrict: bool,
+    /// Select which API surfaces to expose
+    #[arg(long = "api", value_enum)]
+    pub api: Option<ApiModeArg>,
 }
 
 impl Default for StartArgs {
@@ -44,6 +47,24 @@ impl Default for StartArgs {
             data_dir: None,
             foreground: false,
             restrict: restrict::from_env(),
+            api: None,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum ApiModeArg {
+    Rest,
+    Graphql,
+    Both,
+}
+
+impl From<ApiModeArg> for ApiMode {
+    fn from(value: ApiModeArg) -> Self {
+        match value {
+            ApiModeArg::Rest => ApiMode::Rest,
+            ApiModeArg::Graphql => ApiMode::Graphql,
+            ApiModeArg::Both => ApiMode::Both,
         }
     }
 }
@@ -266,6 +287,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         list_page_size: None,
         page_limit: None,
         plugin_max_attempts: None,
+        api_mode: args.api.map(Into::into),
     });
 }
 

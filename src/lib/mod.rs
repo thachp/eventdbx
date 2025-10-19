@@ -1,5 +1,6 @@
 pub mod config;
 pub mod error;
+pub mod graphql;
 pub mod merkle;
 pub mod plugin;
 pub mod replication;

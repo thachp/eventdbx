@@ -60,6 +60,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         list_page_size,
         page_limit,
         plugin_max_attempts,
+        api_mode: None,
     });
 
     if !was_initialized && !config.is_initialized() {

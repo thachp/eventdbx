@@ -19,7 +19,7 @@ path = "src/lib/mod.rs"
 
 [dependencies]
 anyhow = "1.0"
-axum = { version = "0.7", features = ["macros", "json"] }
+axum = { version = "0.8", features = ["macros", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 dirs = "5.0"
@@ -49,6 +49,8 @@ tonic = { version = "0.11", features = ["tls", "tls-roots", "transport"] }
 prost = "0.12"
 tracing-futures = "0.2"
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
+async-graphql = { version = "7", features = ["chrono", "uuid"] }
+async-graphql-axum = "7"
 
 [dev-dependencies]
 

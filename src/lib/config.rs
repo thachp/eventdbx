@@ -18,6 +18,24 @@ use super::error::{EventError, Result};
 pub const DEFAULT_PORT: u16 = 7070;
 pub const DEFAULT_MEMORY_THRESHOLD: usize = 10_000;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiMode {
+    Rest,
+    Graphql,
+    Both,
+}
+
+impl ApiMode {
+    pub fn rest_enabled(self) -> bool {
+        matches!(self, ApiMode::Rest | ApiMode::Both)
+    }
+
+    pub fn graphql_enabled(self) -> bool {
+        matches!(self, ApiMode::Graphql | ApiMode::Both)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub port: u16,
@@ -46,6 +64,8 @@ pub struct Config {
     pub replication: ReplicationConfig,
     #[serde(default)]
     pub remotes: BTreeMap<String, RemoteConfig>,
+    #[serde(default = "default_api_mode")]
+    pub api_mode: ApiMode,
 }
 
 impl Default for Config {
@@ -67,6 +87,7 @@ impl Default for Config {
             plugin_max_attempts: default_plugin_max_attempts(),
             replication: ReplicationConfig::default(),
             remotes: BTreeMap::new(),
+            api_mode: default_api_mode(),
         }
     }
 }
@@ -82,6 +103,7 @@ pub struct ConfigUpdate {
     pub list_page_size: Option<usize>,
     pub page_limit: Option<usize>,
     pub plugin_max_attempts: Option<u32>,
+    pub api_mode: Option<ApiMode>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -150,6 +172,9 @@ impl Config {
         }
         if let Some(max_attempts) = update.plugin_max_attempts {
             self.plugin_max_attempts = max_attempts.max(1);
+        }
+        if let Some(api_mode) = update.api_mode {
+            self.api_mode = api_mode;
         }
         self.updated_at = Utc::now();
     }
@@ -347,6 +372,10 @@ fn default_page_limit() -> usize {
 
 fn default_plugin_max_attempts() -> u32 {
     10
+}
+
+fn default_api_mode() -> ApiMode {
+    ApiMode::Both
 }
 
 fn default_identity_key() -> PathBuf {
