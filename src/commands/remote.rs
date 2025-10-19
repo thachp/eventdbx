@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
 };
@@ -89,6 +89,9 @@ pub struct RemotePushArgs {
     /// Number of events per batch when pushing
     #[arg(long, default_value_t = 500)]
     pub batch_size: usize,
+    /// Limit the push to specific aggregate types
+    #[arg(long = "aggregate", value_name = "TYPE")]
+    pub aggregates: Vec<String>,
 }
 
 #[derive(Args)]
@@ -101,6 +104,9 @@ pub struct RemotePullArgs {
     /// Maximum events to request per gRPC call
     #[arg(long, default_value_t = 500)]
     pub batch_size: usize,
+    /// Limit the pull to specific aggregate types
+    #[arg(long = "aggregate", value_name = "TYPE")]
+    pub aggregates: Vec<String>,
 }
 
 pub fn execute(config_path: Option<PathBuf>, command: RemoteCommands) -> Result<()> {
@@ -226,6 +232,8 @@ fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Result<()>
     let store = Arc::new(EventStore::open_read_only(config.event_store_path())?);
     let local_positions = store.aggregate_positions()?;
 
+    let filter = normalize_filter(&args.aggregates);
+
     let runtime = Runtime::new()?;
     runtime.block_on(push_remote_async(
         store,
@@ -234,6 +242,7 @@ fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Result<()>
         args.name,
         args.dry_run,
         args.batch_size.max(1),
+        filter,
     ))
 }
 
@@ -248,6 +257,8 @@ fn pull_remote(config_path: Option<PathBuf>, args: RemotePullArgs) -> Result<()>
     let store = Arc::new(EventStore::open(config.event_store_path())?);
     let local_positions = store.aggregate_positions()?;
 
+    let filter = normalize_filter(&args.aggregates);
+
     let runtime = Runtime::new()?;
     runtime.block_on(pull_remote_async(
         store,
@@ -256,6 +267,7 @@ fn pull_remote(config_path: Option<PathBuf>, args: RemotePullArgs) -> Result<()>
         args.name,
         args.dry_run,
         args.batch_size.max(1),
+        filter,
     ))
 }
 
@@ -279,6 +291,15 @@ fn decode_public_key(input: &str) -> Result<Vec<u8>> {
         .map_err(|err| anyhow!("invalid base64 public key: {}", err))
 }
 
+fn normalize_filter(aggregates: &[String]) -> Option<HashSet<String>> {
+    let set: HashSet<String> = aggregates
+        .iter()
+        .map(|agg| agg.trim().to_string())
+        .filter(|agg| !agg.is_empty())
+        .collect();
+    if set.is_empty() { None } else { Some(set) }
+}
+
 async fn push_remote_async(
     store: Arc<EventStore>,
     local_positions: Vec<AggregatePositionEntry>,
@@ -286,6 +307,7 @@ async fn push_remote_async(
     remote_name: String,
     dry_run: bool,
     batch_size: usize,
+    filter: Option<HashSet<String>>,
 ) -> Result<()> {
     let mut client = connect_client(&remote).await?;
     let response = client
@@ -294,8 +316,9 @@ async fn push_remote_async(
         .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?
         .into_inner();
 
-    let remote_map = proto_positions_to_map(&response.positions);
-    let local_map = positions_to_map(&local_positions);
+    let filter_ref = filter.as_ref().map(|set| set as &HashSet<String>);
+    let remote_map = proto_positions_to_map(&response.positions, filter_ref);
+    let local_map = positions_to_map(&local_positions, filter_ref);
 
     validate_fast_forward(&remote_name, &local_map, &remote_map)?;
 
@@ -367,6 +390,7 @@ async fn pull_remote_async(
     remote_name: String,
     dry_run: bool,
     batch_size: usize,
+    filter: Option<HashSet<String>>,
 ) -> Result<()> {
     let mut client = connect_client(&remote).await?;
     let response = client
@@ -375,8 +399,9 @@ async fn pull_remote_async(
         .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?
         .into_inner();
 
-    let remote_map = proto_positions_to_map(&response.positions);
-    let local_map = positions_to_map(&local_positions);
+    let filter_ref = filter.as_ref().map(|set| set as &HashSet<String>);
+    let remote_map = proto_positions_to_map(&response.positions, filter_ref);
+    let local_map = positions_to_map(&local_positions, filter_ref);
 
     let plans = build_pull_plans(&local_map, &remote_map);
     if plans.is_empty() {
@@ -447,9 +472,16 @@ async fn connect_client(remote: &RemoteConfig) -> Result<ReplicationClient<Chann
     Ok(ReplicationClient::new(channel))
 }
 
-fn proto_positions_to_map(positions: &[AggregatePosition]) -> HashMap<(String, String), u64> {
+fn proto_positions_to_map(
+    positions: &[AggregatePosition],
+    filter: Option<&HashSet<String>>,
+) -> HashMap<(String, String), u64> {
     positions
         .iter()
+        .filter(|pos| match filter {
+            Some(set) => set.contains(&pos.aggregate_type),
+            None => true,
+        })
         .map(|pos| {
             (
                 (pos.aggregate_type.clone(), pos.aggregate_id.clone()),
@@ -459,9 +491,16 @@ fn proto_positions_to_map(positions: &[AggregatePosition]) -> HashMap<(String, S
         .collect()
 }
 
-fn positions_to_map(entries: &[AggregatePositionEntry]) -> HashMap<(String, String), u64> {
+fn positions_to_map(
+    entries: &[AggregatePositionEntry],
+    filter: Option<&HashSet<String>>,
+) -> HashMap<(String, String), u64> {
     entries
         .iter()
+        .filter(|entry| match filter {
+            Some(set) => set.contains(&entry.aggregate_type),
+            None => true,
+        })
         .map(|entry| {
             (
                 (entry.aggregate_type.clone(), entry.aggregate_id.clone()),
