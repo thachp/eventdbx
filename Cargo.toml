@@ -13,6 +13,7 @@ keywords = [
   "cqrs"
 ]
 categories = ["database"]
+authors = ["Patrick Thach <thachp@gmail.com>"]
 
 [lib]
 path = "src/lib/mod.rs"
