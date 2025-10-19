@@ -11,6 +11,7 @@ use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use super::error::{EventError, Result};
 
@@ -394,6 +395,7 @@ pub enum PluginConfig {
     Csv(CsvPluginConfig),
     Tcp(TcpPluginConfig),
     Http(HttpPluginConfig),
+    Grpc(GrpcPluginConfig),
     Json(JsonPluginConfig),
     Log(LogPluginConfig),
 }
@@ -405,6 +407,7 @@ impl PluginConfig {
             PluginConfig::Csv(_) => PluginKind::Csv,
             PluginConfig::Tcp(_) => PluginKind::Tcp,
             PluginConfig::Http(_) => PluginKind::Http,
+            PluginConfig::Grpc(_) => PluginKind::Grpc,
             PluginConfig::Json(_) => PluginKind::Json,
             PluginConfig::Log(_) => PluginKind::Log,
         }
@@ -418,6 +421,7 @@ pub enum PluginKind {
     Csv,
     Tcp,
     Http,
+    Grpc,
     Json,
     Log,
 }
@@ -455,6 +459,11 @@ pub struct HttpPluginConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcPluginConfig {
+    pub endpoint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonPluginConfig {
     pub path: PathBuf,
     #[serde(default)]
@@ -482,9 +491,20 @@ fn write_private_key(path: &Path, data: &[u8]) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut permissions = file.metadata()?.permissions();
-        permissions.set_mode(0o600);
-        file.set_permissions(permissions)?;
+        match file.metadata() {
+            Ok(metadata) => {
+                let mut permissions = metadata.permissions();
+                permissions.set_mode(0o600);
+                if let Err(err) = file.set_permissions(permissions) {
+                    warn!("failed to set permissions on {}: {}", path.display(), err);
+                }
+            }
+            Err(err) => warn!(
+                "failed to read metadata for {} when setting permissions: {}",
+                path.display(),
+                err
+            ),
+        }
     }
 
     file.write_all(data)?;

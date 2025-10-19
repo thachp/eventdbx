@@ -11,7 +11,6 @@ use base64::{
 };
 use chrono::Utc;
 use clap::{Args, Subcommand};
-use tokio::runtime::Runtime;
 
 use eventdbx::{
     config::{RemoteConfig, load_or_default},
@@ -115,15 +114,15 @@ pub struct RemotePullArgs {
     pub aggregate_ids: Vec<String>,
 }
 
-pub fn execute(config_path: Option<PathBuf>, command: RemoteCommands) -> Result<()> {
+pub async fn execute(config_path: Option<PathBuf>, command: RemoteCommands) -> Result<()> {
     match command {
         RemoteCommands::Add(args) => add_remote(config_path, args),
         RemoteCommands::Remove(args) => remove_remote(config_path, args),
         RemoteCommands::List => list_remotes(config_path),
         RemoteCommands::Show(args) => show_remote(config_path, args),
         RemoteCommands::Key(args) => show_local_key(config_path, args),
-        RemoteCommands::Push(args) => push_remote(config_path, args),
-        RemoteCommands::Pull(args) => pull_remote(config_path, args),
+        RemoteCommands::Push(args) => push_remote(config_path, args).await,
+        RemoteCommands::Pull(args) => pull_remote(config_path, args).await,
     }
 }
 
@@ -227,7 +226,7 @@ fn show_local_key(config_path: Option<PathBuf>, args: RemoteKeyArgs) -> Result<(
     Ok(())
 }
 
-fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Result<()> {
+async fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let remote = config
         .remotes
@@ -240,8 +239,7 @@ fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Result<()>
 
     let filter = normalize_filter(&args.aggregates, &args.aggregate_ids)?;
 
-    let runtime = Runtime::new()?;
-    runtime.block_on(push_remote_async(
+    push_remote_impl(
         store,
         local_positions,
         remote,
@@ -249,10 +247,11 @@ fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Result<()>
         args.dry_run,
         args.batch_size.max(1),
         filter,
-    ))
+    )
+    .await
 }
 
-fn pull_remote(config_path: Option<PathBuf>, args: RemotePullArgs) -> Result<()> {
+async fn pull_remote(config_path: Option<PathBuf>, args: RemotePullArgs) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let remote = config
         .remotes
@@ -265,8 +264,7 @@ fn pull_remote(config_path: Option<PathBuf>, args: RemotePullArgs) -> Result<()>
 
     let filter = normalize_filter(&args.aggregates, &args.aggregate_ids)?;
 
-    let runtime = Runtime::new()?;
-    runtime.block_on(pull_remote_async(
+    pull_remote_impl(
         store,
         local_positions,
         remote,
@@ -274,7 +272,8 @@ fn pull_remote(config_path: Option<PathBuf>, args: RemotePullArgs) -> Result<()>
         args.dry_run,
         args.batch_size.max(1),
         filter,
-    ))
+    )
+    .await
 }
 
 fn normalize_public_key(raw: &str) -> Result<String> {
@@ -349,7 +348,7 @@ fn normalize_filter(
     }
 }
 
-async fn push_remote_async(
+async fn push_remote_impl(
     store: Arc<EventStore>,
     local_positions: Vec<AggregatePositionEntry>,
     remote: RemoteConfig,
@@ -432,7 +431,7 @@ async fn push_remote_async(
     Ok(())
 }
 
-async fn pull_remote_async(
+async fn pull_remote_impl(
     store: Arc<EventStore>,
     local_positions: Vec<AggregatePositionEntry>,
     remote: RemoteConfig,

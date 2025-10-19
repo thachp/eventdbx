@@ -14,9 +14,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use eventdbx::config::{
-    Config, CsvPluginConfig, HttpPluginConfig, JsonPluginConfig, LogPluginConfig, PluginConfig,
-    PluginDefinition, PluginKind, PostgresColumnConfig, PostgresPluginConfig, TcpPluginConfig,
-    load_or_default,
+    Config, CsvPluginConfig, GrpcPluginConfig, HttpPluginConfig, JsonPluginConfig, LogPluginConfig,
+    PluginConfig, PluginDefinition, PluginKind, PostgresColumnConfig, PostgresPluginConfig,
+    TcpPluginConfig, load_or_default,
 };
 use eventdbx::plugin::{ColumnTypes, Plugin, establish_connection, instantiate_plugin};
 use eventdbx::store::{
@@ -99,6 +99,9 @@ pub enum PluginConfigureCommands {
     /// Configure the HTTP plugin
     #[command(name = "http")]
     Http(PluginHttpConfigureArgs),
+    /// Configure the gRPC plugin
+    #[command(name = "grpc")]
+    Grpc(PluginGrpcConfigureArgs),
     /// Configure the JSON file plugin
     #[command(name = "json")]
     Json(PluginJsonConfigureArgs),
@@ -180,6 +183,21 @@ pub struct PluginHttpConfigureArgs {
 }
 
 #[derive(Args)]
+pub struct PluginGrpcConfigureArgs {
+    /// gRPC endpoint to send replication batches to
+    #[arg(long)]
+    pub endpoint: String,
+
+    /// Disable the plugin after configuring
+    #[arg(long, default_value_t = false)]
+    pub disable: bool,
+
+    /// Name for this gRPC plugin instance
+    #[arg(long)]
+    pub name: String,
+}
+
+#[derive(Args)]
 pub struct PluginJsonConfigureArgs {
     /// File path to append JSON snapshots into
     #[arg(long)]
@@ -253,6 +271,7 @@ pub enum PluginTarget {
     Csv,
     Tcp,
     Http,
+    Grpc,
     Json,
     Log,
 }
@@ -264,6 +283,7 @@ impl From<PluginTarget> for PluginKind {
             PluginTarget::Csv => PluginKind::Csv,
             PluginTarget::Tcp => PluginKind::Tcp,
             PluginTarget::Http => PluginKind::Http,
+            PluginTarget::Grpc => PluginKind::Grpc,
             PluginTarget::Json => PluginKind::Json,
             PluginTarget::Log => PluginKind::Log,
         }
@@ -519,6 +539,43 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 config.save_plugins(&plugins)?;
                 println!(
                     "HTTP plugin '{}' {}",
+                    label,
+                    if args.disable {
+                        "disabled"
+                    } else {
+                        "configured"
+                    }
+                );
+            }
+            PluginConfigureCommands::Grpc(args) => {
+                let name = args.name.trim();
+                if name.is_empty() {
+                    bail!("plugin name cannot be empty");
+                }
+                let name_owned = name.to_string();
+                let label = display_label(name);
+                match find_plugin_mut(&mut plugins, PluginKind::Grpc, Some(name))? {
+                    Some(plugin) => {
+                        plugin.enabled = !args.disable;
+                        plugin.name = Some(name_owned.clone());
+                        plugin.config = PluginConfig::Grpc(GrpcPluginConfig {
+                            endpoint: args.endpoint.clone(),
+                        });
+                    }
+                    None => {
+                        ensure_unique_plugin_name(&plugins, name)?;
+                        plugins.push(PluginDefinition {
+                            enabled: !args.disable,
+                            name: Some(name_owned.clone()),
+                            config: PluginConfig::Grpc(GrpcPluginConfig {
+                                endpoint: args.endpoint.clone(),
+                            }),
+                        });
+                    }
+                }
+                config.save_plugins(&plugins)?;
+                println!(
+                    "gRPC plugin '{}' {}",
                     label,
                     if args.disable {
                         "disabled"
@@ -834,7 +891,11 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 PluginKind::Csv => {
                     return Err(anyhow!("field mapping is not supported for the CSV plugin"));
                 }
-                PluginKind::Tcp | PluginKind::Http | PluginKind::Json | PluginKind::Log => {
+                PluginKind::Tcp
+                | PluginKind::Http
+                | PluginKind::Grpc
+                | PluginKind::Json
+                | PluginKind::Log => {
                     return Err(anyhow!(
                         "field mapping is only supported for the Postgres plugin"
                     ));
@@ -1331,6 +1392,7 @@ fn plugin_kind_name(kind: PluginKind) -> &'static str {
         PluginKind::Csv => "csv",
         PluginKind::Tcp => "tcp",
         PluginKind::Http => "http",
+        PluginKind::Grpc => "grpc",
         PluginKind::Json => "json",
         PluginKind::Log => "log",
     }
