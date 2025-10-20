@@ -28,6 +28,12 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 
    ```bash
    eventdbx config --dek "$(openssl rand -base64 32)"
+
+   # optionally set a global snapshot cadence (used when schema create omits --snapshot-threshold)
+   eventdbx config --snapshot-threshold 100
+
+   # clear the default later with:
+   eventdbx config --clear-snapshot-threshold
    ```
 
 4. **Start the server**
@@ -50,6 +56,7 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
      --events patient-added,patient-updated \
      --snapshot-threshold 100
    ```
+   Omit `--snapshot-threshold` to inherit the default configured in `config.toml` (if any).
 
 6. **Issue a token for CLI access**
 
@@ -77,6 +84,7 @@ You now have a working EventDBX instance with an initial aggregate. Explore the 
 - **Flexible JSON payloads**: Events accept arbitrary JSON payloads; scalar values are normalized into strings for state tracking, while structured objects remain fully queryable.
 - **Immutable Data Structure**: Once data is entered into EventDBX, it becomes immutable, meaning it cannot be altered or deleted. This characteristic is crucial for applications where the accuracy and traceability of historical data are paramount, such as medical records, financial transactions, and supply chain management. Data can be archived, moving from short-term to long-term storage, but cannot be deleted.
 - **Event Sourcing and Replay**: EventDBX is built on the principle of event sourcing, storing all changes to the data as a sequence of events. This allows for the complete replay of events to reconstruct the database's state at any point in time, thereby enhancing data recovery and audit capabilities. Unlike traditional databases that execute update statements to modify data, this system is event-driven. Aggregate state changes are defined in the event object, allowing these events to be replayed at any time to reconstruct the aggregate's current state.
+- **Automatic Snapshots**: Configure `snapshot_threshold` per schema (or globally in `config.toml`) and EventDBX will materialize a snapshot whenever an aggregate's version hits the next multiple of that value.
 - **Merkle Tree Integration**: Each aggregate in EventDBX is associated with a Merkle tree of events, enabling verification of data integrity. The Merkle tree structure ensures that any data tampering can be detected, offering an additional security layer against data corruption.
 - **Built-in Audit Trails**: EventDBX automatically maintains a comprehensive audit trail of all transactions, a feature invaluable for meeting compliance and regulatory requirements. It provides transparent and tamper-evident records. During audits, administrators can issue specific tokens to auditors to access and review specific aggregate instances and all relevant events associated with those instances.
 - **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes.

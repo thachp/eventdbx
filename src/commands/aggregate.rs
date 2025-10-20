@@ -18,7 +18,7 @@ use eventdbx::{
     merkle::compute_merkle_root,
     plugin::PluginManager,
     schema::SchemaManager,
-    store::{self, ActorClaims, AppendEvent, EventStore, payload_to_map},
+    store::{self, ActorClaims, AppendEvent, EventRecord, EventStore, payload_to_map},
 };
 
 #[derive(Subcommand)]
@@ -341,6 +341,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 issued_by: None,
             })?;
 
+            maybe_auto_snapshot(&store, &schema_manager, &record);
             println!("{}", serde_json::to_string_pretty(&record)?);
 
             if !plugins.is_empty() {
@@ -453,6 +454,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             let records = tx.commit()?;
             for record in &records {
                 println!("{}", serde_json::to_string_pretty(record)?);
+                maybe_auto_snapshot(&store, &schema_manager, record);
             }
 
             if !plugins.is_empty() {
@@ -485,6 +487,27 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
     }
 
     Ok(())
+}
+
+fn maybe_auto_snapshot(store: &EventStore, schemas: &SchemaManager, record: &EventRecord) {
+    if !schemas.should_snapshot(&record.aggregate_type, record.version) {
+        return;
+    }
+
+    match store.create_snapshot(
+        &record.aggregate_type,
+        &record.aggregate_id,
+        Some(format!("auto snapshot v{}", record.version)),
+    ) {
+        Ok(snapshot) => println!(
+            "auto snapshot created: aggregate={} aggregate_id={} version={}",
+            snapshot.aggregate_type, snapshot.aggregate_id, snapshot.version
+        ),
+        Err(err) => eprintln!(
+            "failed to create auto snapshot for {}::{} v{}: {}",
+            record.aggregate_type, record.aggregate_id, record.version, err
+        ),
+    }
 }
 
 fn export_aggregates(config: &Config, args: AggregateExportArgs) -> Result<()> {

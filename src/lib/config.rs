@@ -50,6 +50,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[serde(default = "default_cache_threshold", alias = "memory_threshold")]
     pub cache_threshold: usize,
+    #[serde(default)]
+    pub snapshot_threshold: Option<u64>,
     pub data_encryption_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -89,6 +91,7 @@ impl Default for Config {
             port: DEFAULT_PORT,
             data_dir: default_data_dir(),
             cache_threshold: default_cache_threshold(),
+            snapshot_threshold: None,
             data_encryption_key: None,
             created_at: now,
             updated_at: now,
@@ -113,6 +116,7 @@ pub struct ConfigUpdate {
     pub port: Option<u16>,
     pub data_dir: Option<PathBuf>,
     pub cache_threshold: Option<usize>,
+    pub snapshot_threshold: Option<Option<u64>>,
     pub data_encryption_key: Option<String>,
     pub restrict: Option<bool>,
     pub list_page_size: Option<usize>,
@@ -172,6 +176,9 @@ impl Config {
         }
         if let Some(threshold) = update.cache_threshold {
             self.cache_threshold = threshold;
+        }
+        if let Some(snapshot_threshold) = update.snapshot_threshold {
+            self.snapshot_threshold = snapshot_threshold;
         }
         if let Some(dek) = update.data_encryption_key {
             self.data_encryption_key = Some(dek);
@@ -614,4 +621,27 @@ fn write_public_key(path: &Path, data: &[u8]) -> Result<()> {
     let encoded = STANDARD_NO_PAD.encode(data);
     fs::write(path, encoded)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn applies_snapshot_threshold_updates() {
+        let mut config = Config::default();
+        assert_eq!(config.snapshot_threshold, None);
+
+        config.apply_update(ConfigUpdate {
+            snapshot_threshold: Some(Some(42)),
+            ..ConfigUpdate::default()
+        });
+        assert_eq!(config.snapshot_threshold, Some(42));
+
+        config.apply_update(ConfigUpdate {
+            snapshot_threshold: Some(None),
+            ..ConfigUpdate::default()
+        });
+        assert_eq!(config.snapshot_threshold, None);
+    }
 }

@@ -203,6 +203,18 @@ impl SchemaManager {
             .ok_or(EventError::SchemaNotFound)
     }
 
+    pub fn should_snapshot(&self, aggregate: &str, version: u64) -> bool {
+        if version == 0 {
+            return false;
+        }
+        let items = self.items.read();
+        items
+            .get(aggregate)
+            .and_then(|schema| schema.snapshot_threshold)
+            .map(|threshold| threshold > 0 && version % threshold == 0)
+            .unwrap_or(false)
+    }
+
     pub fn snapshot(&self) -> BTreeMap<String, AggregateSchema> {
         self.items.read().clone()
     }
@@ -423,5 +435,27 @@ mod tests {
             .validate_event("person", "person_created", &payload)
             .unwrap_err();
         assert!(matches!(err, EventError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn snapshot_threshold_triggers_on_expected_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schemas.json");
+        let manager = SchemaManager::load(path).unwrap();
+
+        manager
+            .create(CreateSchemaInput {
+                aggregate: "order".into(),
+                events: vec!["order-created".into()],
+                snapshot_threshold: Some(3),
+            })
+            .unwrap();
+
+        assert!(!manager.should_snapshot("order", 1));
+        assert!(manager.should_snapshot("order", 3));
+        assert!(!manager.should_snapshot("order", 4));
+
+        // Unknown aggregate returns false.
+        assert!(!manager.should_snapshot("missing", 3));
     }
 }

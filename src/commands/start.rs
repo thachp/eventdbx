@@ -309,6 +309,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         port: args.port,
         data_dir: args.data_dir.clone(),
         cache_threshold: None,
+        snapshot_threshold: None,
         data_encryption_key: None,
         restrict: Some(args.restrict),
         list_page_size: None,
