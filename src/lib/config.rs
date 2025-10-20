@@ -11,10 +11,13 @@ use argon2::{
         Error as PasswordHashError, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
     },
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -100,7 +103,7 @@ impl Default for Config {
             data_dir: default_data_dir(),
             cache_threshold: default_cache_threshold(),
             snapshot_threshold: None,
-            data_encryption_key: None,
+            data_encryption_key: Some(generate_data_encryption_key()),
             created_at: now,
             updated_at: now,
             restrict: default_restrict(),
@@ -139,8 +142,7 @@ pub struct ConfigUpdate {
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
-    let mut path = env::current_dir().map_err(|err| EventError::Config(err.to_string()))?;
-    path.push(".eventdbx");
+    let mut path = default_config_root()?;
     path.push("config.toml");
     Ok(path)
 }
@@ -157,12 +159,17 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
 
     if config_path.exists() {
         let contents = fs::read_to_string(&config_path)?;
-        let cfg: Config = toml::from_str(&contents)?;
+        let mut cfg: Config = toml::from_str(&contents)?;
+        let updated = cfg.ensure_encryption_key();
         cfg.ensure_data_dir()?;
         cfg.ensure_replication_identity()?;
+        if updated {
+            cfg.save(&config_path)?;
+        }
         Ok((cfg, config_path))
     } else {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        let _ = cfg.ensure_encryption_key();
         cfg.ensure_data_dir()?;
         cfg.ensure_replication_identity()?;
         cfg.save(&config_path)?;
@@ -284,6 +291,17 @@ impl Config {
     pub fn ensure_data_dir(&self) -> Result<()> {
         fs::create_dir_all(&self.data_dir)?;
         Ok(())
+    }
+
+    pub fn ensure_encryption_key(&mut self) -> bool {
+        if self.is_initialized() {
+            return false;
+        }
+
+        let encoded = generate_data_encryption_key();
+        self.data_encryption_key = Some(encoded);
+        self.updated_at = Utc::now();
+        true
     }
 
     pub fn identity_key_path(&self) -> PathBuf {
@@ -553,11 +571,24 @@ pub struct RemoteConfig {
     pub public_key: String,
 }
 
+fn default_config_root() -> Result<PathBuf> {
+    if let Some(home) = dirs::home_dir() {
+        Ok(home.join(".eventdbx"))
+    } else {
+        env::current_dir()
+            .map(|dir| dir.join(".eventdbx"))
+            .map_err(|err| EventError::Config(err.to_string()))
+    }
+}
+
+fn generate_data_encryption_key() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    STANDARD.encode(bytes)
+}
+
 fn default_data_dir() -> PathBuf {
-    let Ok(current_dir) = env::current_dir() else {
-        return PathBuf::from(".eventdbx");
-    };
-    current_dir.join(".eventdbx")
+    default_config_root().unwrap_or_else(|_| PathBuf::from(".eventdbx"))
 }
 
 fn default_restrict() -> bool {
