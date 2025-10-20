@@ -520,24 +520,18 @@ pub struct PluginDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginConfig {
-    Postgres(PostgresPluginConfig),
-    Csv(CsvPluginConfig),
     Tcp(TcpPluginConfig),
     Http(HttpPluginConfig),
     Grpc(GrpcPluginConfig),
-    Json(JsonPluginConfig),
     Log(LogPluginConfig),
 }
 
 impl PluginConfig {
     pub fn kind(&self) -> PluginKind {
         match self {
-            PluginConfig::Postgres(_) => PluginKind::Postgres,
-            PluginConfig::Csv(_) => PluginKind::Csv,
             PluginConfig::Tcp(_) => PluginKind::Tcp,
             PluginConfig::Http(_) => PluginKind::Http,
             PluginConfig::Grpc(_) => PluginKind::Grpc,
-            PluginConfig::Json(_) => PluginKind::Json,
             PluginConfig::Log(_) => PluginKind::Log,
         }
     }
@@ -546,30 +540,10 @@ impl PluginConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
-    Postgres,
-    Csv,
     Tcp,
     Http,
     Grpc,
-    Json,
     Log,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PostgresPluginConfig {
-    pub connection_string: String,
-    #[serde(default)]
-    pub field_mappings: BTreeMap<String, BTreeMap<String, PostgresColumnConfig>>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PostgresColumnConfig {
-    pub data_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CsvPluginConfig {
-    pub output_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,13 +564,6 @@ pub struct HttpPluginConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpcPluginConfig {
     pub endpoint: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonPluginConfig {
-    pub path: PathBuf,
-    #[serde(default)]
-    pub pretty: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

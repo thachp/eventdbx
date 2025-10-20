@@ -47,7 +47,8 @@ Follow the steps below to spin up EventDBX locally. All commands are expected to
    - Omit `--foreground` to daemonise the process.
    - Use `--data-dir <path>` to override the default `./.eventdbx` directory.
    - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
-  - Choose the API surface with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). `--api grpc`/`--api all` automatically flip the gRPC listener on for the current session; persistently enable it by setting `grpc.enabled = true` in `config.toml`.
+
+- Choose the API surface with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). `--api grpc`/`--api all` automatically flip the gRPC listener on for the current session; persistently enable it by setting `grpc.enabled = true` in `config.toml`.
 
 6. **Define a schema (recommended when running in restricted mode)**
 
@@ -154,19 +155,16 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 - `eventdbx aggregate remove --aggregate <type> --aggregate-id <id>` Removes an aggregate that has no events (version still 0).
 - `eventdbx aggregate commit`  
   Flushes all staged events in a single atomic transaction.
+- `eventdbx aggregate export [<type>] [--all] --output <path> [--format csv|json] [--zip] [--pretty]`  
+  Writes the current aggregate state (no metadata) as CSV or JSON. Exports default to one file per aggregate type; pass `--zip` to bundle the output into an archive.
 
 Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply --stage` to add entries to this queue, inspect them with `aggregate list --stage`, and persist the entire batch with `aggregate commit`. Events are validated against the active schema (when restriction is enabled) during both staging and commit. The commit operation writes every pending event in one RocksDB batch, guaranteeing all-or-nothing persistence.
 
 ### Plugins
 
-- `eventdbx plugin map --aggregate <name> --field <field> --datatype <type>`  
-  Records the base column type for a field; add `--plugin postgres [--plugin-name <label>]` to override the Postgres mapping only.
-- `eventdbx plugin config postgres --connection <connection-string> [--name <label>] [--disable]`
-- `eventdbx plugin config csv --name <label> --output-dir <dir> [--disable]`
 - `eventdbx plugin config tcp --name <label> --host <hostname> --port <u16> [--disable]`
 - `eventdbx plugin config http --name <label> --endpoint <host|url> [--https] [--header KEY=VALUE]... [--disable]`
 - `eventdbx plugin config grpc --name <label> --endpoint <host|url> [--disable]`
-- `eventdbx plugin config json --name <label> --path <file> [--pretty] [--disable]`
 - `eventdbx plugin config log --name <label> --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
 - `eventdbx plugin enable <label>`
 - `eventdbx plugin disable <label>`
@@ -207,18 +205,19 @@ Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when
 - `eventdbx restore --input <path> [--data-dir <path>] [--force]`  
   Restores data from a backup archive. Use `--data-dir` to override the stored location, and `--force` to overwrite non-empty destinations. The server must be stopped before restoring.
 
-Plugins fire after every committed event to keep external systems in sync. Each plugin sends or records different data:
+Plugins fire after every committed event to keep external systems in sync. Remaining plugins deliver events through different channels:
 
 Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications.
 Use `eventdbx plugin queue` to inspect pending/dead event IDs.
 
 Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instance requires a unique `--name` so you can update, enable, disable, remove, or replay it later. `plugin enable` validates connectivity (creating directories, touching files, or checking network access) before marking the plugin active. Remove a plugin only after disabling it with `plugin disable <name>`. `plugin replay` resends stored events for a single aggregate instance—or every instance of a type—through the selected plugin.
 
-- **Postgres**: Upserts aggregate state into a Postgres table, expanding columns based on schema mappings or `plugin map --plugin postgres` overrides.
-- **CSV**: Appends state snapshots into `<aggregate>.csv`, expanding columns as new fields appear.
 - **TCP**: Writes a single-line JSON `EventRecord` to the configured socket.
-- **HTTP**: POSTs the `EventRecord` JSON to the endpoint with optional headers; add `--https` during configuration to force HTTPS when the endpoint lacks a scheme.
+- **HTTP**: POSTs the `EventRecord` JSON to an endpoint with optional headers; add `--https` during configuration to force HTTPS when the endpoint lacks a scheme.
 - **gRPC**: Sends `EventRecord` batches to a remote gRPC endpoint compatible with the replication `ApplyEvents` API.
+- **Log**: Emits a formatted line via `tracing` at the configured level. By default: `aggregate=<type> id=<id> event=<event>`.
+
+Need point-in-time snapshots instead of streaming plugins? Use `eventdbx aggregate export` to capture aggregate state as CSV or JSON on demand.
 
 Example gRPC configuration:
 
@@ -235,10 +234,7 @@ eventdbx plugin enable audit-grpc
 eventdbx plugin list
 ```
 
-- **JSON**: Appends the `EventRecord` JSON (pretty if requested) to the given file.
-- **Log**: Emits a formatted line via `tracing` at the configured level. By default: `aggregate=<type> id=<id> event=<event>`.
-
-Example TCP/HTTP/JSON payload (`EventRecord`):
+Example HTTP/TCP payload (`EventRecord`):
 
 ```json
 {
@@ -331,10 +327,6 @@ curl \
 
 ```
 
-## GraphQL API
-
-GraphQL is served on `/graphql`, and an interactive Playground is available via `GET /graphql` or `/graphql/playground`. Supply the same bearer token header used for REST requests.
-
 ## gRPC API
 
 Set `grpc.enabled = true` in `config.toml` to expose a gRPC surface (disabled by default). The listener binds to `grpc.bind_addr` (default `127.0.0.1:7442`). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
@@ -351,6 +343,10 @@ grpcurl -H "authorization: Bearer TOKEN" \
       }' \
   -plaintext 127.0.0.1:7442 eventdbx.api.EventService/AppendEvent
 ```
+
+## GraphQL API
+
+GraphQL is served on `/graphql`, and an interactive Playground is available via `GET /graphql` or `/graphql/playground`. Supply the same bearer token header used for REST requests.
 
 ### Query example
 
