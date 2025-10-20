@@ -398,16 +398,6 @@ curl -X POST \
 
 The mutation triggers the same validation, replication, and plugin notifications as the REST endpoint.
 
-## My Unpopular Opinions
-
-I believe databases—like Oracle, PostgreSQL, and MongoDB—are bloated with unnecessary features. They bundle in query languages, stored procedures, search layers, and business logic that blur the line between data storage and application behavior.
-
-A database’s role should be simple: store state. No SQL, no procedures, no functions, no search, no views—absolutely no business logic. A write-only database should be immutable: every change is an event with a purpose, not just an update.
-
-EventDBX follows this principle. It focuses entirely on the write side of the CQRS design pattern, excelling at persisting state, tracking its evolution over time, and notifying downstream systems whenever a change occurs—so other services can react intelligently to what has changed. It leaves reading, searching, filtering, and analytics to other systems.
-
-— Patrick T.
-
 ## Contributing
 
 ### **Quick Start**
