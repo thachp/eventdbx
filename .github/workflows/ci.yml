@@ -6,8 +6,6 @@ permissions:
 on:
   push:
     branches: [main]
-    tags:
-      - "v*"
   pull_request:
   workflow_dispatch:
 jobs:
@@ -45,12 +43,58 @@ jobs:
       - name: Cargo test
         run: cargo test
 
+  prepare_release:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure Git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Read crate version
+        id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['version'])")
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag matching Cargo version
+        id: tag
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          if [ -z "$VERSION" ]; then
+            echo "::error::Unable to read version from Cargo.toml."
+            exit 1
+          fi
+          tag="v${VERSION}"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "::error::Tag $tag already exists."
+            exit 1
+          fi
+          git tag "$tag"
+          git push origin "$tag"
+          echo "value=$tag" >> "$GITHUB_OUTPUT"
+
   create_release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - build
+      - prepare_release
+    if: needs.prepare_release.outputs.tag != ''
     runs-on: ubuntu-latest
     outputs:
       upload_url: ${{ steps.release.outputs.upload_url }}
+      tag: ${{ needs.prepare_release.outputs.tag }}
     steps:
       - name: Create GitHub release
         id: release
@@ -58,19 +102,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.ref }}
-          release_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.prepare_release.outputs.tag }}
+          release_name: ${{ needs.prepare_release.outputs.tag }}
           draft: false
           prerelease: false
           body: |
             ## Downloads
-            - [Linux (Ubuntu)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/eventdbx-ubuntu-latest.tar.gz)
-            - [macOS](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/eventdbx-macos-latest.tar.gz)
-            - [Windows](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/eventdbx-windows-latest.zip)
+            - [Linux (Ubuntu)](https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare_release.outputs.tag }}/eventdbx-ubuntu-latest.tar.gz)
+            - [macOS](https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare_release.outputs.tag }}/eventdbx-macos-latest.tar.gz)
+            - [Windows](https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare_release.outputs.tag }}/eventdbx-windows-latest.zip)
 
   publish_binaries:
-    needs: create_release
-    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - create_release
+    if: needs.create_release.outputs.tag != ''
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
