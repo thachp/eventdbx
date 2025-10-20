@@ -15,6 +15,9 @@ keywords = [
 categories = ["database"]
 authors = ["Patrick Thach <thachp@gmail.com>"]
 
+[lib]
+path = "src/lib/mod.rs"
+
 [[bin]]
 name = "eventdbx"
 path = "src/main.rs"
