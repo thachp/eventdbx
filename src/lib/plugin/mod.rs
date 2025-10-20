@@ -93,9 +93,7 @@ pub fn establish_connection(definition: &PluginDefinition) -> Result<()> {
     }
 }
 
-pub fn instantiate_plugin(
-    definition: &PluginDefinition,
-) -> Box<dyn Plugin> {
+pub fn instantiate_plugin(definition: &PluginDefinition) -> Box<dyn Plugin> {
     match &definition.config {
         PluginConfig::Tcp(settings) => Box::new(TcpPlugin::new(settings.clone())),
         PluginConfig::Http(settings) => Box::new(HttpPlugin::new(settings.clone())),
