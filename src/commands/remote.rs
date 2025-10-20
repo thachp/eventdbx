@@ -117,6 +117,9 @@ pub struct RemotePullArgs {
     /// Synchronize schemas from the remote
     #[arg(long, default_value_t = false)]
     pub schema: bool,
+    /// Synchronize only schemas, skipping event data
+    #[arg(long = "schema-only", default_value_t = false)]
+    pub schema_only: bool,
 }
 
 pub async fn execute(config_path: Option<PathBuf>, command: RemoteCommands) -> Result<()> {
@@ -259,50 +262,46 @@ async fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Resu
     .await
 }
 
-async fn pull_remote(config_path: Option<PathBuf>, args: RemotePullArgs) -> Result<()> {
-    let RemotePullArgs {
-        name,
-        dry_run,
-        batch_size,
-        aggregates,
-        aggregate_ids,
-        schema,
-    } = args;
+async fn pull_remote(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Result<()> {
+    if args.schema_only {
+        args.schema = true;
+    }
+
+    if args.schema_only && (!args.aggregates.is_empty() || !args.aggregate_ids.is_empty()) {
+        bail!("--schema-only cannot be combined with aggregate filters");
+    }
 
     let (config, _) = load_or_default(config_path)?;
     let remote = config
         .remotes
-        .get(&name)
+        .get(&args.name)
         .cloned()
-        .ok_or_else(|| anyhow!("no remote named '{}' is configured", name))?;
+        .ok_or_else(|| anyhow!("no remote named '{}' is configured", args.name))?;
 
-    let store = Arc::new(EventStore::open(
-        config.event_store_path(),
-        config.encryption_key()?,
-    )?);
-    let local_positions = store.aggregate_positions()?;
+    let remote_name = args.name.clone();
 
-    let filter = normalize_filter(&aggregates, &aggregate_ids)?;
-    let schema_manager = if schema {
-        Some(Arc::new(SchemaManager::load(config.schema_store_path())?))
-    } else {
-        None
-    };
+    if !args.schema_only {
+        let store = Arc::new(EventStore::open(
+            config.event_store_path(),
+            config.encryption_key()?,
+        )?);
+        let local_positions = store.aggregate_positions()?;
+        let filter = normalize_filter(&args.aggregates, &args.aggregate_ids)?;
+        pull_remote_impl(
+            store,
+            local_positions,
+            remote.clone(),
+            remote_name.clone(),
+            args.dry_run,
+            args.batch_size.max(1),
+            filter,
+        )
+        .await?;
+    }
 
-    let remote_for_schema = remote.clone();
-    pull_remote_impl(
-        store,
-        local_positions,
-        remote,
-        name.clone(),
-        dry_run,
-        batch_size.max(1),
-        filter,
-    )
-    .await?;
-
-    if let Some(manager) = schema_manager {
-        pull_remote_schemas(manager, remote_for_schema, &name, dry_run).await?;
+    if args.schema {
+        let manager = Arc::new(SchemaManager::load(config.schema_store_path())?);
+        pull_remote_schemas(manager, remote, &remote_name, args.dry_run).await?;
     }
 
     Ok(())
