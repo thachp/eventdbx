@@ -28,12 +28,6 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 
    ```bash
    eventdbx config --dek "$(openssl rand -base64 32)"
-
-   # optionally set a global snapshot cadence (used when schema create omits --snapshot-threshold)
-   eventdbx config --snapshot-threshold 100
-
-   # clear the default later with:
-   eventdbx config --clear-snapshot-threshold
    ```
 
 4. **Start the server**
