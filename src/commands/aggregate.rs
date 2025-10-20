@@ -1,16 +1,20 @@
 use std::{
-    collections::BTreeMap,
-    fs,
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, File},
+    io::Write,
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
-use clap::{Args, Subcommand};
+use anyhow::{Result, anyhow, bail};
+use clap::{Args, Subcommand, ValueEnum};
+use csv::WriterBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
+use tempfile::tempdir;
+use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
 use eventdbx::{
-    config::load_or_default,
+    config::{Config, load_or_default},
     merkle::compute_merkle_root,
     plugin::PluginManager,
     schema::SchemaManager,
@@ -39,6 +43,8 @@ pub enum AggregateCommands {
     Remove(AggregateRemoveArgs),
     /// Commit events previously staged with `aggregate apply --stage`
     Commit,
+    /// Export aggregate state to CSV or JSON
+    Export(AggregateExportArgs),
 }
 
 #[derive(Args)]
@@ -159,6 +165,46 @@ pub struct AggregateListArgs {
     #[arg(long, default_value_t = false)]
     pub stage: bool,
 }
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum AggregateExportFormat {
+    Csv,
+    Json,
+}
+
+#[derive(Args)]
+pub struct AggregateExportArgs {
+    /// Aggregate type to export (omit when using --all)
+    pub aggregate: Option<String>,
+
+    /// Export every aggregate type
+    #[arg(long)]
+    pub all: bool,
+
+    /// Output format
+    #[arg(long, value_enum, default_value_t = AggregateExportFormat::Csv)]
+    pub format: AggregateExportFormat,
+
+    /// Output path (file or directory depending on context)
+    #[arg(long)]
+    pub output: PathBuf,
+
+    /// Compress the export into a ZIP archive
+    #[arg(long, default_value_t = false)]
+    pub zip: bool,
+
+    /// Pretty-print JSON output (no effect for CSV)
+    #[arg(long, default_value_t = false)]
+    pub pretty: bool,
+}
+
+#[derive(Clone)]
+struct ExportRecord {
+    aggregate_id: String,
+    state: BTreeMap<String, String>,
+}
+
+const EXPORT_ID_KEY: &str = "__aggregate_id";
 
 pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
@@ -433,8 +479,375 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             clear_staged_events(staging_path.as_path())?;
             println!("committed {} event(s)", records.len());
         }
+        AggregateCommands::Export(args) => {
+            export_aggregates(&config, args)?;
+        }
     }
 
+    Ok(())
+}
+
+fn export_aggregates(config: &Config, args: AggregateExportArgs) -> Result<()> {
+    let AggregateExportArgs {
+        aggregate,
+        all,
+        format,
+        output,
+        zip,
+        pretty,
+    } = args;
+
+    if all && aggregate.is_some() {
+        bail!("aggregate name cannot be provided when using --all");
+    }
+    if !all && aggregate.is_none() {
+        bail!("aggregate name must be provided unless --all is specified");
+    }
+
+    let target_name = if all { None } else { aggregate };
+    let store = EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
+    let exports = collect_export_records(&store, target_name.as_deref(), all)?;
+
+    if exports.is_empty() {
+        if let Some(name) = target_name {
+            println!("no aggregates found for '{}'", name);
+        } else {
+            println!("no aggregates found");
+        }
+        return Ok(());
+    }
+
+    if zip {
+        let zip_path = export_as_zip(&exports, format, pretty, output)?;
+        println!(
+            "Exported {} aggregate type(s) to {} (zip archive)",
+            exports.len(),
+            zip_path.display()
+        );
+    } else {
+        let files = export_to_files(&exports, format, pretty, output)?;
+        for path in &files {
+            println!("wrote {}", path.display());
+        }
+        println!(
+            "Exported {} aggregate type(s) in {} format",
+            exports.len(),
+            export_suffix(format).to_uppercase()
+        );
+    }
+
+    Ok(())
+}
+
+fn collect_export_records(
+    store: &EventStore,
+    target: Option<&str>,
+    include_all: bool,
+) -> Result<BTreeMap<String, Vec<ExportRecord>>> {
+    let mut map: BTreeMap<String, Vec<ExportRecord>> = BTreeMap::new();
+    let filter = if include_all {
+        None
+    } else {
+        Some(
+            target
+                .ok_or_else(|| anyhow!("aggregate name must be provided unless --all is set"))?
+                .to_string(),
+        )
+    };
+
+    for aggregate in store.aggregates_paginated(0, None) {
+        let store::AggregateState {
+            aggregate_type,
+            aggregate_id,
+            state,
+            ..
+        } = aggregate;
+
+        if let Some(ref filter_type) = filter {
+            if &aggregate_type != filter_type {
+                continue;
+            }
+        }
+
+        map.entry(aggregate_type).or_default().push(ExportRecord {
+            aggregate_id,
+            state,
+        });
+    }
+
+    for rows in map.values_mut() {
+        rows.sort_by(|a, b| a.aggregate_id.cmp(&b.aggregate_id));
+    }
+
+    Ok(map)
+}
+
+fn export_to_files(
+    exports: &BTreeMap<String, Vec<ExportRecord>>,
+    format: AggregateExportFormat,
+    pretty: bool,
+    output: PathBuf,
+) -> Result<Vec<PathBuf>> {
+    let multiple = exports.len() > 1;
+
+    if multiple {
+        if output.exists() && output.is_file() {
+            bail!("output path must be a directory when exporting multiple aggregate types");
+        }
+        let files = export_into_directory(output.as_path(), exports, format, pretty)?;
+        return Ok(files.into_iter().map(|(path, _)| path).collect());
+    }
+
+    let (aggregate_type, rows) = exports.iter().next().expect("exports is not empty");
+    let target = output;
+    let as_file = should_treat_as_file(&target, format);
+
+    if as_file {
+        if let Some(parent) = target.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        match format {
+            AggregateExportFormat::Csv => write_csv_file(&target, rows)?,
+            AggregateExportFormat::Json => write_json_file(&target, rows, pretty)?,
+        }
+        return Ok(vec![target]);
+    }
+
+    fs::create_dir_all(&target)?;
+    let file_name = export_file_name(aggregate_type, format);
+    let file_path = target.join(file_name);
+    match format {
+        AggregateExportFormat::Csv => write_csv_file(&file_path, rows)?,
+        AggregateExportFormat::Json => write_json_file(&file_path, rows, pretty)?,
+    }
+    Ok(vec![file_path])
+}
+
+fn should_treat_as_file(path: &Path, format: AggregateExportFormat) -> bool {
+    if path.exists() {
+        return path.is_file();
+    }
+
+    let expected_extension = export_suffix(format);
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case(expected_extension))
+        .unwrap_or(false)
+}
+
+fn export_as_zip(
+    exports: &BTreeMap<String, Vec<ExportRecord>>,
+    format: AggregateExportFormat,
+    pretty: bool,
+    output: PathBuf,
+) -> Result<PathBuf> {
+    let temp = tempdir()?;
+    let generated = export_into_directory(temp.path(), exports, format, pretty)?;
+    let zip_path = normalize_zip_output(output, exports, format)?;
+    create_zip_archive(&generated, &zip_path)?;
+    Ok(zip_path)
+}
+
+fn export_into_directory(
+    base_dir: &Path,
+    exports: &BTreeMap<String, Vec<ExportRecord>>,
+    format: AggregateExportFormat,
+    pretty: bool,
+) -> Result<Vec<(PathBuf, String)>> {
+    fs::create_dir_all(base_dir)?;
+    let mut files = Vec::new();
+
+    for (aggregate_type, rows) in exports {
+        let file_name = export_file_name(aggregate_type, format);
+        let file_path = base_dir.join(&file_name);
+        match format {
+            AggregateExportFormat::Csv => write_csv_file(&file_path, rows)?,
+            AggregateExportFormat::Json => write_json_file(&file_path, rows, pretty)?,
+        }
+        files.push((file_path, file_name));
+    }
+
+    Ok(files)
+}
+
+fn write_csv_file(path: &Path, rows: &[ExportRecord]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut dynamic_columns = BTreeSet::new();
+    for row in rows {
+        for key in row.state.keys() {
+            dynamic_columns.insert(key.clone());
+        }
+    }
+
+    let mut headers = Vec::with_capacity(dynamic_columns.len() + 1);
+    headers.push(EXPORT_ID_KEY.to_string());
+    headers.extend(dynamic_columns.into_iter());
+
+    let mut writer = WriterBuilder::new().from_path(path)?;
+    writer.write_record(&headers)?;
+
+    for row in rows {
+        let mut record = Vec::with_capacity(headers.len());
+        for (idx, header) in headers.iter().enumerate() {
+            if idx == 0 {
+                record.push(row.aggregate_id.clone());
+            } else {
+                record.push(row.state.get(header).cloned().unwrap_or_default());
+            }
+        }
+        writer.write_record(record)?;
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_json_file(path: &Path, rows: &[ExportRecord], pretty: bool) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let mut file = File::create(path)?;
+    if pretty {
+        let entries: Vec<_> = rows.iter().map(record_to_json).collect();
+        serde_json::to_writer_pretty(&mut file, &entries)?;
+    } else {
+        file.write_all(b"[")?;
+        for (idx, row) in rows.iter().enumerate() {
+            if idx > 0 {
+                file.write_all(b",")?;
+            }
+            let value = record_to_json(row);
+            let payload = serde_json::to_vec(&value)?;
+            file.write_all(&payload)?;
+        }
+        file.write_all(b"]")?;
+    }
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn record_to_json(record: &ExportRecord) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        EXPORT_ID_KEY.to_string(),
+        Value::String(record.aggregate_id.clone()),
+    );
+    for (key, value) in &record.state {
+        map.insert(key.clone(), Value::String(value.clone()));
+    }
+    Value::Object(map)
+}
+
+fn normalize_zip_output(
+    output: PathBuf,
+    exports: &BTreeMap<String, Vec<ExportRecord>>,
+    format: AggregateExportFormat,
+) -> Result<PathBuf> {
+    if output.exists() && output.is_dir() {
+        let file_name = default_zip_name(exports, format);
+        let path = output.join(file_name);
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        return Ok(path);
+    }
+
+    let mut path = output;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let has_zip_extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false);
+
+    if !has_zip_extension {
+        if path.file_name().is_none() || path.file_name().unwrap().is_empty() {
+            path = PathBuf::from(default_zip_name(exports, format));
+        } else {
+            path.set_extension("zip");
+        }
+    }
+
+    Ok(path)
+}
+
+fn default_zip_name(
+    exports: &BTreeMap<String, Vec<ExportRecord>>,
+    format: AggregateExportFormat,
+) -> String {
+    let suffix = export_suffix(format);
+    let stem = if exports.len() == 1 {
+        let name = exports.keys().next().expect("exports not empty");
+        format!("{}_{}", sanitize_component(name), suffix)
+    } else {
+        format!("aggregates_{}", suffix)
+    };
+    format!("{stem}.zip")
+}
+
+fn export_file_name(aggregate_type: &str, format: AggregateExportFormat) -> String {
+    let stem = sanitize_component(aggregate_type);
+    let suffix = export_suffix(format);
+    format!("{stem}.{suffix}")
+}
+
+fn export_suffix(format: AggregateExportFormat) -> &'static str {
+    match format {
+        AggregateExportFormat::Csv => "csv",
+        AggregateExportFormat::Json => "json",
+    }
+}
+
+fn sanitize_component(input: &str) -> String {
+    let mut sanitized = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if sanitized.is_empty() {
+        sanitized.push('_');
+    }
+    sanitized
+}
+
+fn create_zip_archive(files: &[(PathBuf, String)], output: &Path) -> Result<()> {
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    let file = File::create(output)?;
+    let mut zip = ZipWriter::new(file);
+    let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    for (path, name) in files {
+        zip.start_file(name, options)?;
+        let mut reader = File::open(path)?;
+        std::io::copy(&mut reader, &mut zip)?;
+    }
+
+    zip.finish()?;
     Ok(())
 }
 
