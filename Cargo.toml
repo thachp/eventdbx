@@ -48,7 +48,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 rocksdb = { version = "0.21", default-features = false, features = ["multi-threaded-cf"] }
 csv = "1.3"
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 flate2 = "1.0"
 tar = "0.4"
 tempfile = "3.10"
@@ -68,7 +68,7 @@ argon2 = { version = "0.5", features = ["password-hash"] }
 
 [dev-dependencies]
 fake = "3"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 portpicker = "0.1"
 rand = "0.8"
 
