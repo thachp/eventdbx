@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 use super::{
     api_grpc::GrpcApi,
+    cache::AggregateCache,
     config::Config,
     error::{EventError, Result},
     graphql::{EventSchema, GraphqlState, build_schema},
@@ -55,6 +56,7 @@ pub(crate) struct AppState {
     replication: Option<ReplicationManager>,
     hidden_aggregates: Arc<HashSet<String>>,
     hidden_fields: Arc<HashMap<String, HashSet<String>>>,
+    cache: Option<Arc<AggregateCache>>,
 }
 
 impl AppState {
@@ -76,6 +78,56 @@ impl AppState {
             state.retain(|key, _| !fields.contains(key));
         }
         state
+    }
+
+    fn cache(&self) -> Option<&AggregateCache> {
+        self.cache.as_deref()
+    }
+
+    pub(crate) fn load_aggregate(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<AggregateState> {
+        if let Some(cache) = self.cache() {
+            if let Some(aggregate) = cache.get(aggregate_type, aggregate_id) {
+                return Ok(self.sanitize_aggregate(aggregate));
+            }
+        }
+
+        let aggregate = self
+            .store
+            .get_aggregate_state(aggregate_type, aggregate_id)?;
+
+        if let Some(cache) = self.cache() {
+            cache.put(aggregate.clone());
+        }
+
+        Ok(self.sanitize_aggregate(aggregate))
+    }
+
+    pub(crate) fn cache_store(&self, aggregate: &AggregateState) {
+        if let Some(cache) = self.cache() {
+            cache.put(aggregate.clone());
+        }
+    }
+
+    pub(crate) fn refresh_cached_aggregate(&self, aggregate_type: &str, aggregate_id: &str) {
+        if let Some(cache) = self.cache() {
+            match self.store.get_aggregate_state(aggregate_type, aggregate_id) {
+                Ok(aggregate) => cache.put(aggregate),
+                Err(EventError::AggregateNotFound) => {
+                    cache.remove(aggregate_type, aggregate_id);
+                }
+                Err(err) => {
+                    warn!(
+                        aggregate_type = aggregate_type,
+                        aggregate_id = aggregate_id,
+                        "failed to refresh cache: {err}"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -294,6 +346,8 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         .filter(|(_, fields)| !fields.is_empty())
         .collect();
 
+    let cache = AggregateCache::new(config.cache_threshold).map(Arc::new);
+
     let state = AppState {
         store: Arc::clone(&store),
         tokens,
@@ -307,6 +361,7 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         replication: replication_manager.clone(),
         hidden_aggregates: Arc::new(hidden_aggregates),
         hidden_fields: Arc::new(hidden_fields),
+        cache,
     };
 
     start_plugin_retry_worker(state.clone());
@@ -430,13 +485,16 @@ async fn list_aggregates(
     if take > state.page_limit {
         take = state.page_limit;
     }
-    let mut aggregates = state.store.aggregates();
-    aggregates.retain(|aggregate| !state.is_hidden_aggregate(&aggregate.aggregate_type));
+    let aggregates = state.store.aggregates();
     let page = aggregates
         .into_iter()
+        .filter(|aggregate| !state.is_hidden_aggregate(&aggregate.aggregate_type))
         .skip(skip)
         .take(take)
-        .map(|aggregate| state.sanitize_aggregate(aggregate))
+        .map(|aggregate| {
+            state.cache_store(&aggregate);
+            state.sanitize_aggregate(aggregate)
+        })
         .collect::<Vec<_>>();
     Ok(Json(page))
 }
@@ -448,10 +506,8 @@ async fn get_aggregate(
     if state.is_hidden_aggregate(&aggregate_type) {
         return Err(EventError::AggregateNotFound);
     }
-    let aggregate = state
-        .store
-        .get_aggregate_state(&aggregate_type, &aggregate_id)?;
-    Ok(Json(state.sanitize_aggregate(aggregate)))
+    let aggregate = state.load_aggregate(&aggregate_type, &aggregate_id)?;
+    Ok(Json(aggregate))
 }
 
 #[derive(Deserialize, Default)]
@@ -522,6 +578,9 @@ async fn append_event_global(
             .validate_event(&request.aggregate_type, &request.event_type, &payload_map)?;
     }
 
+    let aggregate_type = request.aggregate_type.clone();
+    let aggregate_id = request.aggregate_id.clone();
+
     let record = state.store.append(AppendEvent {
         aggregate_type: request.aggregate_type,
         aggregate_id: request.aggregate_id,
@@ -532,6 +591,7 @@ async fn append_event_global(
 
     notify_plugins(&state, &record);
     replicate_events(&state, std::slice::from_ref(&record));
+    state.refresh_cached_aggregate(&aggregate_type, &aggregate_id);
 
     Ok(Json(record))
 }

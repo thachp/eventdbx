@@ -13,8 +13,8 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
 
-    #[arg(long)]
-    pub memory_threshold: Option<usize>,
+    #[arg(long = "cache-threshold", alias = "memory-threshold")]
+    pub cache_threshold: Option<usize>,
 
     #[arg(long, alias = "dek")]
     pub data_encryption_key: Option<String>,
@@ -36,7 +36,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
     let ConfigArgs {
         port,
         data_dir,
-        memory_threshold,
+        cache_threshold,
         data_encryption_key,
         list_page_size,
         page_limit,
@@ -48,7 +48,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
     config.apply_update(ConfigUpdate {
         port,
         data_dir,
-        memory_threshold,
+        cache_threshold,
         data_encryption_key,
         restrict: None,
         list_page_size,
