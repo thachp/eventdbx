@@ -14,22 +14,15 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 
    ```bash
    # Install prebuilt binaries via shell script
-   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.9.14/eventdbx-installer.sh | sh
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.9.15/eventdbx-installer.sh | sh
    ```
 
    ```bash
    # Install prebuilt binaries via powershell script
-   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.9.14/eventdbx-installer.ps1 | iex"
+   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.9.15/eventdbx-installer.ps1 | iex"
    ```
 
-2. **Create the initial configuration**
-   Supply a 32-byte data-encryption key (DEK) encoded as Base64. You can generate one on macOS/Linux with `openssl rand -base64 32`.
-
-   ```bash
-   eventdbx config --dek "$(openssl rand -base64 32)"
-   ```
-
-3. **Start the server**
+2. **Start the server**
 
    ```bash
    eventdbx start --foreground
@@ -41,7 +34,7 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 
 - Choose the API surface with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). `--api grpc`/`--api all` automatically flip the gRPC listener on for the current session; persistently enable it by setting `grpc.enabled = true` in `config.toml`.
 
-4. **Define a schema (recommended when running in restricted mode)**
+3. **Define a schema (recommended when running in restricted mode)**
 
    ```bash
    eventdbx schema create \
@@ -52,13 +45,13 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 
    Omit `--snapshot-threshold` to inherit the default configured in `config.toml` (if any).
 
-5. **Issue a token for CLI access**
+4. **Issue a token for CLI access**
 
    ```bash
    eventdbx token generate --group admin --user jane --expiration 3600
    ```
 
-6. **Append an event**
+5. **Append an event**
    ```bash
    eventdbx aggregate apply person p-002 patient-added \
    --field name="Jane Doe" \
