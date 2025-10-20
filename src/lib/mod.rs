@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod api_grpc;
 pub mod cache;
 pub mod config;

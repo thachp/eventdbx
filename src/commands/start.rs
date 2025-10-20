@@ -215,13 +215,13 @@ pub fn destroy(config_path: Option<PathBuf>, args: DestroyArgs) -> Result<()> {
 }
 
 async fn start_foreground(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
-    let (config, _) = load_and_update_config(config_path, &args)?;
+    let (config, path) = load_and_update_config(config_path, &args)?;
     eprintln!(
         "configuration loaded; starting server (pid={})",
         std::process::id()
     );
     let plugins = PluginManager::from_config(&config)?;
-    server::run(config, plugins).await?;
+    server::run(config, path, plugins).await?;
     Ok(())
 }
 
@@ -319,6 +319,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         hidden_aggregate_types: None,
         hidden_fields: None,
         grpc: None,
+        admin: None,
     });
     if let Some(mode) = api_override {
         if mode.grpc_enabled() {

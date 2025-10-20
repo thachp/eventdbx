@@ -1,4 +1,4 @@
-use std::{net::TcpListener, time::Duration};
+use std::{net::TcpListener, path::PathBuf, time::Duration};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use eventdbx::{
@@ -108,6 +108,8 @@ async fn rest_person_company_flow() -> TestResult<()> {
     config.restrict = false;
     config.data_encryption_key = Some(STANDARD.encode([1u8; 32]));
     config.ensure_data_dir()?;
+    let config_path = temp.path().join("config.toml");
+    config.save(&config_path)?;
 
     // Prepare token
     let encryptor = config
@@ -126,7 +128,7 @@ async fn rest_person_company_flow() -> TestResult<()> {
     drop(token_manager);
 
     let plugins = PluginManager::from_config(&config)?;
-    let server_handle = spawn_server(config.clone(), plugins)?;
+    let server_handle = spawn_server(config.clone(), config_path.clone(), plugins)?;
 
     let base_url = format!("http://127.0.0.1:{}", config.port);
     wait_for_health(&base_url).await?;
@@ -262,11 +264,12 @@ async fn rest_person_company_flow() -> TestResult<()> {
 
 fn spawn_server(
     config: Config,
+    config_path: PathBuf,
     plugins: PluginManager,
 ) -> TestResult<JoinHandle<eventdbx::error::Result<()>>> {
-    Ok(tokio::spawn(
-        async move { server::run(config, plugins).await },
-    ))
+    Ok(tokio::spawn(async move {
+        server::run(config, config_path, plugins).await
+    }))
 }
 
 async fn wait_for_health(base_url: &str) -> TestResult<()> {

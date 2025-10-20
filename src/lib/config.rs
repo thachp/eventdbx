@@ -5,6 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use argon2::{
+    Argon2,
+    password_hash::{
+        Error as PasswordHashError, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+    },
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
@@ -82,6 +88,8 @@ pub struct Config {
     pub hidden_aggregate_types: Vec<String>,
     #[serde(default)]
     pub hidden_fields: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub admin: AdminApiConfig,
 }
 
 impl Default for Config {
@@ -107,6 +115,7 @@ impl Default for Config {
             api_mode: default_api_mode(),
             hidden_aggregate_types: Vec::new(),
             hidden_fields: BTreeMap::new(),
+            admin: AdminApiConfig::default(),
         }
     }
 }
@@ -126,6 +135,7 @@ pub struct ConfigUpdate {
     pub hidden_aggregate_types: Option<Vec<String>>,
     pub hidden_fields: Option<BTreeMap<String, Vec<String>>>,
     pub grpc: Option<GrpcApiConfigUpdate>,
+    pub admin: Option<AdminApiConfigUpdate>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -233,6 +243,20 @@ impl Config {
                 normalized.insert(aggregate.to_string(), normalized_fields);
             }
             self.hidden_fields = normalized;
+        }
+        if let Some(admin) = update.admin {
+            if let Some(enabled) = admin.enabled {
+                self.admin.enabled = enabled;
+            }
+            if let Some(bind_addr) = admin.bind_addr {
+                let trimmed = bind_addr.trim();
+                if !trimmed.is_empty() {
+                    self.admin.bind_addr = trimmed.to_string();
+                }
+            }
+            if let Some(port) = admin.port {
+                self.admin.port = port;
+            }
         }
         self.updated_at = Utc::now();
     }
@@ -374,6 +398,59 @@ impl Config {
         }
     }
 
+    pub fn set_admin_master_key(&mut self, key: &str) -> Result<()> {
+        let normalized = key.trim();
+        if normalized.is_empty() {
+            return Err(EventError::Config(
+                "admin master key cannot be empty".to_string(),
+            ));
+        }
+
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let hash = argon2
+            .hash_password(normalized.as_bytes(), &salt)
+            .map_err(|err| EventError::Config(format!("failed to hash admin master key: {err}")))?;
+        self.admin.master_key_hash = Some(hash.to_string());
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    pub fn clear_admin_master_key(&mut self) {
+        self.admin.master_key_hash = None;
+        self.updated_at = Utc::now();
+    }
+
+    pub fn verify_admin_master_key(&self, candidate: &str) -> Result<bool> {
+        let Some(stored) = self.admin.master_key_hash.as_ref() else {
+            return Ok(false);
+        };
+
+        let parsed = PasswordHash::new(stored).map_err(|err| {
+            EventError::Config(format!("stored admin master key hash is invalid: {err}"))
+        })?;
+        let argon2 = Argon2::default();
+        let normalized = candidate.trim();
+        if normalized.is_empty() {
+            return Ok(false);
+        }
+        match argon2.verify_password(normalized.as_bytes(), &parsed) {
+            Ok(_) => Ok(true),
+            Err(PasswordHashError::Password) => Ok(false),
+            Err(err) => Err(EventError::Config(format!(
+                "failed to verify admin master key: {err}"
+            ))),
+        }
+    }
+
+    pub fn admin_master_key_configured(&self) -> bool {
+        self.admin
+            .master_key_hash
+            .as_ref()
+            .map(|hash| !hash.trim().is_empty())
+            .unwrap_or(false)
+    }
+
     pub fn load_plugins(&self) -> Result<Vec<PluginDefinition>> {
         let path = self.plugins_path();
         if !path.exists() {
@@ -441,6 +518,36 @@ pub struct GrpcApiConfigUpdate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminApiConfig {
+    #[serde(default = "default_admin_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_admin_bind_addr")]
+    pub bind_addr: String,
+    #[serde(default = "default_admin_port")]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub master_key_hash: Option<String>,
+}
+
+impl Default for AdminApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_admin_enabled(),
+            bind_addr: default_admin_bind_addr(),
+            port: default_admin_port(),
+            master_key_hash: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AdminApiConfigUpdate {
+    pub enabled: Option<bool>,
+    pub bind_addr: Option<String>,
+    pub port: Option<Option<u16>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
     pub endpoint: String,
     pub public_key: String,
@@ -491,6 +598,18 @@ fn default_identity_key() -> PathBuf {
 
 fn default_replication_bind() -> String {
     "127.0.0.1:7443".to_string()
+}
+
+fn default_admin_enabled() -> bool {
+    false
+}
+
+fn default_admin_bind_addr() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_admin_port() -> Option<u16> {
+    Some(7171)
 }
 
 fn deserialize_restrict<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>

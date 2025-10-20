@@ -1,4 +1,4 @@
-use std::{io, net::TcpListener, time::Duration};
+use std::{io, net::TcpListener, path::PathBuf, time::Duration};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use eventdbx::{
@@ -45,6 +45,8 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
     config.grpc.enabled = true;
     config.grpc.bind_addr = format!("127.0.0.1:{grpc_port}");
     config.ensure_data_dir()?;
+    let config_path = temp.path().join("config.toml");
+    config.save(&config_path)?;
 
     let encryptor = config
         .encryption_key()?
@@ -62,7 +64,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
     drop(token_manager);
 
     let plugins = PluginManager::from_config(&config)?;
-    let server_handle = spawn_server(config.clone(), plugins)?;
+    let server_handle = spawn_server(config.clone(), config_path.clone(), plugins)?;
 
     let base_url = format!("http://127.0.0.1:{}", http_port);
     wait_for_http_health(&base_url).await?;
@@ -186,11 +188,12 @@ fn allocate_port() -> std::io::Result<u16> {
 
 fn spawn_server(
     config: Config,
+    config_path: PathBuf,
     plugins: PluginManager,
 ) -> TestResult<JoinHandle<eventdbx::error::Result<()>>> {
-    Ok(tokio::spawn(
-        async move { server::run(config, plugins).await },
-    ))
+    Ok(tokio::spawn(async move {
+        server::run(config, config_path, plugins).await
+    }))
 }
 
 async fn wait_for_http_health(base_url: &str) -> TestResult<()> {

@@ -3,7 +3,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use async_graphql::http::GraphQLPlaygroundConfig;
@@ -28,6 +28,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::{
+    admin,
     api_grpc::GrpcApi,
     cache::AggregateCache,
     config::Config,
@@ -47,13 +48,15 @@ pub(crate) struct AppState {
     pub(crate) store: Arc<EventStore>,
     pub(crate) tokens: Arc<TokenManager>,
     pub(crate) schemas: Arc<SchemaManager>,
+    pub(crate) config: Arc<RwLock<Config>>,
+    pub(crate) config_path: Arc<PathBuf>,
     pub(crate) restrict: bool,
     pub(crate) list_page_size: usize,
     pub(crate) page_limit: usize,
-    plugins: PluginManager,
+    plugins: Arc<RwLock<PluginManager>>,
     retry_queue: Arc<PluginRetryQueue>,
     plugin_max_attempts: u32,
-    replication: Option<ReplicationManager>,
+    replication: Arc<RwLock<Option<ReplicationManager>>>,
     hidden_aggregates: Arc<HashSet<String>>,
     hidden_fields: Arc<HashMap<String, HashSet<String>>>,
     cache: Option<Arc<AggregateCache>>,
@@ -62,6 +65,41 @@ pub(crate) struct AppState {
 impl AppState {
     pub(crate) fn is_hidden_aggregate(&self, aggregate_type: &str) -> bool {
         self.hidden_aggregates.contains(aggregate_type)
+    }
+
+    pub(crate) fn plugin_manager(&self) -> PluginManager {
+        self.plugins
+            .read()
+            .expect("plugin manager lock poisoned")
+            .clone()
+    }
+
+    pub(crate) fn has_enabled_plugins(&self) -> bool {
+        !self
+            .plugins
+            .read()
+            .expect("plugin manager lock poisoned")
+            .is_empty()
+    }
+
+    pub(crate) fn replace_plugins(&self, manager: PluginManager) {
+        let mut guard = self.plugins.write().expect("plugin manager lock poisoned");
+        *guard = manager;
+    }
+
+    pub(crate) fn replication_manager(&self) -> Option<ReplicationManager> {
+        self.replication
+            .read()
+            .expect("replication manager lock poisoned")
+            .clone()
+    }
+
+    pub(crate) fn set_replication_manager(&self, manager: Option<ReplicationManager>) {
+        let mut guard = self
+            .replication
+            .write()
+            .expect("replication manager lock poisoned");
+        *guard = manager;
     }
 
     pub(crate) fn sanitize_aggregate(&self, mut aggregate: AggregateState) -> AggregateState {
@@ -302,37 +340,47 @@ struct QueueEntry {
     attempts: u32,
 }
 
-pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
-    let encryption = config.encryption_key()?;
+pub async fn run(config: Config, config_path: PathBuf, plugins: PluginManager) -> Result<()> {
+    let config_snapshot = config.clone();
+    let shared_config = Arc::new(RwLock::new(config));
+    let config_path = Arc::new(config_path);
+
+    let encryption = config_snapshot.encryption_key()?;
     let store = Arc::new(EventStore::open(
-        config.event_store_path(),
+        config_snapshot.event_store_path(),
         encryption.clone(),
     )?);
     let tokens = Arc::new(TokenManager::load(
-        config.tokens_path(),
+        config_snapshot.tokens_path(),
         encryption.clone(),
     )?);
-    let schemas = Arc::new(SchemaManager::load(config.schema_store_path())?);
-    let retry_queue = Arc::new(PluginRetryQueue::new(config.plugin_queue_path()));
+    let schemas = Arc::new(SchemaManager::load(config_snapshot.schema_store_path())?);
+    let retry_queue = Arc::new(PluginRetryQueue::new(config_snapshot.plugin_queue_path()));
     let replication_service = ReplicationService::new(Arc::clone(&store), Arc::clone(&schemas));
-    let replication_manager = if config.remotes.is_empty() {
+    let replication_manager = if config_snapshot.remotes.is_empty() {
         None
     } else {
-        Some(ReplicationManager::from_config(&config))
+        Some(ReplicationManager::from_config(&config_snapshot))
     };
-    let replication_addr: SocketAddr = config.replication.bind_addr.parse().map_err(|err| {
-        EventError::Config(format!(
-            "invalid replication bind address {}: {}",
-            config.replication.bind_addr, err
-        ))
-    })?;
+    let replication_lock = Arc::new(RwLock::new(replication_manager.clone()));
+    let replication_addr: SocketAddr =
+        config_snapshot
+            .replication
+            .bind_addr
+            .parse()
+            .map_err(|err| {
+                EventError::Config(format!(
+                    "invalid replication bind address {}: {}",
+                    config_snapshot.replication.bind_addr, err
+                ))
+            })?;
 
     match TcpListener::bind(replication_addr).await {
         Ok(listener) => {
             let service = ReplicationServer::new(replication_service.clone());
             info!(
                 "Replication service listening on {}",
-                config.replication.bind_addr
+                config_snapshot.replication.bind_addr
             );
             tokio::spawn(async move {
                 let incoming = TcpListenerStream::new(listener);
@@ -350,17 +398,18 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         Err(err) => {
             warn!(
                 "replication listener disabled ({}): {}",
-                config.replication.bind_addr, err
+                config_snapshot.replication.bind_addr, err
             );
         }
     }
-    let hidden_aggregates: HashSet<String> = config
+
+    let hidden_aggregates: HashSet<String> = config_snapshot
         .hidden_aggregate_types
         .iter()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .collect();
-    let hidden_fields: HashMap<String, HashSet<String>> = config
+    let hidden_fields: HashMap<String, HashSet<String>> = config_snapshot
         .hidden_fields
         .iter()
         .map(|(aggregate, fields)| {
@@ -374,19 +423,22 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         .filter(|(_, fields)| !fields.is_empty())
         .collect();
 
-    let cache = AggregateCache::new(config.cache_threshold).map(Arc::new);
+    let cache = AggregateCache::new(config_snapshot.cache_threshold).map(Arc::new);
+    let plugin_manager = Arc::new(RwLock::new(plugins));
 
     let state = AppState {
         store: Arc::clone(&store),
-        tokens,
+        tokens: Arc::clone(&tokens),
         schemas: Arc::clone(&schemas),
-        restrict: config.restrict,
-        plugins: plugins.clone(),
-        list_page_size: config.list_page_size,
-        page_limit: config.page_limit,
+        config: Arc::clone(&shared_config),
+        config_path: Arc::clone(&config_path),
+        restrict: config_snapshot.restrict,
+        list_page_size: config_snapshot.list_page_size,
+        page_limit: config_snapshot.page_limit,
+        plugins: Arc::clone(&plugin_manager),
         retry_queue,
-        plugin_max_attempts: config.plugin_max_attempts,
-        replication: replication_manager.clone(),
+        plugin_max_attempts: config_snapshot.plugin_max_attempts,
+        replication: Arc::clone(&replication_lock),
         hidden_aggregates: Arc::new(hidden_aggregates),
         hidden_fields: Arc::new(hidden_fields),
         cache,
@@ -394,17 +446,17 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
 
     start_plugin_retry_worker(state.clone());
 
-    let api_mode = config.api_mode;
-    let grpc_enabled = config.grpc.enabled || api_mode.grpc_enabled();
-    let grpc_bind_addr = config.grpc.bind_addr.clone();
+    let api_mode = config_snapshot.api_mode;
+    let grpc_enabled = config_snapshot.grpc.enabled || api_mode.grpc_enabled();
+    let grpc_bind_addr = config_snapshot.grpc.bind_addr.clone();
+    let grpc_state = state.clone();
     let grpc_handle = if grpc_enabled {
         let grpc_addr: SocketAddr = grpc_bind_addr.parse().map_err(|err| {
             EventError::Config(format!(
                 "invalid gRPC bind address {}: {}",
-                config.grpc.bind_addr, err
+                config_snapshot.grpc.bind_addr, err
             ))
         })?;
-        let grpc_state = state.clone();
         Some(tokio::spawn(async move {
             info!("Starting gRPC API server on {}", grpc_addr);
             if let Err(err) = tonic::transport::Server::builder()
@@ -462,12 +514,54 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         app = app.merge(graphql_router);
     }
 
+    let admin_config = config_snapshot.admin.clone();
+    if admin_config.enabled && !config_snapshot.admin_master_key_configured() {
+        return Err(EventError::Config(
+            "admin API requires a configured master key (`eventdbx config --admin-master-key`)"
+                .to_string(),
+        ));
+    }
+
+    let mut admin_handle = None;
+    if admin_config.enabled {
+        let admin_router = admin::build_router(state.clone(), admin_config.clone());
+        if let Some(port) = admin_config.port {
+            let bind_addr = format!("{}:{}", admin_config.bind_addr, port);
+            let admin_addr: SocketAddr = bind_addr.parse().map_err(|err| {
+                EventError::Config(format!(
+                    "invalid admin bind address {}:{} - {}",
+                    admin_config.bind_addr, port, err
+                ))
+            })?;
+            let listener = TcpListener::bind(admin_addr).await.map_err(|err| {
+                EventError::Config(format!(
+                    "failed to bind admin API listener on {}: {}",
+                    admin_addr, err
+                ))
+            })?;
+            info!("Starting admin API server on {}", admin_addr);
+            let admin_app = admin_router.clone().layer(TraceLayer::new_for_http());
+            admin_handle = Some(tokio::spawn(async move {
+                if let Err(err) = axum::serve(listener, admin_app)
+                    .with_graceful_shutdown(shutdown_signal())
+                    .await
+                {
+                    warn!("admin API server failed: {}", err);
+                } else {
+                    info!("admin API server stopped");
+                }
+            }));
+        } else {
+            app = app.merge(admin_router);
+        }
+    }
+
     let app = app.layer(TraceLayer::new_for_http());
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], config_snapshot.port));
     info!(
         "Starting EventDBX server on {addr} (restrict={})",
-        config.restrict
+        config_snapshot.restrict
     );
 
     let listener = TcpListener::bind(addr).await?;
@@ -476,6 +570,9 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
         .await;
 
     if let Some(handle) = grpc_handle {
+        handle.abort();
+    }
+    if let Some(handle) = admin_handle {
         handle.abort();
     }
 
@@ -649,7 +746,7 @@ pub(crate) fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 pub(crate) fn replicate_events(state: &AppState, records: &[EventRecord]) {
-    if let Some(manager) = &state.replication {
+    if let Some(manager) = state.replication_manager() {
         manager.enqueue(records);
     }
 }
@@ -709,7 +806,7 @@ async fn dispatch_plugin_notification(state: &AppState, record: &EventRecord) ->
         .store
         .get_aggregate_state(&record.aggregate_type, &record.aggregate_id)?;
     let schema = state.schemas.get(&record.aggregate_type).ok();
-    let plugins = state.plugins.clone();
+    let plugins = state.plugin_manager();
     let record_clone = record.clone();
 
     tokio::task::spawn_blocking(move || {
@@ -723,7 +820,7 @@ async fn dispatch_plugin_notification(state: &AppState, record: &EventRecord) ->
 }
 
 pub(crate) fn notify_plugins(state: &AppState, record: &EventRecord) {
-    if state.plugins.is_empty() {
+    if !state.has_enabled_plugins() {
         return;
     }
 
