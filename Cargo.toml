@@ -15,6 +15,12 @@ keywords = [
 categories = ["database"]
 authors = ["Patrick Thach <thachp@gmail.com>"]
 
+[package.metadata.wix]
+upgrade-guid = "C3705B3F-CA2E-4B74-AB5A-66924BD9CFD6"
+path-guid = "3E98D6DA-6766-4596-BB7F-06EF47DFA5EA"
+license = false
+eula = false
+
 [lib]
 path = "src/lib/mod.rs"
 
@@ -74,3 +80,8 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
