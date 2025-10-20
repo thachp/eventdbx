@@ -22,8 +22,6 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
    powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.9.14/eventdbx-installer.ps1 | iex"
    ```
 
-   This pulls the latest published release from crates.io and makes the `eventdbx` binary available in your cargo bin directory. If you prefer to build from source, clone the repository and run `cargo build --release` instead.
-
 2. **Create the initial configuration**
    Supply a 32-byte data-encryption key (DEK) encoded as Base64. You can generate one on macOS/Linux with `openssl rand -base64 32`.
 
