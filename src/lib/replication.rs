@@ -2,12 +2,13 @@ pub mod proto {
     tonic::include_proto!("eventdbx.replication");
 }
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use proto::{
-    AggregatePosition, EventBatch, EventRecord as ProtoEventRecord, HeartbeatRequest,
-    HeartbeatResponse, ListPositionsRequest, ListPositionsResponse, PullEventsRequest,
-    PullEventsResponse, ReplicationAck, SnapshotChunk, SnapshotRequest,
+    AggregatePosition, ApplySchemasRequest, ApplySchemasResponse, EventBatch,
+    EventRecord as ProtoEventRecord, HeartbeatRequest, HeartbeatResponse, ListPositionsRequest,
+    ListPositionsResponse, PullEventsRequest, PullEventsResponse, PullSchemasRequest,
+    PullSchemasResponse, ReplicationAck, SnapshotChunk, SnapshotRequest,
     replication_client::ReplicationClient, replication_server::Replication,
 };
 use tokio::{sync::mpsc, time::sleep};
@@ -18,6 +19,7 @@ use tracing::{error, info, warn};
 use crate::{
     config::{Config, RemoteConfig},
     error::{EventError, Result},
+    schema::SchemaManager,
     store::{EventMetadata, EventRecord, EventStore},
 };
 
@@ -30,13 +32,15 @@ pub struct ReplicationState {
 pub struct ReplicationService {
     state: ReplicationState,
     store: Arc<EventStore>,
+    schemas: Arc<SchemaManager>,
 }
 
 impl ReplicationService {
-    pub fn new(store: Arc<EventStore>) -> Self {
+    pub fn new(store: Arc<EventStore>, schemas: Arc<SchemaManager>) -> Self {
         Self {
             state: ReplicationState::default(),
             store,
+            schemas,
         }
     }
 
@@ -149,6 +153,39 @@ impl Replication for ReplicationService {
         Ok(Response::new(PullEventsResponse {
             events: proto_events,
         }))
+    }
+
+    async fn pull_schemas(
+        &self,
+        _request: Request<PullSchemasRequest>,
+    ) -> std::result::Result<Response<PullSchemasResponse>, Status> {
+        let snapshot = self.schemas.snapshot();
+        let payload =
+            serde_json::to_vec(&snapshot).map_err(|err| Status::internal(err.to_string()))?;
+        Ok(Response::new(PullSchemasResponse {
+            schemas_json: payload,
+        }))
+    }
+
+    async fn apply_schemas(
+        &self,
+        request: Request<ApplySchemasRequest>,
+    ) -> std::result::Result<Response<ApplySchemasResponse>, Status> {
+        let payload = request.into_inner();
+        let map: BTreeMap<String, crate::schema::AggregateSchema> =
+            if payload.schemas_json.is_empty() {
+                BTreeMap::new()
+            } else {
+                serde_json::from_slice(&payload.schemas_json)
+                    .map_err(|err| Status::internal(err.to_string()))?
+            };
+
+        let aggregate_count = map.len() as u32;
+        self.schemas
+            .replace_all(map)
+            .map_err(|err| Status::internal(err.to_string()))?;
+
+        Ok(Response::new(ApplySchemasResponse { aggregate_count }))
     }
 }
 

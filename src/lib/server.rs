@@ -286,7 +286,7 @@ pub async fn run(config: Config, plugins: PluginManager) -> Result<()> {
     )?);
     let schemas = Arc::new(SchemaManager::load(config.schema_store_path())?);
     let retry_queue = Arc::new(PluginRetryQueue::new(config.plugin_queue_path()));
-    let replication_service = ReplicationService::new(Arc::clone(&store));
+    let replication_service = ReplicationService::new(Arc::clone(&store), Arc::clone(&schemas));
     let replication_manager = if config.remotes.is_empty() {
         None
     } else {
