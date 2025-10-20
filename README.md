@@ -10,27 +10,28 @@ EventDBX is an event-sourced, key-value, write-side database system designed to 
 
 Follow the steps below to spin up EventDBX locally. The commands assume you installed the CLI globally; if you're contributing to the project, clone the repository and run them from the repo root instead.
 
-1. **Install prerequisites**
-
-   - Rust toolchain (edition 2024) via [`rustup`](https://rustup.rs/)
-   - `rocksdb` is vendored through the Rust crate, so no extra native packages are required.
-
-2. **Install the CLI**
+1. **Install the CLI**
 
    ```bash
-   cargo install eventdbx
+   # Install prebuilt binaries via shell script
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.9.14/eventdbx-installer.sh | sh
+   ```
+
+   ```bash
+   # Install prebuilt binaries via powershell script
+   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.9.14/eventdbx-installer.ps1 | iex"
    ```
 
    This pulls the latest published release from crates.io and makes the `eventdbx` binary available in your cargo bin directory. If you prefer to build from source, clone the repository and run `cargo build --release` instead.
 
-3. **Create the initial configuration**
+2. **Create the initial configuration**
    Supply a 32-byte data-encryption key (DEK) encoded as Base64. You can generate one on macOS/Linux with `openssl rand -base64 32`.
 
    ```bash
    eventdbx config --dek "$(openssl rand -base64 32)"
    ```
 
-4. **Start the server**
+3. **Start the server**
 
    ```bash
    eventdbx start --foreground
@@ -42,7 +43,7 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 
 - Choose the API surface with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). `--api grpc`/`--api all` automatically flip the gRPC listener on for the current session; persistently enable it by setting `grpc.enabled = true` in `config.toml`.
 
-5. **Define a schema (recommended when running in restricted mode)**
+4. **Define a schema (recommended when running in restricted mode)**
 
    ```bash
    eventdbx schema create \
@@ -53,7 +54,7 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 
    Omit `--snapshot-threshold` to inherit the default configured in `config.toml` (if any).
 
-6. **Issue a token for CLI access**
+5. **Issue a token for CLI access**
 
    ```bash
    eventdbx token generate \
@@ -62,12 +63,9 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
      --expiration 3600
    ```
 
-7. **Append an event**
+6. **Append an event**
    ```bash
-   eventdbx aggregate apply \
-     --aggregate patient \
-     --aggregate-id p-001 \
-     --event patient-added \
+   eventdbx aggregate apply person p-001 patient-added
      --field name="Jane Doe" \
      --field status=active
    ```
