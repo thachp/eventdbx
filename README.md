@@ -57,17 +57,14 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 5. **Issue a token for CLI access**
 
    ```bash
-   eventdbx token generate \
-     --group admin \
-     --user jane \
-     --expiration 3600
+   eventdbx token generate --group admin --user jane --expiration 3600
    ```
 
 6. **Append an event**
    ```bash
-   eventdbx aggregate apply person p-001 patient-added
-     --field name="Jane Doe" \
-     --field status=active
+   eventdbx aggregate apply person p-002 patient-added \
+   --field name="Jane Doe" \
+   --field status=active
    ```
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
