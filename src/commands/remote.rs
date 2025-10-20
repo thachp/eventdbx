@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
 };
@@ -18,12 +18,14 @@ use eventdbx::{
         convert_event, decode_event, normalize_endpoint,
         proto::{
             AggregatePosition, EventBatch, ListPositionsRequest, PullEventsRequest,
-            replication_client::ReplicationClient,
+            PullSchemasRequest, replication_client::ReplicationClient,
         },
     },
+    schema::{AggregateSchema, SchemaManager},
     store::{AggregatePositionEntry, EventStore},
 };
-use tonic::{Request, transport::Channel};
+use serde_json;
+use tonic::{Code, Request, transport::Channel};
 
 #[derive(Subcommand)]
 pub enum RemoteCommands {
@@ -112,6 +114,9 @@ pub struct RemotePullArgs {
     /// Limit the pull to specific aggregate identifiers (TYPE:ID)
     #[arg(long = "aggregate-id", value_name = "TYPE:ID")]
     pub aggregate_ids: Vec<String>,
+    /// Synchronize schemas from the remote
+    #[arg(long, default_value_t = false)]
+    pub schema: bool,
 }
 
 pub async fn execute(config_path: Option<PathBuf>, command: RemoteCommands) -> Result<()> {
@@ -255,12 +260,21 @@ async fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Resu
 }
 
 async fn pull_remote(config_path: Option<PathBuf>, args: RemotePullArgs) -> Result<()> {
+    let RemotePullArgs {
+        name,
+        dry_run,
+        batch_size,
+        aggregates,
+        aggregate_ids,
+        schema,
+    } = args;
+
     let (config, _) = load_or_default(config_path)?;
     let remote = config
         .remotes
-        .get(&args.name)
+        .get(&name)
         .cloned()
-        .ok_or_else(|| anyhow!("no remote named '{}' is configured", args.name))?;
+        .ok_or_else(|| anyhow!("no remote named '{}' is configured", name))?;
 
     let store = Arc::new(EventStore::open(
         config.event_store_path(),
@@ -268,18 +282,30 @@ async fn pull_remote(config_path: Option<PathBuf>, args: RemotePullArgs) -> Resu
     )?);
     let local_positions = store.aggregate_positions()?;
 
-    let filter = normalize_filter(&args.aggregates, &args.aggregate_ids)?;
+    let filter = normalize_filter(&aggregates, &aggregate_ids)?;
+    let schema_manager = if schema {
+        Some(Arc::new(SchemaManager::load(config.schema_store_path())?))
+    } else {
+        None
+    };
 
+    let remote_for_schema = remote.clone();
     pull_remote_impl(
         store,
         local_positions,
         remote,
-        args.name,
-        args.dry_run,
-        args.batch_size.max(1),
+        name.clone(),
+        dry_run,
+        batch_size.max(1),
         filter,
     )
-    .await
+    .await?;
+
+    if let Some(manager) = schema_manager {
+        pull_remote_schemas(manager, remote_for_schema, &name, dry_run).await?;
+    }
+
+    Ok(())
 }
 
 fn normalize_public_key(raw: &str) -> Result<String> {
@@ -515,6 +541,68 @@ async fn pull_remote_impl(
     Ok(())
 }
 
+async fn pull_remote_schemas(
+    manager: Arc<SchemaManager>,
+    remote: RemoteConfig,
+    remote_name: &str,
+    dry_run: bool,
+) -> Result<()> {
+    let mut client = connect_client(&remote).await?;
+    let response = match client
+        .pull_schemas(Request::new(PullSchemasRequest {}))
+        .await
+    {
+        Ok(resp) => resp.into_inner(),
+        Err(status) => {
+            if status.code() == Code::Unimplemented {
+                bail!(
+                    "remote '{}' does not support schema replication; upgrade the remote and retry",
+                    remote_name
+                );
+            }
+            return Err(anyhow!(
+                "remote {} pull_schemas failed: {}",
+                remote_name,
+                status
+            ));
+        }
+    };
+
+    let remote_map: BTreeMap<String, AggregateSchema> = if response.schemas_json.is_empty() {
+        BTreeMap::new()
+    } else {
+        serde_json::from_slice(&response.schemas_json).map_err(|err| {
+            anyhow!(
+                "remote {} returned invalid schema payload: {}",
+                remote_name,
+                err
+            )
+        })?
+    };
+
+    let local_map = manager.snapshot();
+    let changes = diff_schemas(&local_map, &remote_map);
+    if changes.is_empty() {
+        println!("Schema store already matches remote '{}'", remote_name);
+        return Ok(());
+    }
+
+    if dry_run {
+        print_schema_changes(
+            &format!("Schema pull from '{}' (dry run)", remote_name),
+            &changes,
+        );
+        return Ok(());
+    }
+
+    manager.replace_all(remote_map)?;
+    print_schema_changes(
+        &format!("Pulled schema changes from '{}'", remote_name),
+        &changes,
+    );
+    Ok(())
+}
+
 async fn connect_client(remote: &RemoteConfig) -> Result<ReplicationClient<Channel>> {
     let endpoint = normalize_endpoint(&remote.endpoint)
         .map_err(|err| anyhow!("invalid endpoint {}: {}", remote.endpoint, err))?;
@@ -680,6 +768,204 @@ fn summarize_plans(plans: &[SyncPlan]) -> BTreeMap<String, u64> {
     map
 }
 
+#[derive(Debug)]
+enum SchemaChange {
+    Added {
+        aggregate: String,
+        event_count: usize,
+    },
+    Removed {
+        aggregate: String,
+        event_count: usize,
+    },
+    Updated {
+        aggregate: String,
+        diff: AggregateDiff,
+    },
+}
+
+#[derive(Debug, Default)]
+struct AggregateDiff {
+    snapshot_threshold: Option<(Option<u64>, Option<u64>)>,
+    locked: Option<(bool, bool)>,
+    field_lock_added: Vec<String>,
+    field_lock_removed: Vec<String>,
+    events_added: Vec<String>,
+    events_removed: Vec<String>,
+    event_field_diffs: Vec<EventFieldDiff>,
+}
+
+impl AggregateDiff {
+    fn is_empty(&self) -> bool {
+        self.snapshot_threshold.is_none()
+            && self.locked.is_none()
+            && self.field_lock_added.is_empty()
+            && self.field_lock_removed.is_empty()
+            && self.events_added.is_empty()
+            && self.events_removed.is_empty()
+            && self.event_field_diffs.is_empty()
+    }
+}
+
+#[derive(Debug)]
+struct EventFieldDiff {
+    event: String,
+    added: Vec<String>,
+    removed: Vec<String>,
+}
+
+fn diff_schemas(
+    local: &BTreeMap<String, AggregateSchema>,
+    remote: &BTreeMap<String, AggregateSchema>,
+) -> Vec<SchemaChange> {
+    let mut changes = Vec::new();
+
+    for (aggregate, remote_schema) in remote {
+        match local.get(aggregate) {
+            None => changes.push(SchemaChange::Added {
+                aggregate: aggregate.clone(),
+                event_count: remote_schema.events.len(),
+            }),
+            Some(local_schema) => {
+                if let Some(diff) = diff_aggregate(local_schema, remote_schema) {
+                    changes.push(SchemaChange::Updated {
+                        aggregate: aggregate.clone(),
+                        diff,
+                    });
+                }
+            }
+        }
+    }
+
+    for (aggregate, local_schema) in local {
+        if !remote.contains_key(aggregate) {
+            changes.push(SchemaChange::Removed {
+                aggregate: aggregate.clone(),
+                event_count: local_schema.events.len(),
+            });
+        }
+    }
+
+    changes
+}
+
+fn diff_aggregate(local: &AggregateSchema, remote: &AggregateSchema) -> Option<AggregateDiff> {
+    let mut diff = AggregateDiff::default();
+
+    if local.snapshot_threshold != remote.snapshot_threshold {
+        diff.snapshot_threshold = Some((local.snapshot_threshold, remote.snapshot_threshold));
+    }
+    if local.locked != remote.locked {
+        diff.locked = Some((local.locked, remote.locked));
+    }
+
+    let local_field_locks: BTreeSet<String> = local.field_locks.iter().cloned().collect();
+    let remote_field_locks: BTreeSet<String> = remote.field_locks.iter().cloned().collect();
+    diff.field_lock_added = set_difference(&remote_field_locks, &local_field_locks);
+    diff.field_lock_removed = set_difference(&local_field_locks, &remote_field_locks);
+
+    let local_events: BTreeSet<String> = local.events.keys().cloned().collect();
+    let remote_events: BTreeSet<String> = remote.events.keys().cloned().collect();
+    diff.events_added = set_difference(&remote_events, &local_events);
+    diff.events_removed = set_difference(&local_events, &remote_events);
+
+    for event in remote.events.keys() {
+        if let Some(local_event) = local.events.get(event) {
+            let local_fields: BTreeSet<String> = local_event.fields.iter().cloned().collect();
+            let remote_event = remote
+                .events
+                .get(event)
+                .expect("checked membership via keys iterator");
+            let remote_fields: BTreeSet<String> = remote_event.fields.iter().cloned().collect();
+
+            let added = set_difference(&remote_fields, &local_fields);
+            let removed = set_difference(&local_fields, &remote_fields);
+            if !added.is_empty() || !removed.is_empty() {
+                diff.event_field_diffs.push(EventFieldDiff {
+                    event: event.clone(),
+                    added,
+                    removed,
+                });
+            }
+        }
+    }
+
+    if diff.is_empty() { None } else { Some(diff) }
+}
+
+fn set_difference(source: &BTreeSet<String>, other: &BTreeSet<String>) -> Vec<String> {
+    source.difference(other).cloned().collect::<Vec<_>>()
+}
+
+fn print_schema_changes(header: &str, changes: &[SchemaChange]) {
+    println!("{}", header);
+    if changes.is_empty() {
+        println!("  no schema changes detected");
+        return;
+    }
+
+    println!("  {} aggregate change(s)", changes.len());
+    for change in changes {
+        match change {
+            SchemaChange::Added {
+                aggregate,
+                event_count,
+            } => {
+                println!("    + {} ({} event(s))", aggregate, event_count);
+            }
+            SchemaChange::Removed {
+                aggregate,
+                event_count,
+            } => {
+                println!("    - {} ({} event(s))", aggregate, event_count);
+            }
+            SchemaChange::Updated { aggregate, diff } => {
+                println!("    ~ {}", aggregate);
+                if let Some((from, to)) = diff.snapshot_threshold {
+                    println!("      snapshot_threshold: {:?} -> {:?}", from, to);
+                }
+                if let Some((from, to)) = diff.locked {
+                    println!("      locked: {} -> {}", from, to);
+                }
+                if !diff.field_lock_added.is_empty() {
+                    println!(
+                        "      field locks added: {}",
+                        diff.field_lock_added.join(", ")
+                    );
+                }
+                if !diff.field_lock_removed.is_empty() {
+                    println!(
+                        "      field locks removed: {}",
+                        diff.field_lock_removed.join(", ")
+                    );
+                }
+                for event in &diff.events_added {
+                    println!("      + event {}", event);
+                }
+                for event in &diff.events_removed {
+                    println!("      - event {}", event);
+                }
+                for field_diff in &diff.event_field_diffs {
+                    if !field_diff.added.is_empty() {
+                        println!(
+                            "      event {} fields added: {}",
+                            field_diff.event,
+                            field_diff.added.join(", ")
+                        );
+                    }
+                    if !field_diff.removed.is_empty() {
+                        println!(
+                            "      event {} fields removed: {}",
+                            field_diff.event,
+                            field_diff.removed.join(", ")
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn print_summary(header: &str, stats: &BTreeMap<String, u64>) {
     let total_events: u64 = stats.values().copied().sum();
     let aggregate_count = stats.len();
@@ -693,6 +979,126 @@ fn print_summary(header: &str, stats: &BTreeMap<String, u64>) {
         );
         for (aggregate_type, count) in stats {
             println!("    {}: {} event(s)", aggregate_type, count);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use eventdbx::schema::EventSchema;
+
+    fn make_schema(
+        aggregate: &str,
+        snapshot_threshold: Option<u64>,
+        locked: bool,
+        field_locks: &[&str],
+        events: &[(&str, &[&str])],
+    ) -> AggregateSchema {
+        let mut schema = AggregateSchema {
+            aggregate: aggregate.to_string(),
+            snapshot_threshold,
+            locked,
+            field_locks: field_locks.iter().map(|value| value.to_string()).collect(),
+            events: events
+                .iter()
+                .map(|(event, fields)| {
+                    (
+                        event.to_string(),
+                        EventSchema {
+                            fields: fields.iter().map(|value| value.to_string()).collect(),
+                        },
+                    )
+                })
+                .collect(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        schema.field_locks.sort();
+        schema.field_locks.dedup();
+        for event_schema in schema.events.values_mut() {
+            event_schema.fields.sort();
+            event_schema.fields.dedup();
+        }
+
+        schema
+    }
+
+    #[test]
+    fn diff_detects_added_schema() {
+        let local = BTreeMap::new();
+        let mut remote = BTreeMap::new();
+        remote.insert(
+            "patient".into(),
+            make_schema(
+                "patient",
+                Some(10),
+                false,
+                &[],
+                &[("patient-created", &["id"])],
+            ),
+        );
+
+        let changes = diff_schemas(&local, &remote);
+        assert_eq!(changes.len(), 1);
+        match &changes[0] {
+            SchemaChange::Added {
+                aggregate,
+                event_count,
+            } => {
+                assert_eq!(aggregate, "patient");
+                assert_eq!(*event_count, 1);
+            }
+            other => panic!("expected Added change, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn diff_detects_field_updates() {
+        let mut local = BTreeMap::new();
+        local.insert(
+            "order".into(),
+            make_schema(
+                "order",
+                Some(5),
+                false,
+                &["region"],
+                &[("order-created", &["id"])],
+            ),
+        );
+
+        let mut remote = BTreeMap::new();
+        remote.insert(
+            "order".into(),
+            make_schema(
+                "order",
+                Some(12),
+                true,
+                &["region", "status"],
+                &[("order-created", &["id", "status"])],
+            ),
+        );
+
+        let changes = diff_schemas(&local, &remote);
+        assert_eq!(changes.len(), 1);
+        match &changes[0] {
+            SchemaChange::Updated { aggregate, diff } => {
+                assert_eq!(aggregate, "order");
+                assert!(diff.snapshot_threshold.is_some());
+                assert!(diff.locked.is_some());
+                assert_eq!(diff.field_lock_added, vec!["status".to_string()]);
+                assert!(diff.field_lock_removed.is_empty());
+                assert!(diff.events_added.is_empty());
+                assert!(diff.events_removed.is_empty());
+                assert_eq!(diff.event_field_diffs.len(), 1);
+                let field_diff = &diff.event_field_diffs[0];
+                assert_eq!(field_diff.event, "order-created");
+                assert_eq!(field_diff.added, vec!["status".to_string()]);
+                assert!(field_diff.removed.is_empty());
+            }
+            other => panic!("expected Updated change, got {:?}", other),
         }
     }
 }

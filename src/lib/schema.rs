@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{EventError, Result};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventSchema {
     pub fields: Vec<String>,
 }
@@ -18,7 +18,7 @@ impl EventSchema {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AggregateSchema {
     pub aggregate: String,
     pub snapshot_threshold: Option<u64>,
@@ -201,6 +201,24 @@ impl SchemaManager {
             .get(aggregate)
             .cloned()
             .ok_or(EventError::SchemaNotFound)
+    }
+
+    pub fn snapshot(&self) -> BTreeMap<String, AggregateSchema> {
+        self.items.read().clone()
+    }
+
+    pub fn replace_all(&self, mut items: BTreeMap<String, AggregateSchema>) -> Result<()> {
+        for schema in items.values_mut() {
+            schema.ensure_sorted();
+        }
+
+        {
+            let mut guard = self.items.write();
+            *guard = items.clone();
+        }
+
+        self.persist(&items)?;
+        Ok(())
     }
 
     pub fn validate_event(

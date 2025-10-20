@@ -62,10 +62,17 @@ message PullEventsResponse {
   repeated EventRecord events = 1;
 }
 
+message PullSchemasRequest {}
+
+message PullSchemasResponse {
+  bytes schemas_json = 1;
+}
+
 service Replication {
   rpc BootstrapSnapshot(SnapshotRequest) returns (stream SnapshotChunk);
   rpc ApplyEvents(stream EventBatch) returns (ReplicationAck);
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
   rpc ListPositions(ListPositionsRequest) returns (ListPositionsResponse);
   rpc PullEvents(PullEventsRequest) returns (PullEventsResponse);
+  rpc PullSchemas(PullSchemasRequest) returns (PullSchemasResponse);
 }
