@@ -14,12 +14,12 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 
    ```bash
    # Install prebuilt binaries via shell script
-   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.9.15/eventdbx-installer.sh | sh
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.9.17/eventdbx-installer.sh | sh
    ```
 
    ```bash
    # Install prebuilt binaries via powershell script
-   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.9.15/eventdbx-installer.ps1 | iex"
+   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.9.17/eventdbx-installer.ps1 | iex"
    ```
 
 2. **Start the server**
