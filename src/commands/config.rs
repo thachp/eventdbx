@@ -13,7 +13,7 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
 
-    #[arg(long = "cache-threshold", alias = "memory-threshold")]
+    #[arg(long = "cache-threshold")]
     pub cache_threshold: Option<usize>,
 
     #[arg(long, alias = "dek")]
@@ -22,7 +22,7 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub list_page_size: Option<usize>,
 
-    #[arg(long = "page-limit", alias = "event-page-limit")]
+    #[arg(long = "page-limit")]
     pub page_limit: Option<usize>,
 
     #[arg(long = "plugin-max-attempts")]

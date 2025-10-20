@@ -29,7 +29,7 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
    ```
 
    - Omit `--foreground` to daemonise the process.
-   - Use `--data-dir <path>` to override the default `./.eventdbx` directory.
+   - Use `--data-dir <path>` to override the default `$HOME/.eventdbx` directory.
    - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
 
 - Choose the API surface with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). `--api grpc`/`--api all` automatically flip the gRPC listener on for the current session; persistently enable it by setting `grpc.enabled = true` in `config.toml`.
@@ -98,7 +98,7 @@ EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--
 ### Configuration
 
 - `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>]`  
-  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000, alias `--event-page-limit`), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10).
+  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10).
 
 ### Tokens
 
