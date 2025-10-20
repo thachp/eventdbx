@@ -31,6 +31,7 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
    - Omit `--foreground` to daemonise the process.
    - Use `--data-dir <path>` to override the default `$HOME/.eventdbx` directory.
    - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
+   - The server owns the RocksDB lock while it is running; the CLI detects this and automatically proxies write commands through the HTTP API. Stop the daemon only when you need offline tasks like staging or manual maintenance.
 
 - Choose the API surface with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). `--api grpc`/`--api all` automatically flip the gRPC listener on for the current session; persistently enable it by setting `grpc.enabled = true` in `config.toml`.
 
@@ -52,11 +53,29 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
    ```
 
 5. **Append an event**
-   ```bash
-   eventdbx aggregate apply person p-002 patient-added \
-   --field name="Jane Doe" \
-   --field status=active
-   ```
+   - When the server is running the CLI proxies writes through the REST API automatically. Pass a token with `--token` or set `EVENTDBX_TOKEN` to reuse your own credentials; otherwise the CLI mints a short-lived token for the call.
+     ```bash
+     eventdbx aggregate apply person p-002 patient-added \
+       --field name="Jane Doe" \
+       --field status=active
+     ```
+   - You can also call the REST endpoint directly:
+     ```bash
+     export EVENTDBX_TOKEN=<token from step 4>
+     curl -X POST http://127.0.0.1:7070/v1/events \
+       -H "Authorization: Bearer ${EVENTDBX_TOKEN}" \
+       -H "Content-Type: application/json" \
+       -d '{
+         "aggregate_type": "person",
+         "aggregate_id": "p-002",
+         "event_type": "patient-added",
+         "payload": {
+           "name": "Jane Doe",
+           "status": "active"
+         }
+       }'
+     ```
+   - If the server is stopped, the same CLI command writes to the local RocksDB store directly.
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
 
@@ -98,7 +117,7 @@ EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--
 ### Configuration
 
 - `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>]`  
-  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10).
+  Persists configuration updates. Run without flags to print the current settings. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10).
 
 ### Tokens
 
@@ -122,7 +141,7 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 
 ### Aggregates
 
-- `eventdbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--stage]`  
+- `eventdbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--stage] [--token <value>]`  
   Appends an event immediately—use `--stage` to queue it for a later commit.
 - `eventdbx aggregate list [--skip <n>] [--take <n>] [--stage]`  
   Lists aggregates with version, Merkle root, and archive status; pass `--stage` to display queued events instead.

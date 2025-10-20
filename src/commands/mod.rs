@@ -1,4 +1,5 @@
 pub mod aggregate;
+pub mod client;
 pub mod config;
 pub mod plugin;
 pub mod remote;
