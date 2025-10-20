@@ -17,8 +17,8 @@ use eventdbx::{
     replication::{
         convert_event, decode_event, normalize_endpoint,
         proto::{
-            AggregatePosition, EventBatch, ListPositionsRequest, PullEventsRequest,
-            PullSchemasRequest, replication_client::ReplicationClient,
+            AggregatePosition, ApplySchemasRequest, EventBatch, ListPositionsRequest,
+            PullEventsRequest, PullSchemasRequest, replication_client::ReplicationClient,
         },
     },
     schema::{AggregateSchema, SchemaManager},
@@ -96,6 +96,12 @@ pub struct RemotePushArgs {
     /// Limit the push to specific aggregate identifiers (TYPE:ID)
     #[arg(long = "aggregate-id", value_name = "TYPE:ID")]
     pub aggregate_ids: Vec<String>,
+    /// Synchronize schemas on the remote before pushing events
+    #[arg(long, default_value_t = false)]
+    pub schema: bool,
+    /// Synchronize only schemas, skipping event data
+    #[arg(long = "schema-only", default_value_t = false)]
+    pub schema_only: bool,
 }
 
 #[derive(Args)]
@@ -234,13 +240,31 @@ fn show_local_key(config_path: Option<PathBuf>, args: RemoteKeyArgs) -> Result<(
     Ok(())
 }
 
-async fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Result<()> {
+async fn push_remote(config_path: Option<PathBuf>, mut args: RemotePushArgs) -> Result<()> {
+    if args.schema_only {
+        args.schema = true;
+    }
+
+    if args.schema_only && (!args.aggregates.is_empty() || !args.aggregate_ids.is_empty()) {
+        bail!("--schema-only cannot be combined with aggregate filters");
+    }
+
     let (config, _) = load_or_default(config_path)?;
     let remote = config
         .remotes
         .get(&args.name)
         .cloned()
         .ok_or_else(|| anyhow!("no remote named '{}' is configured", args.name))?;
+
+    let remote_name = args.name.clone();
+
+    if args.schema {
+        let manager = Arc::new(SchemaManager::load(config.schema_store_path())?);
+        push_remote_schemas(manager, remote.clone(), &remote_name, args.dry_run).await?;
+        if args.schema_only {
+            return Ok(());
+        }
+    }
 
     let store = Arc::new(EventStore::open_read_only(
         config.event_store_path(),
@@ -254,7 +278,7 @@ async fn push_remote(config_path: Option<PathBuf>, args: RemotePushArgs) -> Resu
         store,
         local_positions,
         remote,
-        args.name,
+        remote_name,
         args.dry_run,
         args.batch_size.max(1),
         filter,
@@ -600,6 +624,93 @@ async fn pull_remote_schemas(
         &changes,
     );
     Ok(())
+}
+
+async fn push_remote_schemas(
+    manager: Arc<SchemaManager>,
+    remote: RemoteConfig,
+    remote_name: &str,
+    dry_run: bool,
+) -> Result<()> {
+    let mut client = connect_client(&remote).await?;
+    let remote_snapshot = match client
+        .pull_schemas(Request::new(PullSchemasRequest {}))
+        .await
+    {
+        Ok(resp) => resp.into_inner(),
+        Err(status) => {
+            if status.code() == Code::Unimplemented {
+                bail!(
+                    "remote '{}' does not support schema replication; upgrade the remote and retry",
+                    remote_name
+                );
+            }
+            return Err(anyhow!(
+                "remote {} pull_schemas failed: {}",
+                remote_name,
+                status
+            ));
+        }
+    };
+
+    let remote_map: BTreeMap<String, AggregateSchema> = if remote_snapshot.schemas_json.is_empty() {
+        BTreeMap::new()
+    } else {
+        serde_json::from_slice(&remote_snapshot.schemas_json).map_err(|err| {
+            anyhow!(
+                "remote {} returned invalid schema payload: {}",
+                remote_name,
+                err
+            )
+        })?
+    };
+
+    let local_map = manager.snapshot();
+    let changes = diff_schemas(&remote_map, &local_map);
+    if changes.is_empty() {
+        println!(
+            "Remote '{}' schema store already matches local",
+            remote_name
+        );
+        return Ok(());
+    }
+
+    if dry_run {
+        print_schema_changes(
+            &format!("Schema push to '{}' (dry run)", remote_name),
+            &changes,
+        );
+        return Ok(());
+    }
+
+    let payload = serde_json::to_vec(&local_map)?;
+    match client
+        .apply_schemas(Request::new(ApplySchemasRequest {
+            schemas_json: payload,
+        }))
+        .await
+    {
+        Ok(_) => {
+            print_schema_changes(
+                &format!("Pushed schema changes to '{}'", remote_name),
+                &changes,
+            );
+            Ok(())
+        }
+        Err(status) => {
+            if status.code() == Code::Unimplemented {
+                bail!(
+                    "remote '{}' does not accept schema updates; upgrade the remote and retry",
+                    remote_name
+                );
+            }
+            Err(anyhow!(
+                "remote {} apply_schemas failed: {}",
+                remote_name,
+                status
+            ))
+        }
+    }
 }
 
 async fn connect_client(remote: &RemoteConfig) -> Result<ReplicationClient<Channel>> {

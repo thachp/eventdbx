@@ -68,6 +68,14 @@ message PullSchemasResponse {
   bytes schemas_json = 1;
 }
 
+message ApplySchemasRequest {
+  bytes schemas_json = 1;
+}
+
+message ApplySchemasResponse {
+  uint32 aggregate_count = 1;
+}
+
 service Replication {
   rpc BootstrapSnapshot(SnapshotRequest) returns (stream SnapshotChunk);
   rpc ApplyEvents(stream EventBatch) returns (ReplicationAck);
@@ -75,4 +83,5 @@ service Replication {
   rpc ListPositions(ListPositionsRequest) returns (ListPositionsResponse);
   rpc PullEvents(PullEventsRequest) returns (PullEventsResponse);
   rpc PullSchemas(PullSchemasRequest) returns (PullSchemasResponse);
+  rpc ApplySchemas(ApplySchemasRequest) returns (ApplySchemasResponse);
 }

@@ -192,7 +192,7 @@ Clearing dead entries prompts for confirmation to avoid accidental removal. Manu
   Displays the endpoint and pinned key for a remote.
 - `eventdbx remote key [--show-path]`  
   Prints this node's replication public key (generated on first run).
-- `eventdbx remote push <name> [--dry-run] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
+- `eventdbx remote push <name> [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
   Streams local events to the remote in fast-forward mode; dry runs report pending changes.
 - `eventdbx remote pull <name> [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
   Fast-forwards the local node from the remote, reporting changes in dry-run mode.
