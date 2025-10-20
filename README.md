@@ -28,6 +28,12 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 
    ```bash
    eventdbx config --dek "$(openssl rand -base64 32)"
+
+   # optionally set a global snapshot cadence (used when schema create omits --snapshot-threshold)
+   eventdbx config --snapshot-threshold 100
+
+   # clear the default later with:
+   eventdbx config --clear-snapshot-threshold
    ```
 
 4. **Start the server**
@@ -50,6 +56,8 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
      --events patient-added,patient-updated \
      --snapshot-threshold 100
    ```
+
+   Omit `--snapshot-threshold` to inherit the default configured in `config.toml` (if any).
 
 6. **Issue a token for CLI access**
 

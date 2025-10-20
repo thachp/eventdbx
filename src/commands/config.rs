@@ -27,6 +27,15 @@ pub struct ConfigArgs {
 
     #[arg(long = "plugin-max-attempts")]
     pub plugin_max_attempts: Option<u32>,
+
+    #[arg(long = "snapshot-threshold")]
+    pub snapshot_threshold: Option<u64>,
+
+    #[arg(
+        long = "clear-snapshot-threshold",
+        conflicts_with = "snapshot_threshold"
+    )]
+    pub clear_snapshot_threshold: bool,
 }
 
 pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
@@ -41,14 +50,22 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         list_page_size,
         page_limit,
         plugin_max_attempts,
+        snapshot_threshold,
+        clear_snapshot_threshold,
     } = args;
 
     let data_encryption_key = normalize_secret(data_encryption_key);
+    let snapshot_threshold = if clear_snapshot_threshold {
+        Some(None)
+    } else {
+        snapshot_threshold.map(Some)
+    };
 
     config.apply_update(ConfigUpdate {
         port,
         data_dir,
         cache_threshold,
+        snapshot_threshold,
         data_encryption_key,
         restrict: None,
         list_page_size,

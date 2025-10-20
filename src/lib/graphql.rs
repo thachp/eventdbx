@@ -166,6 +166,7 @@ impl MutationRoot {
             issued_by: Some(claims),
         })?;
 
+        app.maybe_create_snapshot(&record);
         notify_plugins(app, &record);
         replicate_events(app, std::slice::from_ref(&record));
         app.refresh_cached_aggregate(&aggregate_type, &aggregate_id);

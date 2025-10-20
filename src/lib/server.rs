@@ -129,6 +129,34 @@ impl AppState {
             }
         }
     }
+
+    pub(crate) fn maybe_create_snapshot(&self, record: &EventRecord) {
+        if !self
+            .schemas
+            .should_snapshot(&record.aggregate_type, record.version)
+        {
+            return;
+        }
+
+        match self.store.create_snapshot(
+            &record.aggregate_type,
+            &record.aggregate_id,
+            Some(format!("auto snapshot v{}", record.version)),
+        ) {
+            Ok(snapshot) => info!(
+                aggregate_type = %snapshot.aggregate_type,
+                aggregate_id = %snapshot.aggregate_id,
+                version = snapshot.version,
+                "auto snapshot created"
+            ),
+            Err(err) => warn!(
+                aggregate_type = %record.aggregate_type,
+                aggregate_id = %record.aggregate_id,
+                version = record.version,
+                "auto snapshot failed: {err}"
+            ),
+        }
+    }
 }
 
 struct PluginRetryQueue {
@@ -589,6 +617,7 @@ async fn append_event_global(
         issued_by: Some(claims),
     })?;
 
+    state.maybe_create_snapshot(&record);
     notify_plugins(&state, &record);
     replicate_events(&state, std::slice::from_ref(&record));
     state.refresh_cached_aggregate(&aggregate_type, &aggregate_id);

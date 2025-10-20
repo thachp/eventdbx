@@ -76,7 +76,7 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
             let schema = manager.create(CreateSchemaInput {
                 aggregate: args.aggregate,
                 events: args.events,
-                snapshot_threshold: args.snapshot_threshold,
+                snapshot_threshold: args.snapshot_threshold.or(config.snapshot_threshold),
             })?;
             println!(
                 "schema={} events={} snapshot_threshold={:?}",
