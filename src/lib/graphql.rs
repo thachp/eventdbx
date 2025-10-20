@@ -54,13 +54,16 @@ impl QueryRoot {
         if take > app.page_limit {
             take = app.page_limit;
         }
-        let mut aggregates = app.store.aggregates();
-        aggregates.retain(|aggregate| !app.is_hidden_aggregate(&aggregate.aggregate_type));
+        let aggregates = app.store.aggregates();
         Ok(aggregates
             .into_iter()
+            .filter(|aggregate| !app.is_hidden_aggregate(&aggregate.aggregate_type))
             .skip(skip)
             .take(take)
-            .map(|aggregate| app.sanitize_aggregate(aggregate).into())
+            .map(|aggregate| {
+                app.cache_store(&aggregate);
+                app.sanitize_aggregate(aggregate).into()
+            })
             .collect())
     }
 
@@ -75,11 +78,8 @@ impl QueryRoot {
         if app.is_hidden_aggregate(&aggregate_type) {
             return Ok(None);
         }
-        match app
-            .store
-            .get_aggregate_state(&aggregate_type, &aggregate_id)
-        {
-            Ok(state) => Ok(Some(app.sanitize_aggregate(state).into())),
+        match app.load_aggregate(&aggregate_type, &aggregate_id) {
+            Ok(state) => Ok(Some(state.into())),
             Err(crate::error::EventError::AggregateNotFound) => Ok(None),
             Err(err) => Err(err.into()),
         }
@@ -156,6 +156,8 @@ impl MutationRoot {
                 .validate_event(&input.aggregate_type, &input.event_type, &payload_map)?;
         }
 
+        let aggregate_type = input.aggregate_type.clone();
+        let aggregate_id = input.aggregate_id.clone();
         let record = app.store.append(AppendEvent {
             aggregate_type: input.aggregate_type.clone(),
             aggregate_id: input.aggregate_id.clone(),
@@ -166,6 +168,7 @@ impl MutationRoot {
 
         notify_plugins(app, &record);
         replicate_events(app, std::slice::from_ref(&record));
+        app.refresh_cached_aggregate(&aggregate_type, &aggregate_id);
 
         Ok(record.into())
     }

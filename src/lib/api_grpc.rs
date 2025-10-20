@@ -154,6 +154,9 @@ impl EventService for GrpcApi {
             }
         }
 
+        let aggregate_type = payload.aggregate_type.clone();
+        let aggregate_id = payload.aggregate_id.clone();
+
         let record = self
             .state
             .store
@@ -168,6 +171,8 @@ impl EventService for GrpcApi {
 
         notify_plugins(&self.state, &record);
         replicate_events(&self.state, std::slice::from_ref(&record));
+        self.state
+            .refresh_cached_aggregate(&aggregate_type, &aggregate_id);
 
         let event = Self::convert_event(record)?;
         Ok(Response::new(AppendEventResponse { event: Some(event) }))
@@ -193,13 +198,16 @@ impl EventService for GrpcApi {
             take = self.state.page_limit;
         }
 
-        let mut aggregates = self.state.store.aggregates();
-        aggregates.retain(|aggregate| !self.state.is_hidden_aggregate(&aggregate.aggregate_type));
+        let aggregates = self.state.store.aggregates();
         let page = aggregates
             .into_iter()
+            .filter(|aggregate| !self.state.is_hidden_aggregate(&aggregate.aggregate_type))
             .skip(skip)
             .take(take)
-            .map(|aggregate| self.sanitize_aggregate(aggregate))
+            .map(|aggregate| {
+                self.state.cache_store(&aggregate);
+                self.sanitize_aggregate(aggregate)
+            })
             .collect();
 
         Ok(Response::new(ListAggregatesResponse { aggregates: page }))
@@ -213,12 +221,16 @@ impl EventService for GrpcApi {
         if self.state.is_hidden_aggregate(&params.aggregate_type) {
             return Err(Status::not_found("aggregate not found"));
         }
-
-        let aggregate = self
+        let aggregate = match self
             .state
-            .store
-            .get_aggregate_state(&params.aggregate_type, &params.aggregate_id)
-            .map_err(Self::map_error)?;
+            .load_aggregate(&params.aggregate_type, &params.aggregate_id)
+        {
+            Ok(aggregate) => aggregate,
+            Err(EventError::AggregateNotFound) => {
+                return Err(Status::not_found("aggregate not found"));
+            }
+            Err(err) => return Err(Self::map_error(err)),
+        };
         let aggregate = self.sanitize_aggregate(aggregate);
 
         Ok(Response::new(GetAggregateResponse {

@@ -19,7 +19,7 @@ use super::{
 };
 
 pub const DEFAULT_PORT: u16 = 7070;
-pub const DEFAULT_MEMORY_THRESHOLD: usize = 10_000;
+pub const DEFAULT_CACHE_THRESHOLD: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -48,7 +48,8 @@ impl ApiMode {
 pub struct Config {
     pub port: u16,
     pub data_dir: PathBuf,
-    pub memory_threshold: usize,
+    #[serde(default = "default_cache_threshold", alias = "memory_threshold")]
+    pub cache_threshold: usize,
     pub data_encryption_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -87,7 +88,7 @@ impl Default for Config {
         Self {
             port: DEFAULT_PORT,
             data_dir: default_data_dir(),
-            memory_threshold: DEFAULT_MEMORY_THRESHOLD,
+            cache_threshold: default_cache_threshold(),
             data_encryption_key: None,
             created_at: now,
             updated_at: now,
@@ -111,7 +112,7 @@ impl Default for Config {
 pub struct ConfigUpdate {
     pub port: Option<u16>,
     pub data_dir: Option<PathBuf>,
-    pub memory_threshold: Option<usize>,
+    pub cache_threshold: Option<usize>,
     pub data_encryption_key: Option<String>,
     pub restrict: Option<bool>,
     pub list_page_size: Option<usize>,
@@ -169,8 +170,8 @@ impl Config {
         if let Some(dir) = update.data_dir {
             self.data_dir = dir;
         }
-        if let Some(threshold) = update.memory_threshold {
-            self.memory_threshold = threshold;
+        if let Some(threshold) = update.cache_threshold {
+            self.cache_threshold = threshold;
         }
         if let Some(dek) = update.data_encryption_key {
             self.data_encryption_key = Some(dek);
@@ -467,6 +468,10 @@ fn default_grpc_enabled() -> bool {
 
 fn default_grpc_bind_addr() -> String {
     "127.0.0.1:7442".to_string()
+}
+
+fn default_cache_threshold() -> usize {
+    DEFAULT_CACHE_THRESHOLD
 }
 
 fn default_api_mode() -> ApiMode {
