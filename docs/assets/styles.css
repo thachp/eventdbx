@@ -1,0 +1,12 @@
+:root {
+    color-scheme: dark;
+}
+
+body {
+    font-feature-settings: "ss02" 1, "cv02" 1;
+}
+
+::selection {
+    background: rgba(255, 79, 109, 0.4);
+    color: #ffffff;
+}

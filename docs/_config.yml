@@ -1,0 +1,16 @@
+title: EventDBX
+description: Event-sourced storage with built-in audit guarantees.
+url: https://thachp.github.io/eventdbx
+baseurl: ""
+permalink: pretty
+markdown: kramdown
+theme: null
+plugins: []
+collections: []
+defaults:
+  - scope:
+      path: ""
+      type: "pages"
+    values:
+      layout: default
+      nav_id: docs

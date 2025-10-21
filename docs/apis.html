@@ -1,0 +1,189 @@
+---
+title: API Reference
+description: Integrate EventDBX via REST, GraphQL, or gRPC with copy friendly examples.
+nav_id: apis
+---
+
+<section class="relative overflow-hidden py-24 sm:py-28">
+    <div class="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top,_rgba(255,79,109,0.18),_transparent_60%)]"></div>
+    <div class="mx-auto grid max-w-6xl items-center gap-14 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+        <div class="space-y-7">
+            <span class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.3em] text-brand">Reference</span>
+            <h1 class="text-4xl font-semibold leading-tight text-white sm:text-5xl">Every EventDBX API in one place.</h1>
+            <p class="max-w-xl text-lg text-slate-300">
+                Choose the surface that fits your stack. Each API exposes identical primitives for appending events, inspecting aggregates, and verifying state.
+            </p>
+            <div class="flex flex-wrap gap-3">
+                <a class="inline-flex items-center rounded-full bg-brand px-5 py-3 text-sm font-semibold text-slate-950 shadow-glow transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand/40" href="{{ '/getting-started/' | relative_url }}">
+                    Read the guide
+                </a>
+                <a class="inline-flex items-center rounded-full border border-brand/40 px-5 py-3 text-sm font-semibold text-brand transition hover:border-brand hover:bg-brand/10" href="{{ '/cli/' | relative_url }}">
+                    Use the CLI
+                </a>
+            </div>
+        </div>
+        <div>
+            <pre class="overflow-x-auto rounded-3xl bg-slate-900/75 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code># All APIs expect a bearer token
+$ eventdbx token generate --group admin --user jane --expiration 3600
+
+# Export token for reuse
+$ export EVENTDBX_TOKEN=eyJhbGciOi...
+
+# Health check
+$ curl http://127.0.0.1:7070/health</code></pre>
+        </div>
+    </div>
+</section>
+
+<section class="bg-slate-100 py-24 text-slate-900 sm:py-28" id="auth">
+    <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+        <div class="space-y-4">
+            <h2 class="text-3xl font-semibold sm:text-4xl">Authentication</h2>
+            <p class="text-lg text-slate-600">
+                Issue tokens through the CLI and pass them as bearer headers. Tokens are signed JWTs that encode user, group, and expiry.
+            </p>
+        </div>
+        <div class="rounded-3xl bg-white p-8 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200">
+            <h3 class="text-lg font-semibold text-slate-900">Headers by surface</h3>
+            <ul class="mt-5 space-y-3 text-sm text-slate-600">
+                <li><strong class="text-slate-900">REST</strong> uses <code class="font-mono text-xs text-slate-700">Authorization: Bearer TOKEN</code>.</li>
+                <li><strong class="text-slate-900">GraphQL</strong> reuses the same header.</li>
+                <li><strong class="text-slate-900">gRPC</strong> expects <code class="font-mono text-xs text-slate-700">authorization: Bearer TOKEN</code> due to lowercase metadata.</li>
+            </ul>
+        </div>
+    </div>
+</section>
+
+<section class="py-24 sm:py-28" id="rest">
+    <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+        <div class="space-y-4">
+            <span class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.3em] text-brand">REST</span>
+            <h2 class="text-3xl font-semibold text-white sm:text-4xl">Classic HTTP endpoints</h2>
+            <p class="text-lg text-slate-300">
+                Ideal for automation scripts and application backends. Payloads are JSON and follow predictable patterns.
+            </p>
+            <pre class="overflow-x-auto rounded-3xl bg-slate-900/70 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code># Append an event
+curl -X POST http://127.0.0.1:7070/v1/events \
+    -H "Authorization: Bearer ${EVENTDBX_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "aggregate_type": "patient",
+        "aggregate_id": "p-002",
+        "event_type": "patient-updated",
+        "payload": {
+            "status": "inactive"
+        }
+    }'
+
+# Inspect state
+curl -H "Authorization: Bearer ${EVENTDBX_TOKEN}" \
+    http://127.0.0.1:7070/v1/aggregates/patient/p-002</code></pre>
+        </div>
+        <div class="rounded-3xl border border-white/10 bg-slate-900/60 p-8 shadow-2xl shadow-black/30 backdrop-blur">
+            <h3 class="text-lg font-semibold text-white">Key endpoints</h3>
+            <ul class="mt-5 space-y-3 text-sm text-slate-200">
+                <li><strong class="text-white">POST /v1/events</strong> adds an event.</li>
+                <li><strong class="text-white">GET /v1/aggregates</strong> paginates aggregates.</li>
+                <li><strong class="text-white">GET /v1/aggregates/{type}/{id}</strong> returns current state.</li>
+                <li><strong class="text-white">GET /v1/aggregates/{type}/{id}/events</strong> streams timelines.</li>
+                <li><strong class="text-white">GET /health</strong> reports readiness for orchestration.</li>
+            </ul>
+        </div>
+    </div>
+</section>
+
+<section class="bg-slate-100 py-24 text-slate-900 sm:py-28" id="graphql">
+    <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+        <div class="space-y-4">
+            <span class="inline-flex items-center gap-2 rounded-full border border-brand/10 bg-brand/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.3em] text-brand">GraphQL</span>
+            <h2 class="text-3xl font-semibold sm:text-4xl">Typed queries and mutations</h2>
+            <p class="text-lg text-slate-600">
+                GraphQL is perfect when you need aggregate snapshots and events in a single round trip. The Playground ships with the server for quick iteration.
+            </p>
+            <pre class="overflow-x-auto rounded-3xl bg-white p-6 text-sm leading-relaxed text-slate-800 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200"><code># Query aggregates
+curl -X POST http://127.0.0.1:7070/graphql \
+    -H "Authorization: Bearer ${EVENTDBX_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "query": "query Recent($take: Int!) { aggregates(take: $take) { aggregate_type aggregate_id version state } }",
+        "variables": { "take": 5 }
+    }'
+
+# Append via mutation
+curl -X POST http://127.0.0.1:7070/graphql \
+    -H "Authorization: Bearer ${EVENTDBX_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "query": "mutation Append($input: AppendEventInput!) { appendEvent(input: $input) { aggregate_type aggregate_id version } }",
+        "variables": {
+            "input": {
+                "aggregate_type": "patient",
+                "aggregate_id": "p-002",
+                "event_type": "patient-updated",
+                "payload": { "status": "inactive" }
+            }
+        }
+    }'</code></pre>
+        </div>
+        <div class="rounded-3xl bg-white p-8 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200">
+            <h3 class="text-lg font-semibold text-slate-900">Schema highlights</h3>
+            <ul class="mt-5 space-y-3 text-sm text-slate-600">
+                <li><strong class="text-slate-900">aggregates</strong> query paginates across types.</li>
+                <li><strong class="text-slate-900">aggregate</strong> query returns state and version for one aggregate.</li>
+                <li><strong class="text-slate-900">events</strong> field lists timelines inline.</li>
+                <li><strong class="text-slate-900">appendEvent</strong> mirrors the REST append endpoint.</li>
+            </ul>
+        </div>
+    </div>
+</section>
+
+<section class="py-24 sm:py-28" id="grpc">
+    <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+        <div class="space-y-4">
+            <span class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.3em] text-brand">gRPC</span>
+            <h2 class="text-3xl font-semibold text-white sm:text-4xl">Low latency streaming</h2>
+            <p class="text-lg text-slate-300">
+                Protocol buffers provide strong typing and efficient encoding for multi-language services and workers.
+            </p>
+            <pre class="overflow-x-auto rounded-3xl bg-slate-900/70 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code># Append via grpcurl
+grpcurl -H "authorization: Bearer ${EVENTDBX_TOKEN}" \
+    -d '{
+        "aggregate_type": "patient",
+        "aggregate_id": "p-002",
+        "event_type": "patient-updated",
+        "payload_json": "{\"status\":\"inactive\"}"
+    }' \
+    -plaintext 127.0.0.1:7070 eventdbx.api.EventService/AppendEvent
+
+# Stream events
+grpcurl -H "authorization: Bearer ${EVENTDBX_TOKEN}" \
+    -d '{ "aggregate_type": "patient", "aggregate_id": "p-002" }' \
+    -plaintext 127.0.0.1:7070 eventdbx.api.EventService/ListEvents</code></pre>
+        </div>
+        <div class="rounded-3xl border border-white/10 bg-slate-900/60 p-8 shadow-2xl shadow-black/30 backdrop-blur">
+            <h3 class="text-lg font-semibold text-white">Service overview</h3>
+            <ul class="mt-5 space-y-3 text-sm text-slate-200">
+                <li><strong class="text-white">AppendEvent</strong> writes events.</li>
+                <li><strong class="text-white">ListAggregates</strong> paginates aggregates with Merkle roots.</li>
+                <li><strong class="text-white">GetAggregate</strong> returns current state.</li>
+                <li><strong class="text-white">ListEvents</strong> streams timelines.</li>
+                <li><strong class="text-white">VerifyAggregate</strong> compares Merkle proofs across replicas.</li>
+            </ul>
+        </div>
+    </div>
+</section>
+
+<section class="py-24">
+    <div class="mx-auto max-w-6xl px-6">
+        <div class="relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-brand to-brand-400 p-12 text-slate-950 shadow-2xl shadow-brand/40">
+            <div class="absolute -right-12 top-14 h-44 w-44 rounded-full bg-white/30 blur-3xl"></div>
+            <h2 class="text-3xl font-semibold sm:text-4xl">Automate everything.</h2>
+            <p class="mt-4 text-lg text-slate-900/80">
+                Pair these APIs with the CLI to roll out schemas, rotate tokens, and monitor health without manual toil.
+            </p>
+            <a class="mt-6 inline-flex items-center rounded-full bg-slate-950 px-6 py-3 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-slate-900" href="{{ '/cli/' | relative_url }}">
+                Open the CLI reference
+            </a>
+        </div>
+    </div>
+</section>
