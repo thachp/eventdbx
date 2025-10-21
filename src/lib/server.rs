@@ -25,7 +25,7 @@ use tokio::{
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::trace::TraceLayer;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::{
     admin,
@@ -34,8 +34,10 @@ use super::{
     config::Config,
     error::{EventError, Result},
     graphql::{EventSchema, GraphqlState, build_schema},
+    plugin::PluginManager,
+    replication_capnp_client::decode_public_key_bytes,
     schema::SchemaManager,
-    store::{self, AggregateState, EventRecord},
+    store::{self, ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore},
     token::{AccessKind, TokenManager},
 };
 
@@ -47,6 +49,7 @@ pub(crate) struct AppState {
     schemas: Arc<SchemaManager>,
     config: Arc<RwLock<Config>>,
     _config_path: Arc<PathBuf>,
+    store: Arc<EventStore>,
     restrict: bool,
     list_page_size: usize,
     page_limit: usize,
@@ -145,6 +148,10 @@ impl AppState {
         aggregate
     }
 
+    pub(crate) fn store(&self) -> Arc<EventStore> {
+        Arc::clone(&self.store)
+    }
+
     fn filter_state_map(
         &self,
         aggregate_type: &str,
@@ -169,6 +176,18 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         config_snapshot.tokens_path(),
         encryption.clone(),
     )?);
+    let store = Arc::new(EventStore::open(
+        config_snapshot.event_store_path(),
+        encryption.clone(),
+    )?);
+    let local_public_key = Arc::new(
+        decode_public_key_bytes(
+            &config_snapshot
+                .load_public_key()
+                .map_err(|err| EventError::Config(err.to_string()))?,
+        )
+        .map_err(|err| EventError::Config(err.to_string()))?,
+    );
     let schemas = Arc::new(SchemaManager::load(config_snapshot.schema_store_path())?);
 
     let state = AppState {
@@ -176,6 +195,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         schemas: Arc::clone(&schemas),
         config: Arc::clone(&shared_config),
         _config_path: Arc::clone(&config_path),
+        store: Arc::clone(&store),
         restrict: config_snapshot.restrict,
         list_page_size: config_snapshot.list_page_size,
         page_limit: config_snapshot.page_limit,
@@ -223,9 +243,15 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         *guard = cli_bind_addr.clone();
     }
 
-    let cli_proxy_handle = cli_proxy::start(&cli_bind_addr, Arc::clone(&config_path))
-        .await
-        .map_err(|err| EventError::Config(format!("failed to start CLI proxy: {err}")))?;
+    let cli_proxy_handle = cli_proxy::start(
+        &cli_bind_addr,
+        Arc::clone(&config_path),
+        Arc::clone(&store),
+        Arc::clone(&schemas),
+        Arc::clone(&local_public_key),
+    )
+    .await
+    .map_err(|err| EventError::Config(format!("failed to start CLI proxy: {err}")))?;
 
     if !api.rest_enabled() && !api.graphql_enabled() && !grpc_enabled {
         return Err(EventError::Config(
@@ -583,30 +609,102 @@ async fn append_event_global(
     Json(request): Json<AppendEventGlobalRequest>,
 ) -> Result<Json<EventRecord>> {
     let token = extract_bearer_token(&headers).ok_or(EventError::Unauthorized)?;
-    state.tokens().authorize(&token, AccessKind::Write)?;
+    let grant = state.tokens().authorize(&token, AccessKind::Write)?;
 
-    let payload_map = store::payload_to_map(&request.payload);
+    let AppendEventGlobalRequest {
+        aggregate_type,
+        aggregate_id,
+        event_type,
+        payload,
+    } = request;
+
+    let payload_map = store::payload_to_map(&payload);
     if state.restrict() {
-        state.schemas().validate_event(
-            &request.aggregate_type,
-            &request.event_type,
-            &payload_map,
-        )?;
+        state
+            .schemas()
+            .validate_event(&aggregate_type, &event_type, &payload_map)?;
     }
 
-    let payload_json = serde_json::to_string(&request.payload)
-        .map_err(|err| EventError::Serialization(err.to_string()))?;
-    let args = vec![
-        "aggregate".to_string(),
-        "apply".to_string(),
-        request.aggregate_type.clone(),
-        request.aggregate_id.clone(),
-        request.event_type.clone(),
-        "--payload".to_string(),
-        payload_json,
-    ];
+    let issued_by: Option<ActorClaims> = Some(grant.into());
+    let store = state.store();
+    let schemas = state.schemas();
 
-    let record: EventRecord = run_cli_json(args).await?;
+    let append_input = AppendEvent {
+        aggregate_type: aggregate_type.clone(),
+        aggregate_id: aggregate_id.clone(),
+        event_type: event_type.clone(),
+        payload: payload.clone(),
+        issued_by,
+    };
+
+    let record = tokio::task::spawn_blocking({
+        let store = Arc::clone(&store);
+        move || store.append(append_input)
+    })
+    .await
+    .map_err(|err| EventError::Storage(format!("failed to append event: {err}")))??;
+
+    if schemas.should_snapshot(&record.aggregate_type, record.version) {
+        let aggregate_type = record.aggregate_type.clone();
+        let aggregate_id = record.aggregate_id.clone();
+        let version = record.version;
+        let snapshot_result = tokio::task::spawn_blocking({
+            let store = Arc::clone(&store);
+            move || {
+                store.create_snapshot(
+                    &aggregate_type,
+                    &aggregate_id,
+                    Some(format!("auto snapshot v{}", version)),
+                )
+            }
+        })
+        .await
+        .map_err(|err| EventError::Storage(format!("failed to create auto snapshot: {err}")))?;
+
+        if let Err(err) = snapshot_result {
+            warn!(
+                target: "server",
+                "failed to create auto snapshot for {}::{} v{}: {}",
+                record.aggregate_type,
+                record.aggregate_id,
+                record.version,
+                err
+            );
+        }
+    }
+
+    let plugins = {
+        let config = state.config();
+        let guard = config.read().unwrap();
+        PluginManager::from_config(&*guard)?
+    };
+
+    if !plugins.is_empty() {
+        let schema = schemas.get(&record.aggregate_type).ok();
+        let aggregate_type = record.aggregate_type.clone();
+        let aggregate_id = record.aggregate_id.clone();
+        let state_result = tokio::task::spawn_blocking({
+            let store = Arc::clone(&store);
+            move || store.get_aggregate_state(&aggregate_type, &aggregate_id)
+        })
+        .await
+        .map_err(|err| EventError::Storage(format!("failed to load aggregate state: {err}")))?;
+
+        match state_result {
+            Ok(current_state) => {
+                if let Err(err) = plugins.notify_event(&record, &current_state, schema.as_ref()) {
+                    error!("plugin notification failed: {err}");
+                }
+            }
+            Err(err) => {
+                warn!(
+                    "plugin notification skipped (failed to load state for {}::{}): {}",
+                    record.aggregate_type, record.aggregate_id, err
+                );
+            }
+        }
+    }
+
     Ok(Json(record))
 }
 
