@@ -588,7 +588,7 @@ fn maybe_auto_snapshot(store: &EventStore, schemas: &SchemaManager, record: &Eve
         &record.aggregate_id,
         Some(format!("auto snapshot v{}", record.version)),
     ) {
-        Ok(snapshot) => println!(
+        Ok(snapshot) => eprintln!(
             "auto snapshot created: aggregate={} aggregate_id={} version={}",
             snapshot.aggregate_type, snapshot.aggregate_id, snapshot.version
         ),

@@ -1,0 +1,140 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'eventdbx'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=eventdbx"
+                ],
+                "filter": {
+                    "name": "eventdbx",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'eventdbx'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=eventdbx",
+                    "--package=eventdbx"
+                ],
+                "filter": {
+                    "name": "eventdbx",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'eventdbx'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=eventdbx",
+                    "--package=eventdbx"
+                ],
+                "filter": {
+                    "name": "eventdbx",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'adminapi_regression'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=adminapi_regression",
+                    "--package=eventdbx"
+                ],
+                "filter": {
+                    "name": "adminapi_regression",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'graphql_regression'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=graphql_regression",
+                    "--package=eventdbx"
+                ],
+                "filter": {
+                    "name": "graphql_regression",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'grpc_regression'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=grpc_regression",
+                    "--package=eventdbx"
+                ],
+                "filter": {
+                    "name": "grpc_regression",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration test 'rest_regression'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--test=rest_regression",
+                    "--package=eventdbx"
+                ],
+                "filter": {
+                    "name": "rest_regression",
+                    "kind": "test"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

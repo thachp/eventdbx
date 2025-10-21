@@ -10,6 +10,8 @@ pub mod graphql;
 pub mod merkle;
 pub mod plugin;
 pub mod replication;
+pub mod replication_capnp;
+pub mod replication_capnp_client;
 pub mod restrict;
 pub mod schema;
 pub mod server;

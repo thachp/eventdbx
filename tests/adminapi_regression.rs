@@ -308,7 +308,7 @@ async fn adminapi_regression() -> TestResult<()> {
     // Configure a remote endpoint.
     let remote_public_key = STANDARD.encode([3u8; 32]);
     let remote_payload = json!({
-        "endpoint": "grpc://127.0.0.1:7443",
+        "endpoint": "tcp://127.0.0.1:7443",
         "public_key": remote_public_key
     });
     let remote_response = client
@@ -331,7 +331,7 @@ async fn adminapi_regression() -> TestResult<()> {
         match remote_created {
             Value::Object(_) => {
                 assert_eq!(
-                    remote_created["endpoint"], "grpc://127.0.0.1:7443",
+                    remote_created["endpoint"], "tcp://127.0.0.1:7443",
                     "remote endpoint should match configuration"
                 );
             }
@@ -358,7 +358,7 @@ async fn adminapi_regression() -> TestResult<()> {
         remotes
             .get("primary")
             .and_then(|remote| remote.get("endpoint"))
-            .map(|endpoint| endpoint == "grpc://127.0.0.1:7443")
+            .map(|endpoint| endpoint == "tcp://127.0.0.1:7443")
             .unwrap_or(false),
         "remote configuration should be persisted"
     );
