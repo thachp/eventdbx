@@ -25,10 +25,6 @@ eula = false
 path = "src/lib/mod.rs"
 
 [[bin]]
-name = "eventdbx"
-path = "src/main.rs"
-
-[[bin]]
 name = "dbx"
 path = "src/main.rs"
 
