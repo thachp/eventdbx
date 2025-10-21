@@ -68,9 +68,7 @@ async fn adminapi_regression() -> TestResult<()> {
     let admin_key = "super-secret";
     wait_for_admin(&admin_base, admin_key).await?;
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
+    let client = Client::builder().timeout(Duration::from_secs(5)).build()?;
 
     // Unauthorized requests should be rejected.
     let unauthorized = client.get(format!("{admin_base}/tokens")).send().await?;
@@ -97,10 +95,12 @@ async fn adminapi_regression() -> TestResult<()> {
         .error_for_status()?
         .json()
         .await?;
-    assert_eq!(issued_token["group"], "ops", "issued token should reflect group");
     assert_eq!(
-        issued_token["status"],
-        "active",
+        issued_token["group"], "ops",
+        "issued token should reflect group"
+    );
+    assert_eq!(
+        issued_token["status"], "active",
         "issued token should be active initially"
     );
     assert_eq!(
@@ -109,8 +109,7 @@ async fn adminapi_regression() -> TestResult<()> {
         "remaining writes should match requested limit"
     );
     assert_eq!(
-        issued_token["keep_alive"],
-        true,
+        issued_token["keep_alive"], true,
         "issued token should honor keep-alive flag"
     );
     let token_str = issued_token["token"]
@@ -191,8 +190,7 @@ async fn adminapi_regression() -> TestResult<()> {
         .find(|item| item["token"] == token_str)
         .expect("revoked token should still appear in listing");
     assert_eq!(
-        revoked_entry["status"],
-        "revoked",
+        revoked_entry["status"], "revoked",
         "revoked token must display revoked status"
     );
 
@@ -228,8 +226,7 @@ async fn adminapi_regression() -> TestResult<()> {
         .json()
         .await?;
     assert_eq!(
-        created_lookup["aggregate"],
-        created_aggregate,
+        created_lookup["aggregate"], created_aggregate,
         "created schema lookup should succeed"
     );
 
@@ -260,8 +257,7 @@ async fn adminapi_regression() -> TestResult<()> {
         "schema snapshot threshold should reflect update"
     );
     assert_eq!(
-        updated_schema["locked"],
-        true,
+        updated_schema["locked"], true,
         "schema should be marked as locked after update"
     );
     assert!(
@@ -326,8 +322,7 @@ async fn adminapi_regression() -> TestResult<()> {
         match remote_created {
             Value::Object(_) => {
                 assert_eq!(
-                    remote_created["endpoint"],
-                    "grpc://127.0.0.1:7443",
+                    remote_created["endpoint"], "grpc://127.0.0.1:7443",
                     "remote endpoint should match configuration"
                 );
             }
@@ -379,9 +374,7 @@ async fn adminapi_regression() -> TestResult<()> {
         .json()
         .await?;
     assert!(
-        remotes_after_delete
-            .get("primary")
-            .is_none(),
+        remotes_after_delete.get("primary").is_none(),
         "remote should be removed after deletion"
     );
 
@@ -407,13 +400,11 @@ async fn adminapi_regression() -> TestResult<()> {
     );
     let plugin_created: Value = plugin_response.json().await?;
     assert_eq!(
-        plugin_created["enabled"],
-        true,
+        plugin_created["enabled"], true,
         "plugin should start enabled when configured as such"
     );
     assert_eq!(
-        plugin_created["config"]["type"],
-        "log",
+        plugin_created["config"]["type"], "log",
         "plugin config should identify as log"
     );
 
@@ -444,8 +435,7 @@ async fn adminapi_regression() -> TestResult<()> {
         .json()
         .await?;
     assert_eq!(
-        disabled_plugin["enabled"],
-        false,
+        disabled_plugin["enabled"], false,
         "plugin disable endpoint should mark plugin as disabled"
     );
     let enabled_plugin: Value = client
@@ -457,8 +447,7 @@ async fn adminapi_regression() -> TestResult<()> {
         .json()
         .await?;
     assert_eq!(
-        enabled_plugin["enabled"],
-        true,
+        enabled_plugin["enabled"], true,
         "plugin enable endpoint should mark plugin as enabled"
     );
 
@@ -472,8 +461,7 @@ async fn adminapi_regression() -> TestResult<()> {
         .json()
         .await?;
     assert_eq!(
-        disabled_before_delete["enabled"],
-        false,
+        disabled_before_delete["enabled"], false,
         "plugin should report disabled prior to deletion"
     );
 
