@@ -31,6 +31,7 @@ use super::{
     admin,
     api_grpc::GrpcApi,
     cache::AggregateCache,
+    cli_proxy,
     config::Config,
     error::{EventError, Result},
     graphql::{EventSchema, GraphqlState, build_schema},
@@ -475,6 +476,13 @@ pub async fn run(config: Config, config_path: PathBuf, plugins: PluginManager) -
         None
     };
 
+    let cli_proxy_path = Arc::clone(&config_path);
+    let cli_proxy_handle = tokio::spawn(async move {
+        if let Err(err) = cli_proxy::serve(cli_proxy_path).await {
+            warn!("CLI Cap'n Proto server failed: {}", err);
+        }
+    });
+
     if !api_mode.rest_enabled() && !api_mode.graphql_enabled() && !grpc_enabled {
         return Err(EventError::Config(
             "at least one API surface (REST, GraphQL, or gRPC) must be enabled".to_string(),
@@ -575,6 +583,7 @@ pub async fn run(config: Config, config_path: PathBuf, plugins: PluginManager) -
     if let Some(handle) = admin_handle {
         handle.abort();
     }
+    cli_proxy_handle.abort();
 
     result.map_err(|err| EventError::Storage(err.to_string()))?;
 
