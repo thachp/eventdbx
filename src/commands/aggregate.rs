@@ -74,6 +74,10 @@ pub struct AggregateApplyArgs {
     /// Authorization token used when proxying through a running server
     #[arg(long, value_name = "TOKEN")]
     pub token: Option<String>,
+
+    /// Raw JSON payload to use instead of key-value fields
+    #[arg(long)]
+    pub payload: Option<String>,
 }
 
 #[derive(Args)]
@@ -108,6 +112,10 @@ pub struct AggregateReplayArgs {
     /// Number of events to return
     #[arg(long)]
     pub take: Option<usize>,
+
+    /// Emit results as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -117,6 +125,10 @@ pub struct AggregateVerifyArgs {
 
     /// Aggregate identifier
     pub aggregate_id: String,
+
+    /// Emit results as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -173,6 +185,10 @@ pub struct AggregateListArgs {
     /// Show staged events instead of persisted aggregates
     #[arg(long, default_value_t = false)]
     pub stage: bool,
+
+    /// Emit results as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -235,15 +251,20 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             let store =
                 EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
             let take = args.take.or(Some(config.list_page_size));
-            for aggregate in store.aggregates_paginated(args.skip, take) {
-                println!(
-                    "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
-                    aggregate.aggregate_type,
-                    aggregate.aggregate_id,
-                    aggregate.version,
-                    aggregate.merkle_root,
-                    aggregate.archived
-                );
+            let aggregates = store.aggregates_paginated(args.skip, take);
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&aggregates)?);
+            } else {
+                for aggregate in aggregates {
+                    println!(
+                        "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
+                        aggregate.aggregate_type,
+                        aggregate.aggregate_id,
+                        aggregate.version,
+                        aggregate.merkle_root,
+                        aggregate.archived
+                    );
+                }
             }
         }
         AggregateCommands::Remove(args) => {
@@ -307,8 +328,16 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 fields,
                 stage,
                 token,
+                payload: payload_arg,
             } = args;
-            let payload = collect_payload(fields);
+            if payload_arg.is_some() && !fields.is_empty() {
+                bail!("--payload cannot be used together with --field");
+            }
+            let payload = match payload_arg {
+                Some(raw) => serde_json::from_str(&raw)
+                    .with_context(|| "failed to parse JSON payload provided via --payload")?,
+                None => collect_payload(fields),
+            };
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
             if config.restrict {
                 let map = payload_to_map(&payload);
@@ -418,18 +447,33 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 iter.collect()
             };
 
-            for event in events {
-                println!("{}", serde_json::to_string_pretty(&event)?);
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&events)?);
+            } else {
+                for event in events {
+                    println!("{}", serde_json::to_string_pretty(&event)?);
+                }
             }
         }
         AggregateCommands::Verify(args) => {
             let store =
                 EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
             let merkle_root = store.verify(&args.aggregate, &args.aggregate_id)?;
-            println!(
-                "aggregate_type={} aggregate_id={} merkle_root={}",
-                args.aggregate, args.aggregate_id, merkle_root
-            );
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "aggregate_type": args.aggregate,
+                        "aggregate_id": args.aggregate_id,
+                        "merkle_root": merkle_root,
+                    }))?
+                );
+            } else {
+                println!(
+                    "aggregate_type={} aggregate_id={} merkle_root={}",
+                    args.aggregate, args.aggregate_id, merkle_root
+                );
+            }
         }
         AggregateCommands::Snapshot(args) => {
             let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;

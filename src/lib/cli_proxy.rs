@@ -3,11 +3,12 @@ use std::{path::PathBuf, process::Stdio, sync::Arc};
 use anyhow::{Context, Result};
 use capnp::message::ReaderOptions;
 use capnp::serialize::{OwnedSegments, write_message_to_words};
-use capnp_futures::serialize::try_read_message;
+use capnp_futures::serialize::{read_message, try_read_message, write_message};
 use futures::AsyncWriteExt;
 use tokio::{
     net::{TcpListener, TcpStream},
     process::Command,
+    task::JoinHandle,
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, info, warn};
@@ -16,19 +17,28 @@ use crate::cli_capnp::{cli_request, cli_response};
 
 const CLI_SERVER_ADDR: &str = "0.0.0.0:6393";
 
-#[derive(Debug)]
-struct CliCommandResult {
-    exit_code: i32,
-    stdout: String,
-    stderr: String,
+#[derive(Debug, Clone)]
+pub struct CliCommandResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
-pub async fn serve(config_path: Arc<PathBuf>) -> Result<()> {
+pub async fn start(config_path: Arc<PathBuf>) -> Result<JoinHandle<()>> {
     let listener = TcpListener::bind(CLI_SERVER_ADDR)
         .await
         .context("failed to bind CLI Cap'n Proto listener")?;
     info!("CLI Cap'n Proto server listening on {}", CLI_SERVER_ADDR);
 
+    let handle = tokio::spawn(async move {
+        if let Err(err) = serve(listener, config_path).await {
+            warn!("CLI proxy server terminated: {err:?}");
+        }
+    });
+    Ok(handle)
+}
+
+async fn serve(listener: TcpListener, config_path: Arc<PathBuf>) -> Result<()> {
     loop {
         let (stream, peer) = listener
             .accept()
@@ -165,4 +175,53 @@ fn augment_args_with_config(mut args: Vec<String>, config_path: &PathBuf) -> Vec
 fn has_config_arg(args: &[String]) -> bool {
     args.iter()
         .any(|arg| arg == "--config" || arg.starts_with("--config="))
+}
+
+pub async fn invoke(args: &[String]) -> Result<CliCommandResult> {
+    let stream = TcpStream::connect(CLI_SERVER_ADDR)
+        .await
+        .context("failed to connect to CLI proxy")?;
+    let (reader, writer) = stream.into_split();
+    let mut writer = writer.compat_write();
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let mut request = message.init_root::<cli_request::Builder>();
+        let mut list = request.init_args(args.len() as u32);
+        for (idx, arg) in args.iter().enumerate() {
+            list.set(idx as u32, arg);
+        }
+    }
+
+    write_message(&mut writer, &message)
+        .await
+        .context("failed to send CLI request")?;
+    writer
+        .flush()
+        .await
+        .context("failed to flush CLI request")?;
+
+    let mut reader = reader.compat();
+    let response_message = read_message(&mut reader, ReaderOptions::new())
+        .await
+        .context("failed to read CLI response")?;
+    let response = response_message
+        .get_root::<cli_response::Reader>()
+        .context("failed to decode CLI response")?;
+
+    let stdout = response
+        .get_stdout()
+        .context("missing stdout field in CLI response")?
+        .to_string()
+        .map_err(|err| anyhow::Error::new(err).context("invalid UTF-8 in CLI stdout"))?;
+    let stderr = response
+        .get_stderr()
+        .context("missing stderr field in CLI response")?
+        .to_string()
+        .map_err(|err| anyhow::Error::new(err).context("invalid UTF-8 in CLI stderr"))?;
+
+    Ok(CliCommandResult {
+        exit_code: response.get_exit_code(),
+        stdout,
+        stderr,
+    })
 }

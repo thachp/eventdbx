@@ -476,12 +476,9 @@ pub async fn run(config: Config, config_path: PathBuf, plugins: PluginManager) -
         None
     };
 
-    let cli_proxy_path = Arc::clone(&config_path);
-    let cli_proxy_handle = tokio::spawn(async move {
-        if let Err(err) = cli_proxy::serve(cli_proxy_path).await {
-            warn!("CLI Cap'n Proto server failed: {}", err);
-        }
-    });
+    let cli_proxy_handle = cli_proxy::start(Arc::clone(&config_path))
+        .await
+        .map_err(|err| EventError::Config(format!("failed to start CLI proxy: {err}")))?;
 
     if !api_mode.rest_enabled() && !api_mode.graphql_enabled() && !grpc_enabled {
         return Err(EventError::Config(

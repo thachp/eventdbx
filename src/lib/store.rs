@@ -210,7 +210,7 @@ pub struct AppendEvent {
     pub issued_by: Option<ActorClaims>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregateState {
     pub aggregate_type: String,
     pub aggregate_id: String,

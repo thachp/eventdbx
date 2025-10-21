@@ -9,6 +9,11 @@ use capnp::{Result, Word, text, text_list};
 pub mod cli_request {
     use super::*;
 
+    const STRUCT_SIZE: StructSize = StructSize {
+        data: 0,
+        pointers: 1,
+    };
+
     #[derive(Clone, Copy)]
     pub struct Reader<'a> {
         reader: StructReader<'a>,
@@ -40,6 +45,43 @@ pub mod cli_request {
     impl<'a> Reader<'a> {
         pub fn get_args(self) -> Result<text_list::Reader<'a>> {
             text_list::Reader::get_from_pointer(&self.reader.get_pointer_field(0), None)
+        }
+    }
+
+    pub struct Builder<'a> {
+        builder: StructBuilder<'a>,
+    }
+
+    impl<'a> From<StructBuilder<'a>> for Builder<'a> {
+        fn from(builder: StructBuilder<'a>) -> Self {
+            Self { builder }
+        }
+    }
+
+    impl<'a> HasStructSize for Builder<'a> {
+        const STRUCT_SIZE: StructSize = STRUCT_SIZE;
+    }
+
+    impl<'a> FromPointerBuilder<'a> for Builder<'a> {
+        fn init_pointer(builder: PointerBuilder<'a>, _len: u32) -> Self {
+            Self {
+                builder: builder.init_struct(STRUCT_SIZE),
+            }
+        }
+
+        fn get_from_pointer(
+            builder: PointerBuilder<'a>,
+            default: Option<&'a [Word]>,
+        ) -> Result<Self> {
+            Ok(Self {
+                builder: builder.get_struct(STRUCT_SIZE, default)?,
+            })
+        }
+    }
+
+    impl<'a> Builder<'a> {
+        pub fn init_args(&mut self, len: u32) -> text_list::Builder<'_> {
+            text_list::Builder::init_pointer(self.builder.reborrow().get_pointer_field(0), len)
         }
     }
 }
