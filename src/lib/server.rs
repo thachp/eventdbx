@@ -170,8 +170,8 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         hidden_fields: Arc::new(hidden_fields),
     };
 
-    let api_mode = config_snapshot.api_mode;
-    let grpc_enabled = config_snapshot.grpc.enabled || api_mode.grpc_enabled();
+    let api = config_snapshot.api.clone();
+    let grpc_enabled = config_snapshot.grpc.enabled || api.grpc_enabled();
     let grpc_bind_addr = config_snapshot.grpc.bind_addr.clone();
     let grpc_state = state.clone();
     let grpc_handle = if grpc_enabled {
@@ -203,7 +203,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         .await
         .map_err(|err| EventError::Config(format!("failed to start CLI proxy: {err}")))?;
 
-    if !api_mode.rest_enabled() && !api_mode.graphql_enabled() && !grpc_enabled {
+    if !api.rest_enabled() && !api.graphql_enabled() && !grpc_enabled {
         return Err(EventError::Config(
             "at least one API surface (REST, GraphQL, or gRPC) must be enabled".to_string(),
         ));
@@ -211,7 +211,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
 
     let mut app = Router::new();
 
-    if api_mode.rest_enabled() {
+    if api.rest_enabled() {
         let rest_router = Router::new()
             .route("/health", get(health))
             .route("/v1/aggregates", get(list_aggregates))
@@ -232,7 +232,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         app = app.merge(rest_router);
     }
 
-    if api_mode.graphql_enabled() {
+    if api.graphql_enabled() {
         let graphql_state = GraphqlState::new(state.clone());
         let graphql_schema = build_schema(graphql_state);
         let graphql_router = Router::new()

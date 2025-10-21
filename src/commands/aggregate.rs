@@ -418,7 +418,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     return Ok(());
                 }
                 Err(EventError::Storage(message)) if is_lock_error(&message) => {
-                    if !config.api_mode.rest_enabled() {
+                    if !config.api.rest_enabled() {
                         bail!(
                             "event store is locked by a running server, and the REST API is disabled.\nEnable REST (e.g. `eventdbx config --api rest`) or stop the server to continue with CLI writes."
                         );

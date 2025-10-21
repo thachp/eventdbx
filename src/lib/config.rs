@@ -18,7 +18,7 @@ use base64::{
 use chrono::{DateTime, Utc};
 use ed25519_dalek::SigningKey;
 use rand_core::{OsRng, RngCore};
-use serde::de::Deserializer;
+use serde::de::{Deserializer, Error as DeError};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -30,26 +30,93 @@ use super::{
 pub const DEFAULT_PORT: u16 = 7070;
 pub const DEFAULT_CACHE_THRESHOLD: usize = 10_000;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ApiMode {
-    Rest,
-    Graphql,
-    Grpc,
-    All,
+fn default_bool_false() -> bool {
+    false
 }
 
-impl ApiMode {
-    pub fn rest_enabled(self) -> bool {
-        matches!(self, ApiMode::Rest | ApiMode::All)
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiConfig {
+    pub rest: bool,
+    pub graphql: bool,
+    pub grpc: bool,
+}
+
+impl ApiConfig {
+    pub fn rest_enabled(&self) -> bool {
+        self.rest
     }
 
-    pub fn graphql_enabled(self) -> bool {
-        matches!(self, ApiMode::Graphql | ApiMode::All)
+    pub fn graphql_enabled(&self) -> bool {
+        self.graphql
     }
 
-    pub fn grpc_enabled(self) -> bool {
-        matches!(self, ApiMode::Grpc | ApiMode::All)
+    pub fn grpc_enabled(&self) -> bool {
+        self.grpc
+    }
+
+    pub fn any_enabled(&self) -> bool {
+        self.rest || self.graphql || self.grpc
+    }
+
+    pub fn from_flags(rest: bool, graphql: bool, grpc: bool) -> Self {
+        Self {
+            rest,
+            graphql,
+            grpc,
+        }
+    }
+
+    fn from_legacy(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "rest" => Some(Self::from_flags(true, false, false)),
+            "graphql" => Some(Self::from_flags(false, true, false)),
+            "grpc" => Some(Self::from_flags(false, false, true)),
+            "all" => Some(Self::default()),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            rest: true,
+            graphql: true,
+            grpc: true,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ApiConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Legacy(String),
+            Map {
+                #[serde(default = "default_bool_false")]
+                rest: bool,
+                #[serde(default = "default_bool_false")]
+                graphql: bool,
+                #[serde(default = "default_bool_false")]
+                grpc: bool,
+            },
+        }
+
+        let repr = Repr::deserialize(deserializer)?;
+        let config = match repr {
+            Repr::Legacy(value) => ApiConfig::from_legacy(&value)
+                .ok_or_else(|| DeError::custom(format!("invalid api value '{value}'")))?,
+            Repr::Map {
+                rest,
+                graphql,
+                grpc,
+            } => ApiConfig::from_flags(rest, graphql, grpc),
+        };
+        Ok(config)
     }
 }
 
@@ -85,8 +152,8 @@ pub struct Config {
     pub remotes: BTreeMap<String, RemoteConfig>,
     #[serde(default)]
     pub grpc: GrpcApiConfig,
-    #[serde(default = "default_api_mode")]
-    pub api_mode: ApiMode,
+    #[serde(default = "default_api_config", alias = "api_mode")]
+    pub api: ApiConfig,
     #[serde(default)]
     pub hidden_aggregate_types: Vec<String>,
     #[serde(default)]
@@ -115,7 +182,7 @@ impl Default for Config {
             replication: ReplicationConfig::default(),
             remotes: BTreeMap::new(),
             grpc: GrpcApiConfig::default(),
-            api_mode: default_api_mode(),
+            api: default_api_config(),
             hidden_aggregate_types: Vec::new(),
             hidden_fields: BTreeMap::new(),
             admin: AdminApiConfig::default(),
@@ -134,11 +201,24 @@ pub struct ConfigUpdate {
     pub list_page_size: Option<usize>,
     pub page_limit: Option<usize>,
     pub plugin_max_attempts: Option<u32>,
-    pub api_mode: Option<ApiMode>,
+    pub api: Option<ApiConfigUpdate>,
     pub hidden_aggregate_types: Option<Vec<String>>,
     pub hidden_fields: Option<BTreeMap<String, Vec<String>>>,
     pub grpc: Option<GrpcApiConfigUpdate>,
     pub admin: Option<AdminApiConfigUpdate>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ApiConfigUpdate {
+    pub rest: Option<bool>,
+    pub graphql: Option<bool>,
+    pub grpc: Option<bool>,
+}
+
+impl ApiConfigUpdate {
+    pub fn is_empty(&self) -> bool {
+        self.rest.is_none() && self.graphql.is_none() && self.grpc.is_none()
+    }
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -229,8 +309,16 @@ impl Config {
         if let Some(max_attempts) = update.plugin_max_attempts {
             self.plugin_max_attempts = max_attempts.max(1);
         }
-        if let Some(api_mode) = update.api_mode {
-            self.api_mode = api_mode;
+        if let Some(api) = update.api {
+            if let Some(rest) = api.rest {
+                self.api.rest = rest;
+            }
+            if let Some(graphql) = api.graphql {
+                self.api.graphql = graphql;
+            }
+            if let Some(grpc) = api.grpc {
+                self.api.grpc = grpc;
+            }
         }
         if let Some(grpc) = update.grpc {
             if let Some(enabled) = grpc.enabled {
@@ -636,8 +724,8 @@ fn default_cache_threshold() -> usize {
     DEFAULT_CACHE_THRESHOLD
 }
 
-fn default_api_mode() -> ApiMode {
-    ApiMode::All
+fn default_api_config() -> ApiConfig {
+    ApiConfig::default()
 }
 
 fn default_identity_key() -> PathBuf {
@@ -810,5 +898,29 @@ mod tests {
             ..ConfigUpdate::default()
         });
         assert_eq!(config.snapshot_threshold, None);
+    }
+
+    #[test]
+    fn api_config_deserializes_from_legacy_string() {
+        let value = toml::Value::String("grpc".into());
+        let api: ApiConfig = value.try_into().expect("legacy string should parse");
+        assert!(!api.rest_enabled());
+        assert!(!api.graphql_enabled());
+        assert!(api.grpc_enabled());
+    }
+
+    #[test]
+    fn api_config_deserializes_from_table() {
+        let api: ApiConfig = toml::from_str(
+            r#"
+rest = true
+graphql = false
+grpc = true
+"#,
+        )
+        .expect("table should parse");
+        assert!(api.rest_enabled());
+        assert!(!api.graphql_enabled());
+        assert!(api.grpc_enabled());
     }
 }

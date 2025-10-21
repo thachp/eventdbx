@@ -12,7 +12,7 @@ use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 use eventdbx::{
-    config::{ApiMode, Config, ConfigUpdate, load_or_default},
+    config::{ApiConfig, ApiConfigUpdate, Config, ConfigUpdate, load_or_default},
     restrict::{self, RESTRICT_ENV},
     server,
 };
@@ -37,6 +37,24 @@ pub struct StartArgs {
     /// Select which API surfaces to expose
     #[arg(long = "api", value_enum)]
     pub api: Option<ApiModeArg>,
+    /// Enable the REST API surface for this run
+    #[arg(long, conflicts_with_all = ["no_rest", "api"])]
+    pub rest: bool,
+    /// Disable the REST API surface for this run
+    #[arg(long = "no-rest", conflicts_with_all = ["rest", "api"])]
+    pub no_rest: bool,
+    /// Enable the GraphQL API surface for this run
+    #[arg(long, conflicts_with_all = ["no_graphql", "api"])]
+    pub graphql: bool,
+    /// Disable the GraphQL API surface for this run
+    #[arg(long = "no-graphql", conflicts_with_all = ["graphql", "api"])]
+    pub no_graphql: bool,
+    /// Enable the gRPC API surface for this run
+    #[arg(long, conflicts_with_all = ["no_grpc", "api"])]
+    pub grpc: bool,
+    /// Disable the gRPC API surface for this run
+    #[arg(long = "no-grpc", conflicts_with_all = ["grpc", "api"])]
+    pub no_grpc: bool,
 }
 
 impl Default for StartArgs {
@@ -47,6 +65,12 @@ impl Default for StartArgs {
             foreground: false,
             restrict: restrict::from_env(),
             api: None,
+            rest: false,
+            no_rest: false,
+            graphql: false,
+            no_graphql: false,
+            grpc: false,
+            no_grpc: false,
         }
     }
 }
@@ -59,13 +83,13 @@ pub enum ApiModeArg {
     All,
 }
 
-impl From<ApiModeArg> for ApiMode {
+impl From<ApiModeArg> for ApiConfig {
     fn from(value: ApiModeArg) -> Self {
         match value {
-            ApiModeArg::Rest => ApiMode::Rest,
-            ApiModeArg::Graphql => ApiMode::Graphql,
-            ApiModeArg::Grpc => ApiMode::Grpc,
-            ApiModeArg::All => ApiMode::All,
+            ApiModeArg::Rest => ApiConfig::from_flags(true, false, false),
+            ApiModeArg::Graphql => ApiConfig::from_flags(false, true, false),
+            ApiModeArg::Grpc => ApiConfig::from_flags(false, false, true),
+            ApiModeArg::All => ApiConfig::default(),
         }
     }
 }
@@ -302,7 +326,50 @@ fn load_and_update_config(
 }
 
 fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
-    let api_override = args.api.map(ApiMode::from);
+    let mut api_update = ApiConfigUpdate::default();
+    let mut has_api_override = false;
+
+    if let Some(mode) = args.api {
+        let selection: ApiConfig = mode.into();
+        api_update.rest = Some(selection.rest);
+        api_update.graphql = Some(selection.graphql);
+        api_update.grpc = Some(selection.grpc);
+        has_api_override = true;
+    }
+
+    if args.rest {
+        api_update.rest = Some(true);
+        has_api_override = true;
+    }
+    if args.no_rest {
+        api_update.rest = Some(false);
+        has_api_override = true;
+    }
+    if args.graphql {
+        api_update.graphql = Some(true);
+        has_api_override = true;
+    }
+    if args.no_graphql {
+        api_update.graphql = Some(false);
+        has_api_override = true;
+    }
+    if args.grpc {
+        api_update.grpc = Some(true);
+        has_api_override = true;
+    }
+    if args.no_grpc {
+        api_update.grpc = Some(false);
+        has_api_override = true;
+    }
+
+    let api_override = if has_api_override {
+        Some(api_update.clone())
+    } else {
+        None
+    };
+
+    let grpc_override = api_override.as_ref().and_then(|update| update.grpc);
+
     config.apply_update(ConfigUpdate {
         port: args.port,
         data_dir: args.data_dir.clone(),
@@ -313,16 +380,14 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         list_page_size: None,
         page_limit: None,
         plugin_max_attempts: None,
-        api_mode: api_override,
+        api: api_override,
         hidden_aggregate_types: None,
         hidden_fields: None,
         grpc: None,
         admin: None,
     });
-    if let Some(mode) = api_override {
-        if mode.grpc_enabled() {
-            config.grpc.enabled = true;
-        }
+    if let Some(enabled) = grpc_override {
+        config.grpc.enabled = enabled;
     }
 }
 
