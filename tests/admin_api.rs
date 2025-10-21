@@ -1,7 +1,7 @@
 use std::{io, net::TcpListener, path::PathBuf, time::Duration};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use eventdbx::{config::Config, plugin::PluginManager, server};
+use eventdbx::{config::Config, server};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -44,8 +44,7 @@ async fn admin_rest_endpoints() -> TestResult<()> {
     let config_path = temp.path().join("config.toml");
     config.save(&config_path)?;
 
-    let plugins = PluginManager::from_config(&config)?;
-    let server_handle = spawn_server(config.clone(), config_path.clone(), plugins)?;
+    let server_handle = spawn_server(config.clone(), config_path.clone())?;
 
     let base_url = format!("http://127.0.0.1:{http_port}");
     wait_for_health(&base_url).await?;
@@ -211,10 +210,9 @@ fn allocate_port() -> io::Result<u16> {
 fn spawn_server(
     config: Config,
     config_path: PathBuf,
-    plugins: PluginManager,
 ) -> TestResult<JoinHandle<eventdbx::error::Result<()>>> {
     Ok(tokio::spawn(async move {
-        server::run(config, config_path, plugins).await
+        server::run(config, config_path).await
     }))
 }
 

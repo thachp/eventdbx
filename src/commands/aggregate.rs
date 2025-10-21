@@ -301,6 +301,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 "version": state.version,
                 "state": state.state,
                 "merkle_root": state.merkle_root,
+                "archived": state.archived,
             });
 
             if args.include_events {

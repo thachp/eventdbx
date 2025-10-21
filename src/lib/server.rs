@@ -57,6 +57,13 @@ pub(crate) async fn run_cli_command(args: Vec<String>) -> Result<cli_proxy::CliC
         } else {
             format!("exit code {}", result.exit_code)
         };
+        let lowered = message.to_lowercase();
+        if lowered.contains("aggregate not found") {
+            return Err(EventError::AggregateNotFound);
+        }
+        if lowered.contains("schema not found") {
+            return Err(EventError::SchemaNotFound);
+        }
         return Err(EventError::Storage(format!(
             "CLI command {:?} failed: {message}",
             args

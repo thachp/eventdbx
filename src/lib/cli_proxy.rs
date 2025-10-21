@@ -1,4 +1,9 @@
-use std::{path::PathBuf, process::Stdio, sync::Arc};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use capnp::message::ReaderOptions;
@@ -126,7 +131,7 @@ async fn process_request(
 }
 
 async fn execute_cli_command(args: Vec<String>, config_path: &PathBuf) -> Result<CliCommandResult> {
-    let exe = std::env::current_exe().context("failed to resolve current executable")?;
+    let exe = resolve_cli_executable().context("failed to resolve CLI executable")?;
 
     let final_args = augment_args_with_config(args, config_path);
 
@@ -162,14 +167,52 @@ async fn execute_cli_command(args: Vec<String>, config_path: &PathBuf) -> Result
     })
 }
 
+fn resolve_cli_executable() -> Result<PathBuf> {
+    if let Ok(path) = env::var("EVENTDBX_CLI") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Ok(path) = env::var("CARGO_BIN_EXE_eventdbx") {
+        return Ok(PathBuf::from(path));
+    }
+    let current = std::env::current_exe().context("failed to resolve current executable")?;
+    if let Some(dir) = current.parent() {
+        if let Some(candidate) = probe_dir_for_cli(dir) {
+            return Ok(candidate);
+        }
+        if let Some(parent) = dir.parent() {
+            if let Some(candidate) = probe_dir_for_cli(parent) {
+                return Ok(candidate);
+            }
+        }
+    }
+    Ok(current)
+}
+
+fn probe_dir_for_cli(dir: &Path) -> Option<PathBuf> {
+    let unix_path = dir.join("eventdbx");
+    if unix_path.exists() {
+        return Some(unix_path);
+    }
+    #[cfg(windows)]
+    {
+        let windows_path = dir.join("eventdbx.exe");
+        if windows_path.exists() {
+            return Some(windows_path);
+        }
+    }
+    None
+}
+
 fn augment_args_with_config(mut args: Vec<String>, config_path: &PathBuf) -> Vec<String> {
     if has_config_arg(&args) {
         return args;
     }
 
-    args.push("--config".to_string());
-    args.push(config_path.to_string_lossy().into_owned());
-    args
+    let mut final_args = Vec::with_capacity(args.len() + 2);
+    final_args.push("--config".to_string());
+    final_args.push(config_path.to_string_lossy().into_owned());
+    final_args.extend(args.drain(..));
+    final_args
 }
 
 fn has_config_arg(args: &[String]) -> bool {
