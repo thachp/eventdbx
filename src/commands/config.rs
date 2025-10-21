@@ -106,6 +106,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         plugin_max_attempts,
         api: None,
         grpc: None,
+        socket: None,
         admin: admin_update,
     });
 

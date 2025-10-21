@@ -380,6 +380,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         plugin_max_attempts: None,
         api: api_override,
         grpc: None,
+        socket: None,
         admin: None,
     });
 }

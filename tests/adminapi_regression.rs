@@ -35,10 +35,19 @@ async fn adminapi_regression() -> TestResult<()> {
         }
         Err(err) => return Err(err.into()),
     };
+    let socket_port = match allocate_port() {
+        Ok(port) => port,
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            eprintln!("skipping admin API test: port binding not permitted ({err})");
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
 
     config.port = http_port;
     config.restrict = false;
     config.data_encryption_key = Some(STANDARD.encode([2u8; 32]));
+    config.socket.bind_addr = format!("127.0.0.1:{socket_port}");
     config.admin.enabled = true;
     config.admin.bind_addr = "127.0.0.1".to_string();
     config.admin.port = Some(admin_port);

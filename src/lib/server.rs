@@ -1,8 +1,8 @@
 use std::{
     collections::BTreeMap,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{Arc, OnceLock, RwLock},
 };
 
 use async_graphql::http::GraphQLPlaygroundConfig;
@@ -16,7 +16,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::RwLock as AsyncRwLock};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
@@ -32,6 +32,8 @@ use super::{
     token::{AccessKind, TokenManager},
 };
 
+static CLI_PROXY_ADDR: OnceLock<Arc<AsyncRwLock<String>>> = OnceLock::new();
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     tokens: Arc<TokenManager>,
@@ -44,7 +46,16 @@ pub(crate) struct AppState {
 }
 
 pub(crate) async fn run_cli_command(args: Vec<String>) -> Result<cli_proxy::CliCommandResult> {
-    let result = cli_proxy::invoke(&args)
+    let addr_lock = CLI_PROXY_ADDR
+        .get()
+        .ok_or_else(|| EventError::Config("CLI proxy address not configured".to_string()))?;
+    let bind_addr = {
+        let guard = addr_lock.read().await;
+        guard.clone()
+    };
+    let connect_addr = normalize_cli_connect_addr(&bind_addr);
+
+    let result = cli_proxy::invoke(&args, &connect_addr)
         .await
         .map_err(|err| EventError::Storage(err.to_string()))?;
     if result.exit_code != 0 {
@@ -68,6 +79,18 @@ pub(crate) async fn run_cli_command(args: Vec<String>) -> Result<cli_proxy::CliC
         )));
     }
     Ok(result)
+}
+
+fn normalize_cli_connect_addr(bind_addr: &str) -> String {
+    if let Ok(addr) = bind_addr.parse::<SocketAddr>() {
+        match addr.ip() {
+            IpAddr::V4(ip) if ip.is_unspecified() => format!("127.0.0.1:{}", addr.port()),
+            IpAddr::V6(ip) if ip.is_unspecified() => format!("[::1]:{}", addr.port()),
+            _ => addr.to_string(),
+        }
+    } else {
+        bind_addr.to_string()
+    }
 }
 
 pub(crate) async fn run_cli_json<T>(args: Vec<String>) -> Result<T>
@@ -180,7 +203,15 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         None
     };
 
-    let cli_proxy_handle = cli_proxy::start(Arc::clone(&config_path))
+    let cli_bind_addr = config_snapshot.socket.bind_addr.clone();
+    let addr_store =
+        Arc::clone(CLI_PROXY_ADDR.get_or_init(|| Arc::new(AsyncRwLock::new(String::new()))));
+    {
+        let mut guard = addr_store.write().await;
+        *guard = cli_bind_addr.clone();
+    }
+
+    let cli_proxy_handle = cli_proxy::start(&cli_bind_addr, Arc::clone(&config_path))
         .await
         .map_err(|err| EventError::Config(format!("failed to start CLI proxy: {err}")))?;
 

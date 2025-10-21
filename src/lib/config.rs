@@ -28,6 +28,7 @@ use super::{
 };
 
 pub const DEFAULT_PORT: u16 = 7070;
+pub const DEFAULT_SOCKET_PORT: u16 = 6363;
 pub const DEFAULT_CACHE_THRESHOLD: usize = 10_000;
 
 fn default_bool_false() -> bool {
@@ -150,6 +151,8 @@ pub struct Config {
     pub remotes: BTreeMap<String, RemoteConfig>,
     #[serde(default)]
     pub grpc: GrpcApiConfig,
+    #[serde(default)]
+    pub socket: SocketConfig,
     #[serde(default = "default_api_config", alias = "api_mode")]
     pub api: ApiConfig,
     #[serde(default)]
@@ -175,6 +178,7 @@ impl Default for Config {
             replication: ReplicationConfig::default(),
             remotes: BTreeMap::new(),
             grpc: GrpcApiConfig::default(),
+            socket: SocketConfig::default(),
             api: default_api_config(),
             admin: AdminApiConfig::default(),
         }
@@ -194,6 +198,7 @@ pub struct ConfigUpdate {
     pub plugin_max_attempts: Option<u32>,
     pub api: Option<ApiConfigUpdate>,
     pub grpc: Option<GrpcApiConfigUpdate>,
+    pub socket: Option<SocketConfigUpdate>,
     pub admin: Option<AdminApiConfigUpdate>,
 }
 
@@ -317,6 +322,11 @@ impl Config {
         if let Some(grpc) = update.grpc {
             if let Some(bind_addr) = grpc.bind_addr {
                 self.grpc.bind_addr = bind_addr;
+            }
+        }
+        if let Some(socket) = update.socket {
+            if let Some(bind_addr) = socket.bind_addr {
+                self.socket.bind_addr = bind_addr;
             }
         }
         if let Some(admin) = update.admin {
@@ -567,6 +577,20 @@ pub struct GrpcApiConfig {
     pub bind_addr: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketConfig {
+    #[serde(default = "default_socket_bind_addr")]
+    pub bind_addr: String,
+}
+
+impl Default for SocketConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: default_socket_bind_addr(),
+        }
+    }
+}
+
 impl Default for GrpcApiConfig {
     fn default() -> Self {
         Self {
@@ -599,6 +623,11 @@ impl<'de> Deserialize<'de> for GrpcApiConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct GrpcApiConfigUpdate {
+    pub bind_addr: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SocketConfigUpdate {
     pub bind_addr: Option<String>,
 }
 
@@ -676,6 +705,10 @@ fn default_plugin_max_attempts() -> u32 {
 
 fn default_grpc_bind_addr() -> String {
     "127.0.0.1:7442".to_string()
+}
+
+fn default_socket_bind_addr() -> String {
+    format!("127.0.0.1:{}", DEFAULT_SOCKET_PORT)
 }
 
 fn default_cache_threshold() -> usize {

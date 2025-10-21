@@ -20,8 +20,6 @@ use tracing::{debug, info, warn};
 
 use crate::cli_capnp::{cli_request, cli_response};
 
-const CLI_SERVER_ADDR: &str = "0.0.0.0:6393";
-
 #[derive(Debug, Clone)]
 pub struct CliCommandResult {
     pub exit_code: i32,
@@ -29,11 +27,15 @@ pub struct CliCommandResult {
     pub stderr: String,
 }
 
-pub async fn start(config_path: Arc<PathBuf>) -> Result<JoinHandle<()>> {
-    let listener = TcpListener::bind(CLI_SERVER_ADDR)
+pub async fn start(bind_addr: &str, config_path: Arc<PathBuf>) -> Result<JoinHandle<()>> {
+    let listener = TcpListener::bind(bind_addr)
         .await
-        .context("failed to bind CLI Cap'n Proto listener")?;
-    info!("CLI Cap'n Proto server listening on {}", CLI_SERVER_ADDR);
+        .with_context(|| format!("failed to bind CLI Cap'n Proto listener on {bind_addr}"))?;
+    let display_addr = listener
+        .local_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| bind_addr.to_string());
+    info!("CLI Cap'n Proto server listening on {}", display_addr);
 
     let handle = tokio::spawn(async move {
         if let Err(err) = serve(listener, config_path).await {
@@ -220,10 +222,10 @@ fn has_config_arg(args: &[String]) -> bool {
         .any(|arg| arg == "--config" || arg.starts_with("--config="))
 }
 
-pub async fn invoke(args: &[String]) -> Result<CliCommandResult> {
-    let stream = TcpStream::connect(CLI_SERVER_ADDR)
+pub async fn invoke(args: &[String], addr: &str) -> Result<CliCommandResult> {
+    let stream = TcpStream::connect(addr)
         .await
-        .context("failed to connect to CLI proxy")?;
+        .with_context(|| format!("failed to connect to CLI proxy at {addr}"))?;
     let (reader, writer) = stream.into_split();
     let mut writer = writer.compat_write();
     let message_bytes = {

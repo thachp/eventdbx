@@ -40,6 +40,10 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
   graphql = true
   grpc = true
   ```
+- Default ports can be overridden in `config.toml`:
+  - REST and GraphQL share the HTTP listener defined by `port` (default `7070`).
+  - gRPC uses `[grpc].bind_addr` (default `127.0.0.1:7442`).
+  - The CLI socket listens on `[socket].bind_addr` (default `127.0.0.1:6363`).
 
 3. **Define a schema (recommended when running in restricted mode)**
 
