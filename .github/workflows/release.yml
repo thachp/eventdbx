@@ -65,6 +65,8 @@ jobs:
         # failing. otherwise `sh` won't catch that `curl` returned non-0
         shell: bash
         run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-installer.sh | sh"
+      - name: Install Cap'n Proto (Linux)
+        run: sudo apt-get update && sudo apt-get install -y capnproto
       - name: Cache dist
         uses: actions/upload-artifact@v4
         with:
