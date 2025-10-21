@@ -42,7 +42,7 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
   ```
 - Default ports can be overridden in `config.toml`:
   - REST and GraphQL share the HTTP listener defined by `port` (default `7070`).
-  - gRPC uses `[grpc].bind_addr` (default `127.0.0.1:7442`).
+  - gRPC uses `[grpc].bind_addr` (default `127.0.0.1:7070`, sharing the HTTP listener).
   - The CLI socket listens on `[socket].bind_addr` (default `127.0.0.1:6363`).
 
 3. **Define a schema (recommended when running in restricted mode)**
@@ -338,7 +338,7 @@ curl \
 
 ## gRPC API
 
-Enable the gRPC surface by setting `[api] grpc = true` in `config.toml`. The `[grpc]` table configures the bind address (default `127.0.0.1:7442`). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
+Enable the gRPC surface by setting `[api] grpc = true` in `config.toml`. The `[grpc]` table configures the bind address (default `127.0.0.1:7070`, reusing the HTTP listener). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
 
 Example `grpcurl` invocation:
 
@@ -350,7 +350,7 @@ grpcurl -H "authorization: Bearer TOKEN" \
         "event_type": "patient-updated",
         "payload_json": "{\"status\":\"inactive\"}"
       }' \
-  -plaintext 127.0.0.1:7442 eventdbx.api.EventService/AppendEvent
+  -plaintext 127.0.0.1:7070 eventdbx.api.EventService/AppendEvent
 ```
 
 ## GraphQL API

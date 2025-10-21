@@ -704,7 +704,7 @@ fn default_plugin_max_attempts() -> u32 {
 }
 
 fn default_grpc_bind_addr() -> String {
-    "127.0.0.1:7442".to_string()
+    format!("127.0.0.1:{}", DEFAULT_PORT)
 }
 
 fn default_socket_bind_addr() -> String {

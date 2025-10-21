@@ -30,14 +30,6 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
         }
         Err(err) => return Err(err.into()),
     };
-    let grpc_port = match allocate_port() {
-        Ok(port) => port,
-        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-            eprintln!("skipping grpc regression test: port binding not permitted ({err})");
-            return Ok(());
-        }
-        Err(err) => return Err(err.into()),
-    };
     let socket_port = match allocate_port() {
         Ok(port) => port,
         Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
@@ -49,7 +41,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
     config.port = http_port;
     config.restrict = false;
     config.data_encryption_key = Some(STANDARD.encode([7u8; 32]));
-    config.grpc.bind_addr = format!("127.0.0.1:{grpc_port}");
+    config.grpc.bind_addr = format!("127.0.0.1:{http_port}");
     config.socket.bind_addr = format!("127.0.0.1:{socket_port}");
     config.ensure_data_dir()?;
     let config_path = temp.path().join("config.toml");
@@ -75,7 +67,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
     let base_url = format!("http://127.0.0.1:{}", http_port);
     wait_for_http_health(&base_url).await?;
 
-    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let endpoint = format!("http://127.0.0.1:{http_port}");
     let mut client = wait_for_grpc(&endpoint).await?;
 
     let aggregate_type = "grpc-person";

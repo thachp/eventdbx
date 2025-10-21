@@ -1,5 +1,7 @@
 use std::{
     collections::BTreeMap,
+    future::Future,
+    io,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{Arc, OnceLock, RwLock},
@@ -14,9 +16,14 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, post},
 };
+use futures::StreamExt;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use tokio::{net::TcpListener, sync::RwLock as AsyncRwLock};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::{RwLock as AsyncRwLock, mpsc},
+};
+use tokio_stream::wrappers::ReceiverStream;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
@@ -176,32 +183,37 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
 
     let api = config_snapshot.api.clone();
     let grpc_enabled = api.grpc_enabled();
-    let grpc_bind_addr = config_snapshot.grpc.bind_addr.clone();
-    let grpc_state = state.clone();
-    let grpc_handle = if grpc_enabled {
-        let grpc_addr: SocketAddr = grpc_bind_addr.parse().map_err(|err| {
+    let mut grpc_handle = None;
+    let mut shared_grpc = false;
+
+    if grpc_enabled {
+        let parsed: SocketAddr = config_snapshot.grpc.bind_addr.parse().map_err(|err| {
             EventError::Config(format!(
                 "invalid gRPC bind address {}: {}",
                 config_snapshot.grpc.bind_addr, err
             ))
         })?;
-        Some(tokio::spawn(async move {
-            info!("Starting gRPC API server on {}", grpc_addr);
-            if let Err(err) = tonic::transport::Server::builder()
-                .add_service(GrpcApi::new(grpc_state).into_server())
-                .serve_with_shutdown(grpc_addr, async {
-                    shutdown_signal().await;
-                })
-                .await
-            {
-                warn!("gRPC API server failed: {}", err);
-            } else {
-                info!("gRPC API server stopped");
-            }
-        }))
-    } else {
-        None
-    };
+        shared_grpc = parsed.port() == config_snapshot.port;
+
+        if !shared_grpc {
+            let grpc_state = state.clone();
+            let addr = parsed;
+            grpc_handle = Some(tokio::spawn(async move {
+                info!("Starting gRPC API server on {}", addr);
+                if let Err(err) = tonic::transport::Server::builder()
+                    .add_service(GrpcApi::new(grpc_state).into_server())
+                    .serve_with_shutdown(addr, async {
+                        shutdown_signal().await;
+                    })
+                    .await
+                {
+                    warn!("gRPC API server failed: {}", err);
+                } else {
+                    info!("gRPC API server stopped");
+                }
+            }));
+        }
+    }
 
     let cli_bind_addr = config_snapshot.socket.bind_addr.clone();
     let addr_store =
@@ -303,11 +315,22 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         "Starting EventDBX server on {addr} (restrict={})",
         config_snapshot.restrict
     );
+    if shared_grpc {
+        info!(
+            "Starting gRPC API server on shared HTTP listener (port {})",
+            config_snapshot.port
+        );
+    }
 
     let listener = TcpListener::bind(addr).await?;
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let result = if shared_grpc {
+        serve_shared(listener, app, state.clone()).await
+    } else {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .map_err(|err| EventError::Storage(err.to_string()))
+    };
 
     if let Some(handle) = grpc_handle {
         handle.abort();
@@ -317,9 +340,110 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     }
     cli_proxy_handle.abort();
 
-    result.map_err(|err| EventError::Storage(err.to_string()))?;
+    result?;
 
     Ok(())
+}
+
+async fn serve_shared(listener: TcpListener, app: Router, grpc_state: AppState) -> Result<()> {
+    let (grpc_tx, grpc_rx) = mpsc::channel::<TcpStream>(64);
+
+    let http_listener = SharedHttpListener::new(listener, grpc_tx);
+
+    let grpc_future = async {
+        let incoming = ReceiverStream::new(grpc_rx).map(|stream| Ok::<_, io::Error>(stream));
+        tonic::transport::Server::builder()
+            .add_service(GrpcApi::new(grpc_state).into_server())
+            .serve_with_incoming_shutdown(incoming, async {
+                shutdown_signal().await;
+            })
+            .await
+    };
+
+    let http_future = axum::serve(http_listener, app).with_graceful_shutdown(shutdown_signal());
+
+    let (grpc_result, http_result) = tokio::join!(grpc_future, http_future);
+
+    match grpc_result {
+        Ok(_) => info!("gRPC API server stopped"),
+        Err(err) => {
+            warn!("gRPC API server failed: {}", err);
+            return Err(EventError::Storage(err.to_string()));
+        }
+    }
+
+    http_result.map_err(|err| EventError::Storage(err.to_string()))
+}
+
+struct SharedHttpListener {
+    inner: TcpListener,
+    grpc_tx: mpsc::Sender<TcpStream>,
+}
+
+impl SharedHttpListener {
+    fn new(inner: TcpListener, grpc_tx: mpsc::Sender<TcpStream>) -> Self {
+        Self { inner, grpc_tx }
+    }
+}
+
+impl axum::serve::Listener for SharedHttpListener {
+    type Io = TcpStream;
+    type Addr = SocketAddr;
+
+    fn accept(&mut self) -> impl Future<Output = (Self::Io, Self::Addr)> + Send {
+        let listener = &self.inner;
+        let grpc_sender = self.grpc_tx.clone();
+
+        async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, addr)) => {
+                        if let Err(err) = stream.set_nodelay(true) {
+                            warn!("failed to set TCP_NODELAY on incoming connection: {err}");
+                        }
+
+                        if is_grpc_connection(&stream).await {
+                            if let Err(err) = grpc_sender.send(stream).await {
+                                warn!("dropping gRPC connection: {}", err);
+                            }
+                            continue;
+                        }
+
+                        return (stream, addr);
+                    }
+                    Err(err) => {
+                        warn!("failed to accept connection: {}", err);
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+async fn is_grpc_connection(stream: &TcpStream) -> bool {
+    const PREFACE: &[u8] = b"PRI";
+    let mut buf = [0u8; 3];
+    match stream.peek(&mut buf).await {
+        Ok(n) if n >= PREFACE.len() => &buf[..PREFACE.len()] == PREFACE,
+        Ok(_) => false,
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            false
+        }
+        Err(err) => {
+            warn!("failed to peek connection bytes: {}", err);
+            false
+        }
+    }
 }
 
 async fn health() -> impl IntoResponse {
