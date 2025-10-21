@@ -14,18 +14,13 @@ use clap::{Args, Subcommand};
 
 use eventdbx::{
     config::{RemoteConfig, load_or_default},
-    replication::{
-        convert_event, decode_event, normalize_endpoint,
-        proto::{
-            AggregatePosition, ApplySchemasRequest, EventBatch, ListPositionsRequest,
-            PullEventsRequest, PullSchemasRequest, replication_client::ReplicationClient,
-        },
+    replication_capnp_client::{
+        CapnpReplicationClient, decode_public_key_bytes, decode_schemas, normalize_capnp_endpoint,
     },
     schema::{AggregateSchema, SchemaManager},
     store::{AggregatePositionEntry, EventStore},
 };
 use serde_json;
-use tonic::{Code, Request, transport::Channel};
 
 #[derive(Subcommand)]
 pub enum RemoteCommands {
@@ -36,7 +31,7 @@ pub enum RemoteCommands {
     Remove(RemoteRemoveArgs),
     /// List configured remotes
     #[command(name = "ls")]
-    List,
+    List(RemoteListArgs),
     /// Show details for a remote
     Show(RemoteShowArgs),
     /// Display this node's replication public key
@@ -51,7 +46,7 @@ pub enum RemoteCommands {
 pub struct RemoteAddArgs {
     /// Remote alias (e.g. standby1)
     pub name: String,
-    /// Remote gRPC endpoint (e.g. grpc://10.0.0.1:7443)
+    /// Remote replication endpoint (e.g. tcp://10.0.0.1:7443)
     pub endpoint: String,
     /// Base64-encoded Ed25519 public key for the remote
     #[arg(long = "public-key")]
@@ -132,7 +127,7 @@ pub async fn execute(config_path: Option<PathBuf>, command: RemoteCommands) -> R
     match command {
         RemoteCommands::Add(args) => add_remote(config_path, args),
         RemoteCommands::Remove(args) => remove_remote(config_path, args),
-        RemoteCommands::List => list_remotes(config_path),
+        RemoteCommands::List(args) => list_remotes(config_path, args.json),
         RemoteCommands::Show(args) => show_remote(config_path, args),
         RemoteCommands::Key(args) => show_local_key(config_path, args),
         RemoteCommands::Push(args) => push_remote(config_path, args).await,
@@ -197,15 +192,24 @@ fn remove_remote(config_path: Option<PathBuf>, args: RemoteRemoveArgs) -> Result
     Ok(())
 }
 
-fn list_remotes(config_path: Option<PathBuf>) -> Result<()> {
+fn list_remotes(config_path: Option<PathBuf>, json: bool) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     if config.remotes.is_empty() {
-        println!("(no remotes configured)");
+        if json {
+            let empty: BTreeMap<String, RemoteConfig> = BTreeMap::new();
+            println!("{}", serde_json::to_string_pretty(&empty)?);
+        } else {
+            println!("(no remotes configured)");
+        }
         return Ok(());
     }
 
-    for (name, remote) in &config.remotes {
-        println!("{} {}", name, remote.endpoint);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&config.remotes)?);
+    } else {
+        for (name, remote) in &config.remotes {
+            println!("{} {}", name, remote.endpoint);
+        }
     }
     Ok(())
 }
@@ -413,14 +417,13 @@ async fn push_remote_impl(
     filter: Option<ReplicationFilter>,
 ) -> Result<()> {
     let mut client = connect_client(&remote).await?;
-    let response = client
-        .list_positions(Request::new(ListPositionsRequest {}))
+    let remote_positions = client
+        .list_positions()
         .await
-        .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?
-        .into_inner();
+        .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?;
 
     let filter_ref = filter.as_ref();
-    let remote_map = proto_positions_to_map(&response.positions, filter_ref);
+    let remote_map = positions_to_map(&remote_positions, filter_ref);
     let local_map = positions_to_map(&local_positions, filter_ref);
 
     validate_fast_forward(&remote_name, &local_map, &remote_map)?;
@@ -457,18 +460,8 @@ async fn push_remote_impl(
             }
 
             sequence = sequence.wrapping_add(1);
-            let proto_events = events
-                .iter()
-                .map(|event| convert_event(event).map_err(|err| anyhow!(err.to_string())))
-                .collect::<Result<Vec<_>>>()?;
-
-            let batch = EventBatch {
-                sequence,
-                events: proto_events,
-            };
-
             client
-                .apply_events(Request::new(tokio_stream::iter(vec![batch])))
+                .apply_events(sequence, &events)
                 .await
                 .map_err(|err| {
                     anyhow!("failed to apply events on remote {}: {}", remote_name, err)
@@ -496,14 +489,13 @@ async fn pull_remote_impl(
     filter: Option<ReplicationFilter>,
 ) -> Result<()> {
     let mut client = connect_client(&remote).await?;
-    let response = client
-        .list_positions(Request::new(ListPositionsRequest {}))
+    let remote_positions = client
+        .list_positions()
         .await
-        .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?
-        .into_inner();
+        .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?;
 
     let filter_ref = filter.as_ref();
-    let remote_map = proto_positions_to_map(&response.positions, filter_ref);
+    let remote_map = positions_to_map(&remote_positions, filter_ref);
     let local_map = positions_to_map(&local_positions, filter_ref);
 
     let plans = build_pull_plans(&local_map, &remote_map);
@@ -528,30 +520,25 @@ async fn pull_remote_impl(
     for plan in &plans {
         let mut current = plan.from_version;
         while current < plan.to_version {
-            let request = PullEventsRequest {
-                aggregate_type: plan.aggregate_type.clone(),
-                aggregate_id: plan.aggregate_id.clone(),
-                from_version: current,
-                limit: batch_size as u64,
-            };
-
-            let response = client
-                .pull_events(Request::new(request))
+            let events = client
+                .pull_events(
+                    &plan.aggregate_type,
+                    &plan.aggregate_id,
+                    current,
+                    Some(batch_size),
+                )
                 .await
                 .map_err(|err| {
                     anyhow!("failed to pull events from remote {}: {}", remote_name, err)
-                })?
-                .into_inner();
+                })?;
 
-            if response.events.is_empty() {
+            if events.is_empty() {
                 break;
             }
 
-            for proto_event in response.events {
-                let record = decode_event(&proto_event)
-                    .map_err(|err| anyhow!("failed to decode event: {}", err))?;
+            for record in events {
+                current = record.version;
                 store.append_replica(record)?;
-                current = proto_event.version;
                 total_applied += 1;
             }
         }
@@ -571,37 +558,19 @@ async fn pull_remote_schemas(
     dry_run: bool,
 ) -> Result<()> {
     let mut client = connect_client(&remote).await?;
-    let response = match client
-        .pull_schemas(Request::new(PullSchemasRequest {}))
+    let payload = client
+        .pull_schemas()
         .await
-    {
-        Ok(resp) => resp.into_inner(),
-        Err(status) => {
-            if status.code() == Code::Unimplemented {
-                bail!(
-                    "remote '{}' does not support schema replication; upgrade the remote and retry",
-                    remote_name
-                );
-            }
-            return Err(anyhow!(
-                "remote {} pull_schemas failed: {}",
-                remote_name,
-                status
-            ));
-        }
-    };
+        .map_err(|err| anyhow!("remote {} pull_schemas failed: {}", remote_name, err))?;
 
-    let remote_map: BTreeMap<String, AggregateSchema> = if response.schemas_json.is_empty() {
-        BTreeMap::new()
-    } else {
-        serde_json::from_slice(&response.schemas_json).map_err(|err| {
+    let remote_map: BTreeMap<String, AggregateSchema> =
+        decode_schemas(&payload).map_err(|err| {
             anyhow!(
                 "remote {} returned invalid schema payload: {}",
                 remote_name,
                 err
             )
-        })?
-    };
+        })?;
 
     let local_map = manager.snapshot();
     let changes = diff_schemas(&local_map, &remote_map);
@@ -633,37 +602,19 @@ async fn push_remote_schemas(
     dry_run: bool,
 ) -> Result<()> {
     let mut client = connect_client(&remote).await?;
-    let remote_snapshot = match client
-        .pull_schemas(Request::new(PullSchemasRequest {}))
+    let payload = client
+        .pull_schemas()
         .await
-    {
-        Ok(resp) => resp.into_inner(),
-        Err(status) => {
-            if status.code() == Code::Unimplemented {
-                bail!(
-                    "remote '{}' does not support schema replication; upgrade the remote and retry",
-                    remote_name
-                );
-            }
-            return Err(anyhow!(
-                "remote {} pull_schemas failed: {}",
-                remote_name,
-                status
-            ));
-        }
-    };
+        .map_err(|err| anyhow!("remote {} pull_schemas failed: {}", remote_name, err))?;
 
-    let remote_map: BTreeMap<String, AggregateSchema> = if remote_snapshot.schemas_json.is_empty() {
-        BTreeMap::new()
-    } else {
-        serde_json::from_slice(&remote_snapshot.schemas_json).map_err(|err| {
+    let remote_map: BTreeMap<String, AggregateSchema> =
+        decode_schemas(&payload).map_err(|err| {
             anyhow!(
                 "remote {} returned invalid schema payload: {}",
                 remote_name,
                 err
             )
-        })?
-    };
+        })?;
 
     let local_map = manager.snapshot();
     let changes = diff_schemas(&remote_map, &local_map);
@@ -684,44 +635,24 @@ async fn push_remote_schemas(
     }
 
     let payload = serde_json::to_vec(&local_map)?;
-    match client
-        .apply_schemas(Request::new(ApplySchemasRequest {
-            schemas_json: payload,
-        }))
+    client
+        .apply_schemas(&payload)
         .await
-    {
-        Ok(_) => {
-            print_schema_changes(
-                &format!("Pushed schema changes to '{}'", remote_name),
-                &changes,
-            );
-            Ok(())
-        }
-        Err(status) => {
-            if status.code() == Code::Unimplemented {
-                bail!(
-                    "remote '{}' does not accept schema updates; upgrade the remote and retry",
-                    remote_name
-                );
-            }
-            Err(anyhow!(
-                "remote {} apply_schemas failed: {}",
-                remote_name,
-                status
-            ))
-        }
-    }
+        .map_err(|err| anyhow!("remote {} apply_schemas failed: {}", remote_name, err))?;
+
+    print_schema_changes(
+        &format!("Pushed schema changes to '{}'", remote_name),
+        &changes,
+    );
+    Ok(())
 }
 
-async fn connect_client(remote: &RemoteConfig) -> Result<ReplicationClient<Channel>> {
-    let endpoint = normalize_endpoint(&remote.endpoint)
-        .map_err(|err| anyhow!("invalid endpoint {}: {}", remote.endpoint, err))?;
-    let channel = tonic::transport::Endpoint::try_from(endpoint)
-        .map_err(|err| anyhow!("failed to parse endpoint {}: {}", remote.endpoint, err))?
-        .connect()
+async fn connect_client(remote: &RemoteConfig) -> Result<CapnpReplicationClient> {
+    let endpoint = normalize_capnp_endpoint(&remote.endpoint)?;
+    let expected_key = decode_public_key_bytes(&remote.public_key)?;
+    CapnpReplicationClient::connect(&endpoint, &expected_key)
         .await
-        .map_err(|err| anyhow!("failed to connect to remote {}: {}", remote.endpoint, err))?;
-    Ok(ReplicationClient::new(channel))
+        .map_err(|err| anyhow!("failed to connect to remote {}: {}", remote.endpoint, err))
 }
 
 #[derive(Debug, Clone)]
@@ -743,25 +674,6 @@ impl ReplicationFilter {
         }
         true
     }
-}
-
-fn proto_positions_to_map(
-    positions: &[AggregatePosition],
-    filter: Option<&ReplicationFilter>,
-) -> HashMap<(String, String), u64> {
-    positions
-        .iter()
-        .filter(|pos| match filter {
-            Some(filter) => filter.includes(&pos.aggregate_type, &pos.aggregate_id),
-            None => true,
-        })
-        .map(|pos| {
-            (
-                (pos.aggregate_type.clone(), pos.aggregate_id.clone()),
-                pos.version,
-            )
-        })
-        .collect()
 }
 
 fn positions_to_map(
@@ -1111,6 +1023,9 @@ mod tests {
             snapshot_threshold,
             locked,
             field_locks: field_locks.iter().map(|value| value.to_string()).collect(),
+            hidden: false,
+            hidden_fields: Vec::new(),
+            column_types: BTreeMap::new(),
             events: events
                 .iter()
                 .map(|(event, fields)| {
@@ -1211,4 +1126,10 @@ mod tests {
             other => panic!("expected Updated change, got {:?}", other),
         }
     }
+}
+#[derive(Args, Default)]
+pub struct RemoteListArgs {
+    /// Emit JSON output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }

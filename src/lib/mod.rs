@@ -1,6 +1,8 @@
 pub mod admin;
 pub mod api_grpc;
 pub mod cache;
+pub mod cli_capnp;
+pub mod cli_proxy;
 pub mod config;
 pub mod encryption;
 pub mod error;
@@ -8,6 +10,8 @@ pub mod graphql;
 pub mod merkle;
 pub mod plugin;
 pub mod replication;
+pub mod replication_capnp;
+pub mod replication_capnp_client;
 pub mod restrict;
 pub mod schema;
 pub mod server;

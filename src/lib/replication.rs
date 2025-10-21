@@ -9,16 +9,19 @@ use proto::{
     EventRecord as ProtoEventRecord, HeartbeatRequest, HeartbeatResponse, ListPositionsRequest,
     ListPositionsResponse, PullEventsRequest, PullEventsResponse, PullSchemasRequest,
     PullSchemasResponse, ReplicationAck, SnapshotChunk, SnapshotRequest,
-    replication_client::ReplicationClient, replication_server::Replication,
+    replication_server::Replication,
 };
 use tokio::{sync::mpsc, time::sleep};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
-use tonic::{Request, Response, Status, transport::Channel};
+use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
 
 use crate::{
     config::{Config, RemoteConfig},
     error::{EventError, Result},
+    replication_capnp_client::{
+        CapnpReplicationClient, decode_public_key_bytes, normalize_capnp_endpoint,
+    },
     schema::SchemaManager,
     store::{EventMetadata, EventRecord, EventStore},
 };
@@ -290,50 +293,43 @@ impl RemoteWorker {
     async fn send_batch(&mut self, events: &[EventRecord]) -> Result<()> {
         let mut client = self.connect().await?;
         self.sequence = self.sequence.wrapping_add(1);
-        let message = EventBatch {
-            sequence: self.sequence,
-            events: events
-                .iter()
-                .filter_map(|record| match convert_event(record) {
-                    Ok(event) => Some(event),
-                    Err(err) => {
-                        error!(
-                            "failed to encode event {}::{} version {} for replication: {}",
-                            record.aggregate_type, record.aggregate_id, record.version, err
-                        );
-                        None
-                    }
-                })
-                .collect(),
-        };
+        let filtered: Vec<EventRecord> = events
+            .iter()
+            .filter_map(|record| match convert_event(record) {
+                Ok(_) => Some(record.clone()),
+                Err(err) => {
+                    error!(
+                        "failed to encode event {}::{} version {} for replication: {}",
+                        record.aggregate_type, record.aggregate_id, record.version, err
+                    );
+                    None
+                }
+            })
+            .collect();
 
-        if message.events.is_empty() {
+        if filtered.is_empty() {
             return Ok(());
         }
 
-        let stream = tokio_stream::iter(vec![message]);
-
-        let response = client
-            .apply_events(Request::new(stream))
+        let applied = client
+            .apply_events(self.sequence, &filtered)
             .await
             .map_err(|err| EventError::Storage(err.to_string()))?;
-        let ack = response.into_inner();
         info!(
             "remote '{}' acknowledged sequence {} (applied {})",
-            self.name, self.sequence, ack.applied_sequence
+            self.name, self.sequence, applied
         );
         Ok(())
     }
 
-    async fn connect(&self) -> Result<ReplicationClient<Channel>> {
-        let endpoint = normalize_endpoint(&self.config.endpoint)?;
-        let endpoint = tonic::transport::Endpoint::try_from(endpoint)
+    async fn connect(&self) -> Result<CapnpReplicationClient> {
+        let endpoint = normalize_capnp_endpoint(&self.config.endpoint)
             .map_err(|err| EventError::Config(err.to_string()))?;
-        let channel = endpoint
-            .connect()
+        let expected_key = decode_public_key_bytes(&self.config.public_key)
+            .map_err(|err| EventError::Config(err.to_string()))?;
+        CapnpReplicationClient::connect(&endpoint, &expected_key)
             .await
-            .map_err(|err| EventError::Storage(err.to_string()))?;
-        Ok(ReplicationClient::new(channel))
+            .map_err(|err| EventError::Storage(err.to_string()))
     }
 
     fn backoff_delay(attempt: u32) -> Duration {

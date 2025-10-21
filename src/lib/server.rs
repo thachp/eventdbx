@@ -1,9 +1,10 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    fs,
-    net::SocketAddr,
+    collections::BTreeMap,
+    future::Future,
+    io,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, OnceLock, RwLock},
 };
 
 use async_graphql::http::GraphQLPlaygroundConfig;
@@ -15,91 +16,131 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
+use futures::StreamExt;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::{
-    net::TcpListener,
-    sync::Notify,
-    time::{Duration, sleep},
+    net::{TcpListener, TcpStream},
+    sync::{RwLock as AsyncRwLock, mpsc},
 };
-use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::wrappers::ReceiverStream;
 use tower_http::trace::TraceLayer;
-use tracing::{info, warn};
-use uuid::Uuid;
+use tracing::{error, info, warn};
 
 use super::{
     admin,
     api_grpc::GrpcApi,
-    cache::AggregateCache,
+    cli_proxy,
     config::Config,
     error::{EventError, Result},
     graphql::{EventSchema, GraphqlState, build_schema},
     plugin::PluginManager,
-    replication::{
-        ReplicationManager, ReplicationService, proto::replication_server::ReplicationServer,
-    },
+    replication_capnp_client::decode_public_key_bytes,
     schema::SchemaManager,
-    store::{self, AggregateState, AppendEvent, EventRecord, EventStore},
+    store::{self, ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore},
     token::{AccessKind, TokenManager},
 };
 
+static CLI_PROXY_ADDR: OnceLock<Arc<AsyncRwLock<String>>> = OnceLock::new();
+
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) store: Arc<EventStore>,
-    pub(crate) tokens: Arc<TokenManager>,
-    pub(crate) schemas: Arc<SchemaManager>,
-    pub(crate) config: Arc<RwLock<Config>>,
-    pub(crate) config_path: Arc<PathBuf>,
-    pub(crate) restrict: bool,
-    pub(crate) list_page_size: usize,
-    pub(crate) page_limit: usize,
-    plugins: Arc<RwLock<PluginManager>>,
-    retry_queue: Arc<PluginRetryQueue>,
-    plugin_max_attempts: u32,
-    replication: Arc<RwLock<Option<ReplicationManager>>>,
-    hidden_aggregates: Arc<HashSet<String>>,
-    hidden_fields: Arc<HashMap<String, HashSet<String>>>,
-    cache: Option<Arc<AggregateCache>>,
+    tokens: Arc<TokenManager>,
+    schemas: Arc<SchemaManager>,
+    config: Arc<RwLock<Config>>,
+    _config_path: Arc<PathBuf>,
+    store: Arc<EventStore>,
+    restrict: bool,
+    list_page_size: usize,
+    page_limit: usize,
+}
+
+pub(crate) async fn run_cli_command(args: Vec<String>) -> Result<cli_proxy::CliCommandResult> {
+    let addr_lock = CLI_PROXY_ADDR
+        .get()
+        .ok_or_else(|| EventError::Config("CLI proxy address not configured".to_string()))?;
+    let bind_addr = {
+        let guard = addr_lock.read().await;
+        guard.clone()
+    };
+    let connect_addr = normalize_cli_connect_addr(&bind_addr);
+
+    let result = cli_proxy::invoke(&args, &connect_addr)
+        .await
+        .map_err(|err| EventError::Storage(err.to_string()))?;
+    if result.exit_code != 0 {
+        let message = if !result.stderr.trim().is_empty() {
+            result.stderr.trim().to_string()
+        } else if !result.stdout.trim().is_empty() {
+            result.stdout.trim().to_string()
+        } else {
+            format!("exit code {}", result.exit_code)
+        };
+        let lowered = message.to_lowercase();
+        if lowered.contains("aggregate not found") {
+            return Err(EventError::AggregateNotFound);
+        }
+        if lowered.contains("schema not found") {
+            return Err(EventError::SchemaNotFound);
+        }
+        return Err(EventError::Storage(format!(
+            "CLI command {:?} failed: {message}",
+            args
+        )));
+    }
+    Ok(result)
+}
+
+fn normalize_cli_connect_addr(bind_addr: &str) -> String {
+    if let Ok(addr) = bind_addr.parse::<SocketAddr>() {
+        match addr.ip() {
+            IpAddr::V4(ip) if ip.is_unspecified() => format!("127.0.0.1:{}", addr.port()),
+            IpAddr::V6(ip) if ip.is_unspecified() => format!("[::1]:{}", addr.port()),
+            _ => addr.to_string(),
+        }
+    } else {
+        bind_addr.to_string()
+    }
+}
+
+pub(crate) async fn run_cli_json<T>(args: Vec<String>) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let result = run_cli_command(args).await?;
+    serde_json::from_str(&result.stdout).map_err(|err| EventError::Serialization(err.to_string()))
 }
 
 impl AppState {
+    pub(crate) fn tokens(&self) -> Arc<TokenManager> {
+        Arc::clone(&self.tokens)
+    }
+
+    pub(crate) fn schemas(&self) -> Arc<SchemaManager> {
+        Arc::clone(&self.schemas)
+    }
+
+    pub(crate) fn config(&self) -> Arc<RwLock<Config>> {
+        Arc::clone(&self.config)
+    }
+
+    pub(crate) fn restrict(&self) -> bool {
+        self.restrict
+    }
+
+    pub(crate) fn list_page_size(&self) -> usize {
+        self.list_page_size
+    }
+
+    pub(crate) fn page_limit(&self) -> usize {
+        self.page_limit
+    }
+
     pub(crate) fn is_hidden_aggregate(&self, aggregate_type: &str) -> bool {
-        self.hidden_aggregates.contains(aggregate_type)
-    }
-
-    pub(crate) fn plugin_manager(&self) -> PluginManager {
-        self.plugins
-            .read()
-            .expect("plugin manager lock poisoned")
-            .clone()
-    }
-
-    pub(crate) fn has_enabled_plugins(&self) -> bool {
-        !self
-            .plugins
-            .read()
-            .expect("plugin manager lock poisoned")
-            .is_empty()
-    }
-
-    pub(crate) fn replace_plugins(&self, manager: PluginManager) {
-        let mut guard = self.plugins.write().expect("plugin manager lock poisoned");
-        *guard = manager;
-    }
-
-    pub(crate) fn replication_manager(&self) -> Option<ReplicationManager> {
-        self.replication
-            .read()
-            .expect("replication manager lock poisoned")
-            .clone()
-    }
-
-    pub(crate) fn set_replication_manager(&self, manager: Option<ReplicationManager>) {
-        let mut guard = self
-            .replication
-            .write()
-            .expect("replication manager lock poisoned");
-        *guard = manager;
+        self.schemas
+            .get(aggregate_type)
+            .map(|schema| schema.hidden)
+            .unwrap_or(false)
     }
 
     pub(crate) fn sanitize_aggregate(&self, mut aggregate: AggregateState) -> AggregateState {
@@ -107,375 +148,112 @@ impl AppState {
         aggregate
     }
 
+    pub(crate) fn store(&self) -> Arc<EventStore> {
+        Arc::clone(&self.store)
+    }
+
     fn filter_state_map(
         &self,
         aggregate_type: &str,
         mut state: BTreeMap<String, String>,
     ) -> BTreeMap<String, String> {
-        if let Some(fields) = self.hidden_fields.get(aggregate_type) {
-            state.retain(|key, _| !fields.contains(key));
+        if let Ok(schema) = self.schemas.get(aggregate_type) {
+            if !schema.hidden_fields.is_empty() {
+                state.retain(|key, _| !schema.hidden_fields.contains(key));
+            }
         }
         state
     }
-
-    fn cache(&self) -> Option<&AggregateCache> {
-        self.cache.as_deref()
-    }
-
-    pub(crate) fn load_aggregate(
-        &self,
-        aggregate_type: &str,
-        aggregate_id: &str,
-    ) -> Result<AggregateState> {
-        if let Some(cache) = self.cache() {
-            if let Some(aggregate) = cache.get(aggregate_type, aggregate_id) {
-                return Ok(self.sanitize_aggregate(aggregate));
-            }
-        }
-
-        let aggregate = self
-            .store
-            .get_aggregate_state(aggregate_type, aggregate_id)?;
-
-        if let Some(cache) = self.cache() {
-            cache.put(aggregate.clone());
-        }
-
-        Ok(self.sanitize_aggregate(aggregate))
-    }
-
-    pub(crate) fn cache_store(&self, aggregate: &AggregateState) {
-        if let Some(cache) = self.cache() {
-            cache.put(aggregate.clone());
-        }
-    }
-
-    pub(crate) fn refresh_cached_aggregate(&self, aggregate_type: &str, aggregate_id: &str) {
-        if let Some(cache) = self.cache() {
-            match self.store.get_aggregate_state(aggregate_type, aggregate_id) {
-                Ok(aggregate) => cache.put(aggregate),
-                Err(EventError::AggregateNotFound) => {
-                    cache.remove(aggregate_type, aggregate_id);
-                }
-                Err(err) => {
-                    warn!(
-                        aggregate_type = aggregate_type,
-                        aggregate_id = aggregate_id,
-                        "failed to refresh cache: {err}"
-                    );
-                }
-            }
-        }
-    }
-
-    pub(crate) fn maybe_create_snapshot(&self, record: &EventRecord) {
-        if !self
-            .schemas
-            .should_snapshot(&record.aggregate_type, record.version)
-        {
-            return;
-        }
-
-        match self.store.create_snapshot(
-            &record.aggregate_type,
-            &record.aggregate_id,
-            Some(format!("auto snapshot v{}", record.version)),
-        ) {
-            Ok(snapshot) => info!(
-                aggregate_type = %snapshot.aggregate_type,
-                aggregate_id = %snapshot.aggregate_id,
-                version = snapshot.version,
-                "auto snapshot created"
-            ),
-            Err(err) => warn!(
-                aggregate_type = %record.aggregate_type,
-                aggregate_id = %record.aggregate_id,
-                version = record.version,
-                "auto snapshot failed: {err}"
-            ),
-        }
-    }
 }
 
-struct PluginRetryQueue {
-    pending: Mutex<VecDeque<PendingNotification>>,
-    dead: Mutex<Vec<DeadNotification>>,
-    notify: Notify,
-    path: PathBuf,
-}
-
-impl PluginRetryQueue {
-    fn new(path: PathBuf) -> Self {
-        let queue = Self {
-            pending: Mutex::new(VecDeque::new()),
-            dead: Mutex::new(Vec::new()),
-            notify: Notify::new(),
-            path,
-        };
-        let _ = queue.persist();
-        queue
-    }
-
-    fn push_pending(&self, notification: PendingNotification) {
-        {
-            let mut queue = self.pending.lock().expect("queue mutex poisoned");
-            queue.push_back(notification);
-        }
-        self.notify.notify_one();
-        let _ = self.persist();
-    }
-
-    fn schedule_retry(&self, record: EventRecord, attempt: u32, max_attempts: u32) {
-        if attempt > max_attempts {
-            warn!(
-                aggregate_type = %record.aggregate_type,
-                aggregate_id = %record.aggregate_id,
-                event_type = %record.event_type,
-                attempts = attempt,
-                "plugin notification marked as dead after exceeding max attempts"
-            );
-            let mut dead = self.dead.lock().expect("dead queue mutex poisoned");
-            dead.push(DeadNotification {
-                record,
-                attempts: attempt,
-            });
-            let _ = self.persist();
-        } else {
-            self.push_pending(PendingNotification { record, attempt });
-        }
-    }
-
-    fn stats(&self) -> QueueStatus {
-        let (pending_events, pending_count) = {
-            let queue = self.pending.lock().expect("queue mutex poisoned");
-            let items = queue
-                .iter()
-                .map(|item| QueueEntry {
-                    event_id: item.record.metadata.event_id,
-                    aggregate_type: item.record.aggregate_type.clone(),
-                    aggregate_id: item.record.aggregate_id.clone(),
-                    event_type: item.record.event_type.clone(),
-                    attempts: item.attempt,
-                })
-                .collect::<Vec<_>>();
-            (items, queue.len())
-        };
-
-        let (dead_events, dead_count) = {
-            let queue = self.dead.lock().expect("dead queue mutex poisoned");
-            let items = queue
-                .iter()
-                .map(|item| QueueEntry {
-                    event_id: item.record.metadata.event_id,
-                    aggregate_type: item.record.aggregate_type.clone(),
-                    aggregate_id: item.record.aggregate_id.clone(),
-                    event_type: item.record.event_type.clone(),
-                    attempts: item.attempts,
-                })
-                .collect::<Vec<_>>();
-            (items, queue.len())
-        };
-
-        QueueStatus {
-            pending: pending_count,
-            dead: dead_count,
-            pending_events,
-            dead_events,
-        }
-    }
-
-    async fn pop(&self) -> PendingNotification {
-        loop {
-            if let Some(notification) = {
-                let mut queue = self.pending.lock().expect("queue mutex poisoned");
-                let item = queue.pop_front();
-                if item.is_some() {
-                    let _ = self.persist();
-                }
-                item
-            } {
-                return notification;
-            }
-            self.notify.notified().await;
-        }
-    }
-
-    fn persist(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let status = self.stats();
-        let payload = serde_json::to_string_pretty(&status)?;
-        fs::write(&self.path, payload)?;
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct PendingNotification {
-    record: EventRecord,
-    attempt: u32,
-}
-
-#[allow(dead_code)]
-struct DeadNotification {
-    record: EventRecord,
-    attempts: u32,
-}
-
-#[derive(Serialize)]
-struct QueueStatus {
-    pending: usize,
-    dead: usize,
-    pending_events: Vec<QueueEntry>,
-    dead_events: Vec<QueueEntry>,
-}
-
-#[derive(Serialize)]
-struct QueueEntry {
-    event_id: Uuid,
-    aggregate_type: String,
-    aggregate_id: String,
-    event_type: String,
-    attempts: u32,
-}
-
-pub async fn run(config: Config, config_path: PathBuf, plugins: PluginManager) -> Result<()> {
+pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     let config_snapshot = config.clone();
     let shared_config = Arc::new(RwLock::new(config));
     let config_path = Arc::new(config_path);
 
     let encryption = config_snapshot.encryption_key()?;
-    let store = Arc::new(EventStore::open(
-        config_snapshot.event_store_path(),
-        encryption.clone(),
-    )?);
     let tokens = Arc::new(TokenManager::load(
         config_snapshot.tokens_path(),
         encryption.clone(),
     )?);
+    let store = Arc::new(EventStore::open(
+        config_snapshot.event_store_path(),
+        encryption.clone(),
+    )?);
+    let local_public_key = Arc::new(
+        decode_public_key_bytes(
+            &config_snapshot
+                .load_public_key()
+                .map_err(|err| EventError::Config(err.to_string()))?,
+        )
+        .map_err(|err| EventError::Config(err.to_string()))?,
+    );
     let schemas = Arc::new(SchemaManager::load(config_snapshot.schema_store_path())?);
-    let retry_queue = Arc::new(PluginRetryQueue::new(config_snapshot.plugin_queue_path()));
-    let replication_service = ReplicationService::new(Arc::clone(&store), Arc::clone(&schemas));
-    let replication_manager = if config_snapshot.remotes.is_empty() {
-        None
-    } else {
-        Some(ReplicationManager::from_config(&config_snapshot))
-    };
-    let replication_lock = Arc::new(RwLock::new(replication_manager.clone()));
-    let replication_addr: SocketAddr =
-        config_snapshot
-            .replication
-            .bind_addr
-            .parse()
-            .map_err(|err| {
-                EventError::Config(format!(
-                    "invalid replication bind address {}: {}",
-                    config_snapshot.replication.bind_addr, err
-                ))
-            })?;
-
-    match TcpListener::bind(replication_addr).await {
-        Ok(listener) => {
-            let service = ReplicationServer::new(replication_service.clone());
-            info!(
-                "Replication service listening on {}",
-                config_snapshot.replication.bind_addr
-            );
-            tokio::spawn(async move {
-                let incoming = TcpListenerStream::new(listener);
-                if let Err(err) = tonic::transport::Server::builder()
-                    .add_service(service)
-                    .serve_with_incoming_shutdown(incoming, async {
-                        shutdown_signal().await;
-                    })
-                    .await
-                {
-                    tracing::error!("replication server failed: {}", err);
-                }
-            });
-        }
-        Err(err) => {
-            warn!(
-                "replication listener disabled ({}): {}",
-                config_snapshot.replication.bind_addr, err
-            );
-        }
-    }
-
-    let hidden_aggregates: HashSet<String> = config_snapshot
-        .hidden_aggregate_types
-        .iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect();
-    let hidden_fields: HashMap<String, HashSet<String>> = config_snapshot
-        .hidden_fields
-        .iter()
-        .map(|(aggregate, fields)| {
-            let field_set: HashSet<String> = fields
-                .iter()
-                .map(|field| field.trim().to_string())
-                .filter(|field| !field.is_empty())
-                .collect();
-            (aggregate.trim().to_string(), field_set)
-        })
-        .filter(|(_, fields)| !fields.is_empty())
-        .collect();
-
-    let cache = AggregateCache::new(config_snapshot.cache_threshold).map(Arc::new);
-    let plugin_manager = Arc::new(RwLock::new(plugins));
 
     let state = AppState {
-        store: Arc::clone(&store),
         tokens: Arc::clone(&tokens),
         schemas: Arc::clone(&schemas),
         config: Arc::clone(&shared_config),
-        config_path: Arc::clone(&config_path),
+        _config_path: Arc::clone(&config_path),
+        store: Arc::clone(&store),
         restrict: config_snapshot.restrict,
         list_page_size: config_snapshot.list_page_size,
         page_limit: config_snapshot.page_limit,
-        plugins: Arc::clone(&plugin_manager),
-        retry_queue,
-        plugin_max_attempts: config_snapshot.plugin_max_attempts,
-        replication: Arc::clone(&replication_lock),
-        hidden_aggregates: Arc::new(hidden_aggregates),
-        hidden_fields: Arc::new(hidden_fields),
-        cache,
     };
 
-    start_plugin_retry_worker(state.clone());
+    let api = config_snapshot.api.clone();
+    let grpc_enabled = api.grpc_enabled();
+    let mut grpc_handle = None;
+    let mut shared_grpc = false;
 
-    let api_mode = config_snapshot.api_mode;
-    let grpc_enabled = config_snapshot.grpc.enabled || api_mode.grpc_enabled();
-    let grpc_bind_addr = config_snapshot.grpc.bind_addr.clone();
-    let grpc_state = state.clone();
-    let grpc_handle = if grpc_enabled {
-        let grpc_addr: SocketAddr = grpc_bind_addr.parse().map_err(|err| {
+    if grpc_enabled {
+        let parsed: SocketAddr = config_snapshot.grpc.bind_addr.parse().map_err(|err| {
             EventError::Config(format!(
                 "invalid gRPC bind address {}: {}",
                 config_snapshot.grpc.bind_addr, err
             ))
         })?;
-        Some(tokio::spawn(async move {
-            info!("Starting gRPC API server on {}", grpc_addr);
-            if let Err(err) = tonic::transport::Server::builder()
-                .add_service(GrpcApi::new(grpc_state).into_server())
-                .serve_with_shutdown(grpc_addr, async {
-                    shutdown_signal().await;
-                })
-                .await
-            {
-                warn!("gRPC API server failed: {}", err);
-            } else {
-                info!("gRPC API server stopped");
-            }
-        }))
-    } else {
-        None
-    };
+        shared_grpc = parsed.port() == config_snapshot.port;
 
-    if !api_mode.rest_enabled() && !api_mode.graphql_enabled() && !grpc_enabled {
+        if !shared_grpc {
+            let grpc_state = state.clone();
+            let addr = parsed;
+            grpc_handle = Some(tokio::spawn(async move {
+                info!("Starting gRPC API server on {}", addr);
+                if let Err(err) = tonic::transport::Server::builder()
+                    .add_service(GrpcApi::new(grpc_state).into_server())
+                    .serve_with_shutdown(addr, async {
+                        shutdown_signal().await;
+                    })
+                    .await
+                {
+                    warn!("gRPC API server failed: {}", err);
+                } else {
+                    info!("gRPC API server stopped");
+                }
+            }));
+        }
+    }
+
+    let cli_bind_addr = config_snapshot.socket.bind_addr.clone();
+    let addr_store =
+        Arc::clone(CLI_PROXY_ADDR.get_or_init(|| Arc::new(AsyncRwLock::new(String::new()))));
+    {
+        let mut guard = addr_store.write().await;
+        *guard = cli_bind_addr.clone();
+    }
+
+    let cli_proxy_handle = cli_proxy::start(
+        &cli_bind_addr,
+        Arc::clone(&config_path),
+        Arc::clone(&store),
+        Arc::clone(&schemas),
+        Arc::clone(&local_public_key),
+    )
+    .await
+    .map_err(|err| EventError::Config(format!("failed to start CLI proxy: {err}")))?;
+
+    if !api.rest_enabled() && !api.graphql_enabled() && !grpc_enabled {
         return Err(EventError::Config(
             "at least one API surface (REST, GraphQL, or gRPC) must be enabled".to_string(),
         ));
@@ -483,7 +261,7 @@ pub async fn run(config: Config, config_path: PathBuf, plugins: PluginManager) -
 
     let mut app = Router::new();
 
-    if api_mode.rest_enabled() {
+    if api.rest_enabled() {
         let rest_router = Router::new()
             .route("/health", get(health))
             .route("/v1/aggregates", get(list_aggregates))
@@ -504,7 +282,7 @@ pub async fn run(config: Config, config_path: PathBuf, plugins: PluginManager) -
         app = app.merge(rest_router);
     }
 
-    if api_mode.graphql_enabled() {
+    if api.graphql_enabled() {
         let graphql_state = GraphqlState::new(state.clone());
         let graphql_schema = build_schema(graphql_state);
         let graphql_router = Router::new()
@@ -563,11 +341,22 @@ pub async fn run(config: Config, config_path: PathBuf, plugins: PluginManager) -
         "Starting EventDBX server on {addr} (restrict={})",
         config_snapshot.restrict
     );
+    if shared_grpc {
+        info!(
+            "Starting gRPC API server on shared HTTP listener (port {})",
+            config_snapshot.port
+        );
+    }
 
     let listener = TcpListener::bind(addr).await?;
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let result = if shared_grpc {
+        serve_shared(listener, app, state.clone()).await
+    } else {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .map_err(|err| EventError::Storage(err.to_string()))
+    };
 
     if let Some(handle) = grpc_handle {
         handle.abort();
@@ -575,10 +364,112 @@ pub async fn run(config: Config, config_path: PathBuf, plugins: PluginManager) -
     if let Some(handle) = admin_handle {
         handle.abort();
     }
+    cli_proxy_handle.abort();
 
-    result.map_err(|err| EventError::Storage(err.to_string()))?;
+    result?;
 
     Ok(())
+}
+
+async fn serve_shared(listener: TcpListener, app: Router, grpc_state: AppState) -> Result<()> {
+    let (grpc_tx, grpc_rx) = mpsc::channel::<TcpStream>(64);
+
+    let http_listener = SharedHttpListener::new(listener, grpc_tx);
+
+    let grpc_future = async {
+        let incoming = ReceiverStream::new(grpc_rx).map(|stream| Ok::<_, io::Error>(stream));
+        tonic::transport::Server::builder()
+            .add_service(GrpcApi::new(grpc_state).into_server())
+            .serve_with_incoming_shutdown(incoming, async {
+                shutdown_signal().await;
+            })
+            .await
+    };
+
+    let http_future = axum::serve(http_listener, app).with_graceful_shutdown(shutdown_signal());
+
+    let (grpc_result, http_result) = tokio::join!(grpc_future, http_future);
+
+    match grpc_result {
+        Ok(_) => info!("gRPC API server stopped"),
+        Err(err) => {
+            warn!("gRPC API server failed: {}", err);
+            return Err(EventError::Storage(err.to_string()));
+        }
+    }
+
+    http_result.map_err(|err| EventError::Storage(err.to_string()))
+}
+
+struct SharedHttpListener {
+    inner: TcpListener,
+    grpc_tx: mpsc::Sender<TcpStream>,
+}
+
+impl SharedHttpListener {
+    fn new(inner: TcpListener, grpc_tx: mpsc::Sender<TcpStream>) -> Self {
+        Self { inner, grpc_tx }
+    }
+}
+
+impl axum::serve::Listener for SharedHttpListener {
+    type Io = TcpStream;
+    type Addr = SocketAddr;
+
+    fn accept(&mut self) -> impl Future<Output = (Self::Io, Self::Addr)> + Send {
+        let listener = &self.inner;
+        let grpc_sender = self.grpc_tx.clone();
+
+        async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, addr)) => {
+                        if let Err(err) = stream.set_nodelay(true) {
+                            warn!("failed to set TCP_NODELAY on incoming connection: {err}");
+                        }
+
+                        if is_grpc_connection(&stream).await {
+                            if let Err(err) = grpc_sender.send(stream).await {
+                                warn!("dropping gRPC connection: {}", err);
+                            }
+                            continue;
+                        }
+
+                        return (stream, addr);
+                    }
+                    Err(err) => {
+                        warn!("failed to accept connection: {}", err);
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+async fn is_grpc_connection(stream: &TcpStream) -> bool {
+    const PREFACE: &[u8] = b"PRI";
+    let mut buf = [0u8; 3];
+    match stream.peek(&mut buf).await {
+        Ok(n) if n >= PREFACE.len() => &buf[..PREFACE.len()] == PREFACE,
+        Ok(_) => false,
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            false
+        }
+        Err(err) => {
+            warn!("failed to peek connection bytes: {}", err);
+            false
+        }
+    }
 }
 
 async fn health() -> impl IntoResponse {
@@ -603,24 +494,29 @@ async fn list_aggregates(
     Query(params): Query<AggregatesQuery>,
 ) -> Result<Json<Vec<AggregateState>>> {
     let skip = params.skip.unwrap_or(0);
-    let mut take = params.take.unwrap_or(state.list_page_size);
+    let mut take = params.take.unwrap_or(state.list_page_size());
     if take == 0 {
         return Ok(Json(Vec::new()));
     }
-    if take > state.page_limit {
-        take = state.page_limit;
+    if take > state.page_limit() {
+        take = state.page_limit();
     }
-    let aggregates = state.store.aggregates();
+    let args = vec![
+        "aggregate".to_string(),
+        "list".to_string(),
+        "--skip".to_string(),
+        skip.to_string(),
+        "--take".to_string(),
+        take.to_string(),
+        "--json".to_string(),
+    ];
+
+    let aggregates: Vec<AggregateState> = run_cli_json(args).await?;
     let page = aggregates
         .into_iter()
         .filter(|aggregate| !state.is_hidden_aggregate(&aggregate.aggregate_type))
-        .skip(skip)
-        .take(take)
-        .map(|aggregate| {
-            state.cache_store(&aggregate);
-            state.sanitize_aggregate(aggregate)
-        })
-        .collect::<Vec<_>>();
+        .map(|aggregate| state.sanitize_aggregate(aggregate))
+        .collect();
     Ok(Json(page))
 }
 
@@ -631,7 +527,15 @@ async fn get_aggregate(
     if state.is_hidden_aggregate(&aggregate_type) {
         return Err(EventError::AggregateNotFound);
     }
-    let aggregate = state.load_aggregate(&aggregate_type, &aggregate_id)?;
+    let args = vec![
+        "aggregate".to_string(),
+        "get".to_string(),
+        aggregate_type.clone(),
+        aggregate_id.clone(),
+    ];
+
+    let mut aggregate: AggregateState = run_cli_json(args).await?;
+    aggregate = state.sanitize_aggregate(aggregate);
     Ok(Json(aggregate))
 }
 
@@ -652,17 +556,28 @@ async fn list_events(
         return Err(EventError::AggregateNotFound);
     }
     let skip = params.skip.unwrap_or(0);
-    let mut take = params.take.unwrap_or(state.page_limit);
+    let mut take = params.take.unwrap_or(state.page_limit());
     if take == 0 {
         return Ok(Json(Vec::new()));
     }
-    if take > state.page_limit {
-        take = state.page_limit;
+    if take > state.page_limit() {
+        take = state.page_limit();
     }
 
-    let events = state.store.list_events(&aggregate_type, &aggregate_id)?;
-    let filtered: Vec<EventRecord> = events.into_iter().skip(skip).take(take).collect();
-    Ok(Json(filtered))
+    let args = vec![
+        "aggregate".to_string(),
+        "replay".to_string(),
+        aggregate_type.clone(),
+        aggregate_id.clone(),
+        "--skip".to_string(),
+        skip.to_string(),
+        "--take".to_string(),
+        take.to_string(),
+        "--json".to_string(),
+    ];
+
+    let events: Vec<EventRecord> = run_cli_json(args).await?;
+    Ok(Json(events))
 }
 
 async fn graphql_handler(
@@ -694,30 +609,101 @@ async fn append_event_global(
     Json(request): Json<AppendEventGlobalRequest>,
 ) -> Result<Json<EventRecord>> {
     let token = extract_bearer_token(&headers).ok_or(EventError::Unauthorized)?;
-    let claims = state.tokens.authorize(&token, AccessKind::Write)?.into();
+    let grant = state.tokens().authorize(&token, AccessKind::Write)?;
 
-    let payload_map = store::payload_to_map(&request.payload);
-    if state.restrict {
+    let AppendEventGlobalRequest {
+        aggregate_type,
+        aggregate_id,
+        event_type,
+        payload,
+    } = request;
+
+    let payload_map = store::payload_to_map(&payload);
+    if state.restrict() {
         state
-            .schemas
-            .validate_event(&request.aggregate_type, &request.event_type, &payload_map)?;
+            .schemas()
+            .validate_event(&aggregate_type, &event_type, &payload_map)?;
     }
 
-    let aggregate_type = request.aggregate_type.clone();
-    let aggregate_id = request.aggregate_id.clone();
+    let issued_by: Option<ActorClaims> = Some(grant.into());
+    let store = state.store();
+    let schemas = state.schemas();
 
-    let record = state.store.append(AppendEvent {
-        aggregate_type: request.aggregate_type,
-        aggregate_id: request.aggregate_id,
-        event_type: request.event_type,
-        payload: request.payload,
-        issued_by: Some(claims),
-    })?;
+    let append_input = AppendEvent {
+        aggregate_type: aggregate_type.clone(),
+        aggregate_id: aggregate_id.clone(),
+        event_type: event_type.clone(),
+        payload: payload.clone(),
+        issued_by,
+    };
 
-    state.maybe_create_snapshot(&record);
-    notify_plugins(&state, &record);
-    replicate_events(&state, std::slice::from_ref(&record));
-    state.refresh_cached_aggregate(&aggregate_type, &aggregate_id);
+    let record = tokio::task::spawn_blocking({
+        let store = Arc::clone(&store);
+        move || store.append(append_input)
+    })
+    .await
+    .map_err(|err| EventError::Storage(format!("failed to append event: {err}")))??;
+
+    if schemas.should_snapshot(&record.aggregate_type, record.version) {
+        let aggregate_type = record.aggregate_type.clone();
+        let aggregate_id = record.aggregate_id.clone();
+        let version = record.version;
+        let snapshot_result = tokio::task::spawn_blocking({
+            let store = Arc::clone(&store);
+            move || {
+                store.create_snapshot(
+                    &aggregate_type,
+                    &aggregate_id,
+                    Some(format!("auto snapshot v{}", version)),
+                )
+            }
+        })
+        .await
+        .map_err(|err| EventError::Storage(format!("failed to create auto snapshot: {err}")))?;
+
+        if let Err(err) = snapshot_result {
+            warn!(
+                target: "server",
+                "failed to create auto snapshot for {}::{} v{}: {}",
+                record.aggregate_type,
+                record.aggregate_id,
+                record.version,
+                err
+            );
+        }
+    }
+
+    let plugins = {
+        let config = state.config();
+        let guard = config.read().unwrap();
+        PluginManager::from_config(&*guard)?
+    };
+
+    if !plugins.is_empty() {
+        let schema = schemas.get(&record.aggregate_type).ok();
+        let aggregate_type = record.aggregate_type.clone();
+        let aggregate_id = record.aggregate_id.clone();
+        let state_result = tokio::task::spawn_blocking({
+            let store = Arc::clone(&store);
+            move || store.get_aggregate_state(&aggregate_type, &aggregate_id)
+        })
+        .await
+        .map_err(|err| EventError::Storage(format!("failed to load aggregate state: {err}")))?;
+
+        match state_result {
+            Ok(current_state) => {
+                if let Err(err) = plugins.notify_event(&record, &current_state, schema.as_ref()) {
+                    error!("plugin notification failed: {err}");
+                }
+            }
+            Err(err) => {
+                warn!(
+                    "plugin notification skipped (failed to load state for {}::{}): {}",
+                    record.aggregate_type, record.aggregate_id, err
+                );
+            }
+        }
+    }
 
     Ok(Json(record))
 }
@@ -726,11 +712,21 @@ async fn verify_aggregate(
     State(state): State<AppState>,
     Path((aggregate_type, aggregate_id)): Path<(String, String)>,
 ) -> Result<Json<VerifyResponse>> {
-    let merkle_root = state.store.verify(&aggregate_type, &aggregate_id)?;
-    Ok(Json(VerifyResponse { merkle_root }))
+    if state.is_hidden_aggregate(&aggregate_type) {
+        return Err(EventError::AggregateNotFound);
+    }
+    let args = vec![
+        "aggregate".to_string(),
+        "verify".to_string(),
+        aggregate_type.clone(),
+        aggregate_id.clone(),
+        "--json".to_string(),
+    ];
+    let response: VerifyResponse = run_cli_json(args).await?;
+    Ok(Json(response))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct VerifyResponse {
     merkle_root: String,
 }
@@ -743,116 +739,6 @@ pub(crate) fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     } else {
         None
     }
-}
-
-pub(crate) fn replicate_events(state: &AppState, records: &[EventRecord]) {
-    if let Some(manager) = state.replication_manager() {
-        manager.enqueue(records);
-    }
-}
-
-fn start_plugin_retry_worker(state: AppState) {
-    tokio::spawn(async move {
-        loop {
-            let PendingNotification { record, attempt } = state.retry_queue.pop().await;
-            let delay = backoff_delay(attempt);
-            sleep(delay).await;
-
-            match dispatch_plugin_notification(&state, &record).await {
-                Ok(_) => {
-                    // success, nothing else to do
-                }
-                Err(EventError::AggregateNotFound) => {
-                    warn!(
-                        aggregate_type = %record.aggregate_type,
-                        aggregate_id = %record.aggregate_id,
-                        event_type = %record.event_type,
-                        "plugin retry skipped: aggregate no longer exists"
-                    );
-                }
-                Err(err) => {
-                    warn!(
-                        aggregate_type = %record.aggregate_type,
-                        aggregate_id = %record.aggregate_id,
-                        event_type = %record.event_type,
-                        attempt = attempt,
-                        "plugin notification retry failed: {}",
-                        err
-                    );
-
-                    state.retry_queue.schedule_retry(
-                        record,
-                        attempt + 1,
-                        state.plugin_max_attempts,
-                    );
-                }
-            }
-        }
-    });
-}
-
-fn backoff_delay(attempt: u32) -> Duration {
-    match attempt {
-        0 | 1 => Duration::from_secs(1),
-        _ => {
-            let capped = (attempt - 1).min(6);
-            Duration::from_secs(2u64.pow(capped))
-        }
-    }
-}
-
-async fn dispatch_plugin_notification(state: &AppState, record: &EventRecord) -> Result<()> {
-    let aggregate_state = state
-        .store
-        .get_aggregate_state(&record.aggregate_type, &record.aggregate_id)?;
-    let schema = state.schemas.get(&record.aggregate_type).ok();
-    let plugins = state.plugin_manager();
-    let record_clone = record.clone();
-
-    tokio::task::spawn_blocking(move || {
-        let schema_ref = schema.as_ref();
-        plugins.notify_event(&record_clone, &aggregate_state, schema_ref)
-    })
-    .await
-    .map_err(|err| EventError::Storage(err.to_string()))??;
-
-    Ok(())
-}
-
-pub(crate) fn notify_plugins(state: &AppState, record: &EventRecord) {
-    if !state.has_enabled_plugins() {
-        return;
-    }
-
-    let state_clone = state.clone();
-    let record_clone = record.clone();
-    tokio::spawn(async move {
-        match dispatch_plugin_notification(&state_clone, &record_clone).await {
-            Ok(_) => {}
-            Err(EventError::AggregateNotFound) => {
-                warn!(
-                    aggregate_type = %record_clone.aggregate_type,
-                    aggregate_id = %record_clone.aggregate_id,
-                    event_type = %record_clone.event_type,
-                    "plugin notification skipped: aggregate no longer exists"
-                );
-            }
-            Err(err) => {
-                warn!(
-                    aggregate_type = %record_clone.aggregate_type,
-                    aggregate_id = %record_clone.aggregate_id,
-                    event_type = %record_clone.event_type,
-                    "plugin notification failed: {} (queued for retry)",
-                    err
-                );
-                state_clone.retry_queue.schedule_retry(
-                    record_clone,
-                    2,
-                    state_clone.plugin_max_attempts,
-                );
-            }
-        }
-    });
 }
 
 async fn shutdown_signal() {

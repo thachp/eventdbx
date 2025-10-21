@@ -4,9 +4,10 @@ use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand};
 
 use eventdbx::{
-    config::{ConfigUpdate, load_or_default},
+    config::load_or_default,
     schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
 };
+use serde_json;
 
 #[derive(Subcommand)]
 pub enum SchemaCommands {
@@ -17,7 +18,7 @@ pub enum SchemaCommands {
     /// Remove an event definition from an aggregate
     Remove(SchemaRemoveEventArgs),
     /// List available schemas
-    List,
+    List(SchemaListArgs),
     /// Hide a field from aggregate detail responses
     Hide(SchemaHideArgs),
     /// Fallback handler for positional aggregate commands
@@ -35,6 +36,17 @@ pub struct SchemaCreateArgs {
 
     #[arg(long)]
     pub snapshot_threshold: Option<u64>,
+
+    /// Emit JSON output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Args, Default)]
+pub struct SchemaListArgs {
+    /// Emit JSON output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -78,12 +90,16 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                 events: args.events,
                 snapshot_threshold: args.snapshot_threshold.or(config.snapshot_threshold),
             })?;
-            println!(
-                "schema={} events={} snapshot_threshold={:?}",
-                schema.aggregate,
-                schema.events.len(),
-                schema.snapshot_threshold
-            );
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&schema)?);
+            } else {
+                println!(
+                    "schema={} events={} snapshot_threshold={:?}",
+                    schema.aggregate,
+                    schema.events.len(),
+                    schema.snapshot_threshold
+                );
+            }
             Ok(())
         }
         SchemaCommands::Add(args) => {
@@ -115,17 +131,22 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
             );
             Ok(())
         }
-        SchemaCommands::List => {
+        SchemaCommands::List(args) => {
             let (config, _) = load_or_default(config_path)?;
             let manager = SchemaManager::load(config.schema_store_path())?;
-            for schema in manager.list() {
-                println!(
-                    "schema={} events={} locked={} snapshot_threshold={:?}",
-                    schema.aggregate,
-                    schema.events.len(),
-                    schema.locked,
-                    schema.snapshot_threshold
-                );
+            let schemas = manager.list();
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&schemas)?);
+            } else {
+                for schema in schemas {
+                    println!(
+                        "schema={} events={} locked={} snapshot_threshold={:?}",
+                        schema.aggregate,
+                        schema.events.len(),
+                        schema.locked,
+                        schema.snapshot_threshold
+                    );
+                }
             }
             Ok(())
         }
@@ -155,7 +176,7 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
 }
 
 fn hide_field(config_path: Option<PathBuf>, args: SchemaHideArgs) -> Result<()> {
-    let (mut config, path) = load_or_default(config_path)?;
+    let (config, _) = load_or_default(config_path)?;
     let manager = SchemaManager::load(config.schema_store_path())?;
 
     let aggregate = args.aggregate.trim();
@@ -176,19 +197,9 @@ fn hide_field(config_path: Option<PathBuf>, args: SchemaHideArgs) -> Result<()> 
         );
     }
 
-    let mut hidden_fields = config.hidden_fields.clone();
-    let entry = hidden_fields.entry(aggregate.to_string()).or_default();
-    if !entry.iter().any(|existing| existing == field) {
-        entry.push(field.to_string());
-        entry.sort();
-        entry.dedup();
-    }
-
-    config.apply_update(ConfigUpdate {
-        hidden_fields: Some(hidden_fields),
-        ..ConfigUpdate::default()
-    });
-    config.save(&path)?;
+    let mut update = SchemaUpdate::default();
+    update.hidden_field = Some((field.to_string(), true));
+    manager.update(aggregate, update)?;
 
     println!("aggregate={} field={} hidden", aggregate, field);
     Ok(())

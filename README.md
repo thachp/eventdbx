@@ -14,12 +14,12 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 
    ```bash
    # Install prebuilt binaries via shell script
-   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.9.15/eventdbx-installer.sh | sh
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.11.3/eventdbx-installer.sh | sh
    ```
 
    ```bash
    # Install prebuilt binaries via powershell script
-   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.9.15/eventdbx-installer.ps1 | iex"
+   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.11.3/eventdbx-installer.ps1 | iex"
    ```
 
 2. **Start the server**
@@ -33,7 +33,17 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
    - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
    - The server owns the RocksDB lock while it is running; the CLI detects this and automatically proxies write commands through the HTTP API. Stop the daemon only when you need offline tasks like staging or manual maintenance.
 
-- Choose the API surface with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). `--api grpc`/`--api all` automatically flip the gRPC listener on for the current session; persistently enable it by setting `grpc.enabled = true` in `config.toml`.
+- Choose the API surfaces with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). Persist the selection by editing the `[api]` table in `config.toml`, for example:
+  ```
+  [api]
+  rest = true
+  graphql = true
+  grpc = true
+  ```
+- Default ports can be overridden in `config.toml`:
+  - REST and GraphQL share the HTTP listener defined by `port` (default `7070`).
+  - gRPC uses `[grpc].bind_addr` (default `127.0.0.1:7070`, sharing the HTTP listener).
+  - The CLI socket listens on `[socket].bind_addr` (default `127.0.0.1:6363`).
 
 3. **Define a schema (recommended when running in restricted mode)**
 
@@ -194,9 +204,7 @@ Clearing dead entries prompts for confirmation to avoid accidental removal. Manu
 - `eventdbx remote pull <name> [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
   Fast-forwards the local node from the remote, reporting changes in dry-run mode.
 
-Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. The standby gRPC listener defaults to `127.0.0.1:7443`; override it in `config.toml` via `replication.bind_addr` when you expose the replica on another interface. When the HTTP server processes writes it streams committed events to every configured remote over gRPC using the pinned public keys. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
-Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data.
-
+Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. The Cap'n Proto listener that powers CLI automation and replication defaults to `[socket].bind_addr` (default `127.0.0.1:6363`); point remotes at that address with a `tcp://` endpoint or override the bind address in `config.toml` when you expose the replica on another interface. Remote `push` and `pull` commands connect over this socket—no gRPC listener is required—and every session is authenticated with the remote's pinned Ed25519 public key. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
 ### Maintenance
 
 - `eventdbx backup --output <path> [--force]`  
@@ -328,7 +336,7 @@ curl \
 
 ## gRPC API
 
-Set `grpc.enabled = true` in `config.toml` to expose a gRPC surface (disabled by default). The listener binds to `grpc.bind_addr` (default `127.0.0.1:7442`). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
+Enable the gRPC surface by setting `[api] grpc = true` in `config.toml`. The `[grpc]` table configures the bind address (default `127.0.0.1:7070`, reusing the HTTP listener). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
 
 Example `grpcurl` invocation:
 
@@ -340,7 +348,7 @@ grpcurl -H "authorization: Bearer TOKEN" \
         "event_type": "patient-updated",
         "payload_json": "{\"status\":\"inactive\"}"
       }' \
-  -plaintext 127.0.0.1:7442 eventdbx.api.EventService/AppendEvent
+  -plaintext 127.0.0.1:7070 eventdbx.api.EventService/AppendEvent
 ```
 
 ## GraphQL API
