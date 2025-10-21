@@ -50,6 +50,11 @@ pub struct ConfigArgs {
 
 pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
     let (mut config, path) = load_or_default(config_path)?;
+    if !has_updates(&args) {
+        let contents = toml::to_string_pretty(&config)?;
+        println!("{contents}");
+        return Ok(());
+    }
     let was_initialized = config.is_initialized();
 
     let ConfigArgs {
@@ -144,4 +149,33 @@ pub fn normalize_secret(input: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn has_updates(args: &ConfigArgs) -> bool {
+    args.port.is_some()
+        || args.data_dir.is_some()
+        || args.cache_threshold.is_some()
+        || args
+            .data_encryption_key
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        || args.list_page_size.is_some()
+        || args.page_limit.is_some()
+        || args.plugin_max_attempts.is_some()
+        || args.snapshot_threshold.is_some()
+        || args.clear_snapshot_threshold
+        || args.admin_enabled.is_some()
+        || args
+            .admin_bind
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        || args.admin_port.is_some()
+        || args
+            .admin_master_key
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        || args.clear_admin_master_key
 }

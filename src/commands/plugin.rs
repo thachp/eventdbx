@@ -209,7 +209,7 @@ pub struct PluginReplayArgs {
 }
 
 pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<()> {
-    let (mut config, path) = load_or_default(config_path)?;
+    let (config, path) = load_or_default(config_path)?;
 
     let mut plugins = config.load_plugins()?;
     let mut plugins_dirty = normalize_plugin_names(&mut plugins);
@@ -217,28 +217,9 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
         plugins_dirty = true;
     }
 
-    let mut config_dirty = false;
-    if plugins.is_empty() && !config.plugins.is_empty() {
-        plugins = config.plugins.clone();
-        config.plugins.clear();
-        plugins_dirty = true;
-        config_dirty = true;
-
-        if normalize_plugin_names(&mut plugins) {
-            plugins_dirty = true;
-        }
-        if dedupe_plugins_by_name(&mut plugins) {
-            plugins_dirty = true;
-        }
-    }
-
     if plugins_dirty {
         config.ensure_data_dir()?;
         config.save_plugins(&plugins)?;
-    }
-    if config_dirty {
-        config.ensure_data_dir()?;
-        config.save(&path)?;
     }
 
     match command {

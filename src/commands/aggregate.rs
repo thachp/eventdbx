@@ -1,11 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    env,
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
 };
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use csv::WriterBuilder;
 use serde::{Deserialize, Serialize};
@@ -15,11 +16,15 @@ use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
 use eventdbx::{
     config::{Config, load_or_default},
+    error::EventError,
     merkle::compute_merkle_root,
     plugin::PluginManager,
     schema::SchemaManager,
     store::{self, ActorClaims, AppendEvent, EventRecord, EventStore, payload_to_map},
+    token::{IssueTokenInput, TokenManager},
 };
+
+use crate::commands::client::ServerClient;
 
 #[derive(Subcommand)]
 pub enum AggregateCommands {
@@ -65,6 +70,10 @@ pub struct AggregateApplyArgs {
     /// Stage the event for a later commit instead of writing immediately
     #[arg(long, default_value_t = false)]
     pub stage: bool,
+
+    /// Authorization token used when proxying through a running server
+    #[arg(long, value_name = "TOKEN")]
+    pub token: Option<String>,
 }
 
 #[derive(Args)]
@@ -297,6 +306,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 event,
                 fields,
                 stage,
+                token,
             } = args;
             let payload = collect_payload(fields);
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
@@ -306,61 +316,95 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
 
             if stage {
-                let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
-                {
-                    let mut tx = store.transaction()?;
-                    tx.append(AppendEvent {
+                match EventStore::open(config.event_store_path(), config.encryption_key()?) {
+                    Ok(store) => {
+                        {
+                            let mut tx = store.transaction()?;
+                            tx.append(AppendEvent {
+                                aggregate_type: aggregate.clone(),
+                                aggregate_id: aggregate_id.clone(),
+                                event_type: event.clone(),
+                                payload: payload.clone(),
+                                issued_by: None,
+                            })?;
+                        }
+
+                        let staged_event = StagedEvent {
+                            aggregate,
+                            aggregate_id,
+                            event,
+                            payload,
+                            issued_by: None,
+                        };
+                        let staging_path = config.staging_path();
+                        append_staged_event(staging_path.as_path(), staged_event)?;
+                        println!("event staged for later commit");
+                        return Ok(());
+                    }
+                    Err(EventError::Storage(message)) if is_lock_error(&message) => {
+                        bail!(
+                            "event store is locked by a running server.\nStop the server or omit --stage."
+                        );
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+
+            let encryption = config.encryption_key()?;
+            match EventStore::open(config.event_store_path(), encryption) {
+                Ok(store) => {
+                    let plugins = PluginManager::from_config(&config)?;
+                    let record = store.append(AppendEvent {
                         aggregate_type: aggregate.clone(),
                         aggregate_id: aggregate_id.clone(),
                         event_type: event.clone(),
                         payload: payload.clone(),
                         issued_by: None,
                     })?;
-                }
 
-                let staged_event = StagedEvent {
-                    aggregate,
-                    aggregate_id,
-                    event,
-                    payload,
-                    issued_by: None,
-                };
-                let staging_path = config.staging_path();
-                append_staged_event(staging_path.as_path(), staged_event)?;
-                println!("event staged for later commit");
-                return Ok(());
-            }
+                    maybe_auto_snapshot(&store, &schema_manager, &record);
+                    println!("{}", serde_json::to_string_pretty(&record)?);
 
-            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
-            let plugins = PluginManager::from_config(&config)?;
-            let record = store.append(AppendEvent {
-                aggregate_type: aggregate.clone(),
-                aggregate_id: aggregate_id.clone(),
-                event_type: event.clone(),
-                payload,
-                issued_by: None,
-            })?;
-
-            maybe_auto_snapshot(&store, &schema_manager, &record);
-            println!("{}", serde_json::to_string_pretty(&record)?);
-
-            if !plugins.is_empty() {
-                let schema = schema_manager.get(&record.aggregate_type).ok();
-                match store.get_aggregate_state(&record.aggregate_type, &record.aggregate_id) {
-                    Ok(current_state) => {
-                        if let Err(err) =
-                            plugins.notify_event(&record, &current_state, schema.as_ref())
+                    if !plugins.is_empty() {
+                        let schema = schema_manager.get(&record.aggregate_type).ok();
+                        match store
+                            .get_aggregate_state(&record.aggregate_type, &record.aggregate_id)
                         {
-                            eprintln!("plugin notification failed: {}", err);
+                            Ok(current_state) => {
+                                if let Err(err) =
+                                    plugins.notify_event(&record, &current_state, schema.as_ref())
+                                {
+                                    eprintln!("plugin notification failed: {}", err);
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!(
+                                    "plugin notification skipped (failed to load state): {}",
+                                    err
+                                );
+                            }
                         }
                     }
-                    Err(err) => {
-                        eprintln!(
-                            "plugin notification skipped (failed to load state): {}",
-                            err
+                    return Ok(());
+                }
+                Err(EventError::Storage(message)) if is_lock_error(&message) => {
+                    if !config.api_mode.rest_enabled() {
+                        bail!(
+                            "event store is locked by a running server, and the REST API is disabled.\nEnable REST (e.g. `eventdbx config --api rest`) or stop the server to continue with CLI writes."
                         );
                     }
+                    let record = proxy_append_via_http(
+                        &config,
+                        token.clone(),
+                        &aggregate,
+                        &aggregate_id,
+                        &event,
+                        &payload,
+                    )?;
+                    println!("{}", serde_json::to_string_pretty(&record)?);
+                    return Ok(());
                 }
+                Err(err) => return Err(err.into()),
             }
         }
         AggregateCommands::Replay(args) => {
@@ -508,6 +552,83 @@ fn maybe_auto_snapshot(store: &EventStore, schemas: &SchemaManager, record: &Eve
             record.aggregate_type, record.aggregate_id, record.version, err
         ),
     }
+}
+
+fn proxy_append_via_http(
+    config: &Config,
+    token: Option<String>,
+    aggregate: &str,
+    aggregate_id: &str,
+    event: &str,
+    payload: &Value,
+) -> Result<EventRecord> {
+    let token = ensure_proxy_token(config, token)?;
+    let client = ServerClient::new(config)?;
+    client
+        .append_event(&token, aggregate, aggregate_id, event, payload)
+        .with_context(|| {
+            format!(
+                "failed to append event via running server on port {}",
+                config.port
+            )
+        })
+}
+
+fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> {
+    if let Some(token) = token.and_then(normalize_token) {
+        return Ok(token);
+    }
+    if let Some(token) = env::var("EVENTDBX_TOKEN").ok().and_then(normalize_token) {
+        return Ok(token);
+    }
+    issue_ephemeral_token(config)
+}
+
+fn issue_ephemeral_token(config: &Config) -> Result<String> {
+    let encryptor = config.encryption_key()?;
+    let manager = TokenManager::load(config.tokens_path(), encryptor)?;
+    let user = proxy_user_identity();
+    let record = manager.issue(IssueTokenInput {
+        group: "cli".to_string(),
+        user,
+        expiration_secs: Some(60),
+        limit: Some(1),
+        keep_alive: false,
+    })?;
+    Ok(record.token)
+}
+
+fn proxy_user_identity() -> String {
+    let env_value = env::var("USER")
+        .or_else(|_| env::var("USERNAME"))
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+
+    match env_value {
+        Some(user) => format!("cli:{}", user),
+        None => "cli:local".to_string(),
+    }
+}
+
+fn normalize_token(token: String) -> Option<String> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn is_lock_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("lock file") || lower.contains("resource temporarily unavailable")
 }
 
 fn export_aggregates(config: &Config, args: AggregateExportArgs) -> Result<()> {

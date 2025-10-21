@@ -69,7 +69,7 @@ pub struct Config {
         deserialize_with = "deserialize_restrict"
     )]
     pub restrict: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub plugins: Vec<PluginDefinition>,
     #[serde(default)]
     pub column_types: BTreeMap<String, BTreeMap<String, String>>,
@@ -163,7 +163,8 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
         let updated = cfg.ensure_encryption_key();
         cfg.ensure_data_dir()?;
         cfg.ensure_replication_identity()?;
-        if updated {
+        let migrated = cfg.migrate_plugins()?;
+        if updated || migrated {
             cfg.save(&config_path)?;
         }
         Ok((cfg, config_path))
@@ -172,12 +173,28 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
         let _ = cfg.ensure_encryption_key();
         cfg.ensure_data_dir()?;
         cfg.ensure_replication_identity()?;
+        let _ = cfg.migrate_plugins()?;
         cfg.save(&config_path)?;
         Ok((cfg, config_path))
     }
 }
 
 impl Config {
+    pub fn migrate_plugins(&mut self) -> Result<bool> {
+        if self.plugins.is_empty() {
+            return Ok(false);
+        }
+
+        let existing = self.load_plugins()?;
+        if existing.is_empty() {
+            self.save_plugins(&self.plugins)?;
+        }
+
+        self.plugins.clear();
+        self.updated_at = Utc::now();
+        Ok(true)
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         let contents = toml::to_string_pretty(self)?;
         fs::write(path, contents)?;
