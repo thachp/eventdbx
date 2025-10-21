@@ -368,8 +368,6 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         None
     };
 
-    let grpc_override = api_override.as_ref().and_then(|update| update.grpc);
-
     config.apply_update(ConfigUpdate {
         port: args.port,
         data_dir: args.data_dir.clone(),
@@ -381,14 +379,9 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         page_limit: None,
         plugin_max_attempts: None,
         api: api_override,
-        hidden_aggregate_types: None,
-        hidden_fields: None,
         grpc: None,
         admin: None,
     });
-    if let Some(enabled) = grpc_override {
-        config.grpc.enabled = enabled;
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

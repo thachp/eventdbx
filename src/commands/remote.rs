@@ -1120,6 +1120,9 @@ mod tests {
             snapshot_threshold,
             locked,
             field_locks: field_locks.iter().map(|value| value.to_string()).collect(),
+            hidden: false,
+            hidden_fields: Vec::new(),
+            column_types: BTreeMap::new(),
             events: events
                 .iter()
                 .map(|(event, fields)| {

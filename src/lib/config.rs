@@ -138,8 +138,6 @@ pub struct Config {
     pub restrict: bool,
     #[serde(default, skip_serializing)]
     pub plugins: Vec<PluginDefinition>,
-    #[serde(default)]
-    pub column_types: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default = "default_list_page_size")]
     pub list_page_size: usize,
     #[serde(default = "default_page_limit")]
@@ -154,10 +152,6 @@ pub struct Config {
     pub grpc: GrpcApiConfig,
     #[serde(default = "default_api_config", alias = "api_mode")]
     pub api: ApiConfig,
-    #[serde(default)]
-    pub hidden_aggregate_types: Vec<String>,
-    #[serde(default)]
-    pub hidden_fields: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub admin: AdminApiConfig,
 }
@@ -175,7 +169,6 @@ impl Default for Config {
             updated_at: now,
             restrict: default_restrict(),
             plugins: Vec::new(),
-            column_types: BTreeMap::new(),
             list_page_size: default_list_page_size(),
             page_limit: default_page_limit(),
             plugin_max_attempts: default_plugin_max_attempts(),
@@ -183,8 +176,6 @@ impl Default for Config {
             remotes: BTreeMap::new(),
             grpc: GrpcApiConfig::default(),
             api: default_api_config(),
-            hidden_aggregate_types: Vec::new(),
-            hidden_fields: BTreeMap::new(),
             admin: AdminApiConfig::default(),
         }
     }
@@ -202,8 +193,6 @@ pub struct ConfigUpdate {
     pub page_limit: Option<usize>,
     pub plugin_max_attempts: Option<u32>,
     pub api: Option<ApiConfigUpdate>,
-    pub hidden_aggregate_types: Option<Vec<String>>,
-    pub hidden_fields: Option<BTreeMap<String, Vec<String>>>,
     pub grpc: Option<GrpcApiConfigUpdate>,
     pub admin: Option<AdminApiConfigUpdate>,
 }
@@ -240,6 +229,11 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
     if config_path.exists() {
         let contents = fs::read_to_string(&config_path)?;
         let mut cfg: Config = toml::from_str(&contents)?;
+        if cfg.grpc.legacy_enabled.unwrap_or(false) && !cfg.api.grpc_enabled() {
+            cfg.api.grpc = true;
+        }
+        cfg.grpc.legacy_enabled = None;
+
         let updated = cfg.ensure_encryption_key();
         cfg.ensure_data_dir()?;
         cfg.ensure_replication_identity()?;
@@ -321,40 +315,9 @@ impl Config {
             }
         }
         if let Some(grpc) = update.grpc {
-            if let Some(enabled) = grpc.enabled {
-                self.grpc.enabled = enabled;
-            }
             if let Some(bind_addr) = grpc.bind_addr {
                 self.grpc.bind_addr = bind_addr;
             }
-        }
-        if let Some(hidden_types) = update.hidden_aggregate_types {
-            self.hidden_aggregate_types = hidden_types
-                .into_iter()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .collect();
-        }
-        if let Some(hidden_fields) = update.hidden_fields {
-            let mut normalized = BTreeMap::new();
-            for (aggregate, fields) in hidden_fields {
-                let aggregate = aggregate.trim();
-                if aggregate.is_empty() {
-                    continue;
-                }
-                let mut normalized_fields: Vec<String> = fields
-                    .into_iter()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-                    .collect();
-                if normalized_fields.is_empty() {
-                    continue;
-                }
-                normalized_fields.sort();
-                normalized_fields.dedup();
-                normalized.insert(aggregate.to_string(), normalized_fields);
-            }
-            self.hidden_fields = normalized;
         }
         if let Some(admin) = update.admin {
             if let Some(enabled) = admin.enabled {
@@ -371,26 +334,6 @@ impl Config {
             }
         }
         self.updated_at = Utc::now();
-    }
-
-    pub fn is_field_hidden(&self, aggregate: &str, field: &str) -> bool {
-        self.hidden_fields
-            .get(aggregate)
-            .map(|fields| fields.iter().any(|item| item == field))
-            .unwrap_or(false)
-    }
-
-    pub fn set_column_type(&mut self, aggregate: &str, field: &str, data_type: String) {
-        self.column_types
-            .entry(aggregate.to_string())
-            .or_default()
-            .insert(field.to_string(), data_type);
-    }
-
-    pub fn column_type(&self, aggregate: &str, field: &str) -> Option<&String> {
-        self.column_types
-            .get(aggregate)
-            .and_then(|fields| fields.get(field))
     }
 
     pub fn ensure_data_dir(&self) -> Result<()> {
@@ -617,26 +560,45 @@ impl Default for ReplicationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GrpcApiConfig {
-    #[serde(default = "default_grpc_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_grpc_bind_addr")]
+    #[serde(default, skip_serializing)]
+    pub legacy_enabled: Option<bool>,
     pub bind_addr: String,
 }
 
 impl Default for GrpcApiConfig {
     fn default() -> Self {
         Self {
-            enabled: default_grpc_enabled(),
+            legacy_enabled: None,
             bind_addr: default_grpc_bind_addr(),
         }
     }
 }
 
+impl<'de> Deserialize<'de> for GrpcApiConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            enabled: Option<bool>,
+            #[serde(default = "default_grpc_bind_addr")]
+            bind_addr: String,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(Self {
+            legacy_enabled: raw.enabled,
+            bind_addr: raw.bind_addr,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GrpcApiConfigUpdate {
-    pub enabled: Option<bool>,
     pub bind_addr: Option<String>,
 }
 
@@ -710,10 +672,6 @@ fn default_page_limit() -> usize {
 
 fn default_plugin_max_attempts() -> u32 {
     10
-}
-
-fn default_grpc_enabled() -> bool {
-    false
 }
 
 fn default_grpc_bind_addr() -> String {

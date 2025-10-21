@@ -33,7 +33,13 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
    - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
    - The server owns the RocksDB lock while it is running; the CLI detects this and automatically proxies write commands through the HTTP API. Stop the daemon only when you need offline tasks like staging or manual maintenance.
 
-- Choose the API surface with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). `--api grpc`/`--api all` automatically flip the gRPC listener on for the current session; persistently enable it by setting `grpc.enabled = true` in `config.toml`.
+- Choose the API surfaces with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). Persist the selection by editing the `[api]` table in `config.toml`, for example:
+  ```
+  [api]
+  rest = true
+  graphql = true
+  grpc = true
+  ```
 
 3. **Define a schema (recommended when running in restricted mode)**
 
@@ -328,7 +334,7 @@ curl \
 
 ## gRPC API
 
-Set `grpc.enabled = true` in `config.toml` to expose a gRPC surface (disabled by default). The listener binds to `grpc.bind_addr` (default `127.0.0.1:7442`). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
+Enable the gRPC surface by setting `[api] grpc = true` in `config.toml`. The `[grpc]` table configures the bind address (default `127.0.0.1:7442`). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
 
 Example `grpcurl` invocation:
 

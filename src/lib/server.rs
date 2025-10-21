@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::BTreeMap,
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, RwLock},
@@ -41,8 +41,6 @@ pub(crate) struct AppState {
     restrict: bool,
     list_page_size: usize,
     page_limit: usize,
-    hidden_aggregates: Arc<HashSet<String>>,
-    hidden_fields: Arc<HashMap<String, HashSet<String>>>,
 }
 
 pub(crate) async fn run_cli_command(args: Vec<String>) -> Result<cli_proxy::CliCommandResult> {
@@ -106,7 +104,10 @@ impl AppState {
     }
 
     pub(crate) fn is_hidden_aggregate(&self, aggregate_type: &str) -> bool {
-        self.hidden_aggregates.contains(aggregate_type)
+        self.schemas
+            .get(aggregate_type)
+            .map(|schema| schema.hidden)
+            .unwrap_or(false)
     }
 
     pub(crate) fn sanitize_aggregate(&self, mut aggregate: AggregateState) -> AggregateState {
@@ -119,8 +120,10 @@ impl AppState {
         aggregate_type: &str,
         mut state: BTreeMap<String, String>,
     ) -> BTreeMap<String, String> {
-        if let Some(fields) = self.hidden_fields.get(aggregate_type) {
-            state.retain(|key, _| !fields.contains(key));
+        if let Ok(schema) = self.schemas.get(aggregate_type) {
+            if !schema.hidden_fields.is_empty() {
+                state.retain(|key, _| !schema.hidden_fields.contains(key));
+            }
         }
         state
     }
@@ -138,26 +141,6 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     )?);
     let schemas = Arc::new(SchemaManager::load(config_snapshot.schema_store_path())?);
 
-    let hidden_aggregates: HashSet<String> = config_snapshot
-        .hidden_aggregate_types
-        .iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect();
-    let hidden_fields: HashMap<String, HashSet<String>> = config_snapshot
-        .hidden_fields
-        .iter()
-        .map(|(aggregate, fields)| {
-            let field_set: HashSet<String> = fields
-                .iter()
-                .map(|field| field.trim().to_string())
-                .filter(|field| !field.is_empty())
-                .collect();
-            (aggregate.trim().to_string(), field_set)
-        })
-        .filter(|(_, fields)| !fields.is_empty())
-        .collect();
-
     let state = AppState {
         tokens: Arc::clone(&tokens),
         schemas: Arc::clone(&schemas),
@@ -166,12 +149,10 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         restrict: config_snapshot.restrict,
         list_page_size: config_snapshot.list_page_size,
         page_limit: config_snapshot.page_limit,
-        hidden_aggregates: Arc::new(hidden_aggregates),
-        hidden_fields: Arc::new(hidden_fields),
     };
 
     let api = config_snapshot.api.clone();
-    let grpc_enabled = config_snapshot.grpc.enabled || api.grpc_enabled();
+    let grpc_enabled = api.grpc_enabled();
     let grpc_bind_addr = config_snapshot.grpc.bind_addr.clone();
     let grpc_state = state.clone();
     let grpc_handle = if grpc_enabled {

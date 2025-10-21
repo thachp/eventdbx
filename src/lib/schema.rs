@@ -24,6 +24,12 @@ pub struct AggregateSchema {
     pub snapshot_threshold: Option<u64>,
     pub locked: bool,
     pub field_locks: Vec<String>,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub hidden_fields: Vec<String>,
+    #[serde(default)]
+    pub column_types: BTreeMap<String, String>,
     pub events: BTreeMap<String, EventSchema>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -33,6 +39,8 @@ impl AggregateSchema {
     fn ensure_sorted(&mut self) {
         self.field_locks.sort();
         self.field_locks.dedup();
+        self.hidden_fields.sort();
+        self.hidden_fields.dedup();
         for schema in self.events.values_mut() {
             schema.ensure_sorted();
         }
@@ -59,6 +67,9 @@ pub struct SchemaUpdate {
     pub field_lock: Option<(String, bool)>,
     pub event_add_fields: BTreeMap<String, Vec<String>>,
     pub event_remove_fields: BTreeMap<String, Vec<String>>,
+    pub hidden: Option<bool>,
+    pub hidden_field: Option<(String, bool)>,
+    pub column_type: Option<(String, Option<String>)>,
 }
 
 impl SchemaManager {
@@ -117,6 +128,9 @@ impl SchemaManager {
             snapshot_threshold: input.snapshot_threshold,
             locked: false,
             field_locks: Vec::new(),
+            hidden: false,
+            hidden_fields: Vec::new(),
+            column_types: BTreeMap::new(),
             events,
             created_at: now,
             updated_at: now,
@@ -152,6 +166,41 @@ impl SchemaManager {
                     }
                 } else {
                     schema.field_locks.retain(|item| item != &field);
+                }
+            }
+
+            if let Some(hidden) = update.hidden {
+                schema.hidden = hidden;
+            }
+
+            if let Some((field, hide)) = update.hidden_field {
+                if field.trim().is_empty() {
+                    return Err(EventError::InvalidSchema(
+                        "field name cannot be empty".into(),
+                    ));
+                }
+                if hide {
+                    if !schema.hidden_fields.contains(&field) {
+                        schema.hidden_fields.push(field);
+                    }
+                } else {
+                    schema.hidden_fields.retain(|item| item != &field);
+                }
+            }
+
+            if let Some((field, data_type)) = update.column_type {
+                if field.trim().is_empty() {
+                    return Err(EventError::InvalidSchema(
+                        "field name cannot be empty".into(),
+                    ));
+                }
+                match data_type {
+                    Some(value) if !value.trim().is_empty() => {
+                        schema.column_types.insert(field, value);
+                    }
+                    _ => {
+                        schema.column_types.remove(&field);
+                    }
                 }
             }
 

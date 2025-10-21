@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand};
 
 use eventdbx::{
-    config::{ConfigUpdate, load_or_default},
+    config::load_or_default,
     schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
 };
 use serde_json;
@@ -176,7 +176,7 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
 }
 
 fn hide_field(config_path: Option<PathBuf>, args: SchemaHideArgs) -> Result<()> {
-    let (mut config, path) = load_or_default(config_path)?;
+    let (config, _) = load_or_default(config_path)?;
     let manager = SchemaManager::load(config.schema_store_path())?;
 
     let aggregate = args.aggregate.trim();
@@ -197,19 +197,9 @@ fn hide_field(config_path: Option<PathBuf>, args: SchemaHideArgs) -> Result<()> 
         );
     }
 
-    let mut hidden_fields = config.hidden_fields.clone();
-    let entry = hidden_fields.entry(aggregate.to_string()).or_default();
-    if !entry.iter().any(|existing| existing == field) {
-        entry.push(field.to_string());
-        entry.sort();
-        entry.dedup();
-    }
-
-    config.apply_update(ConfigUpdate {
-        hidden_fields: Some(hidden_fields),
-        ..ConfigUpdate::default()
-    });
-    config.save(&path)?;
+    let mut update = SchemaUpdate::default();
+    update.hidden_field = Some((field.to_string(), true));
+    manager.update(aggregate, update)?;
 
     println!("aggregate={} field={} hidden", aggregate, field);
     Ok(())

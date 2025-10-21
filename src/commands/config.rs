@@ -105,8 +105,6 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         page_limit,
         plugin_max_attempts,
         api: None,
-        hidden_aggregate_types: None,
-        hidden_fields: None,
         grpc: None,
         admin: admin_update,
     });

@@ -41,7 +41,6 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
     config.port = http_port;
     config.restrict = false;
     config.data_encryption_key = Some(STANDARD.encode([7u8; 32]));
-    config.grpc.enabled = true;
     config.grpc.bind_addr = format!("127.0.0.1:{grpc_port}");
     config.ensure_data_dir()?;
     let config_path = temp.path().join("config.toml");
