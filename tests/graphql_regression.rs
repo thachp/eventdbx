@@ -3,7 +3,6 @@ use std::{net::TcpListener, path::PathBuf, time::Duration};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use eventdbx::{
     config::Config,
-    plugin::PluginManager,
     server,
     token::{IssueTokenInput, TokenManager},
 };
@@ -27,9 +26,18 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         }
         Err(err) => return Err(err.into()),
     };
+    let socket_port = match allocate_port() {
+        Ok(port) => port,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipping graphql regression test: port binding not permitted ({err})");
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
     config.port = port;
     config.restrict = false;
     config.data_encryption_key = Some(STANDARD.encode([42u8; 32]));
+    config.socket.bind_addr = format!("127.0.0.1:{socket_port}");
     config.ensure_data_dir()?;
     let config_path = temp.path().join("config.toml");
     config.save(&config_path)?;
@@ -49,8 +57,7 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         .token;
     drop(token_manager);
 
-    let plugins = PluginManager::from_config(&config)?;
-    let server_handle = spawn_server(config.clone(), config_path.clone(), plugins)?;
+    let server_handle = spawn_server(config.clone(), config_path.clone())?;
 
     let base_url = format!("http://127.0.0.1:{}", config.port);
     wait_for_health(&base_url).await?;
@@ -333,10 +340,9 @@ fn allocate_port() -> std::io::Result<u16> {
 fn spawn_server(
     config: Config,
     config_path: PathBuf,
-    plugins: PluginManager,
 ) -> TestResult<JoinHandle<eventdbx::error::Result<()>>> {
     Ok(tokio::spawn(async move {
-        server::run(config, config_path, plugins).await
+        server::run(config, config_path).await
     }))
 }
 

@@ -54,7 +54,7 @@ pub enum PluginCommands {
     Queue(PluginQueueArgs),
     /// List enabled plugins
     #[command(name = "list")]
-    List,
+    List(PluginListArgs),
 }
 
 #[derive(Args)]
@@ -78,6 +78,13 @@ pub struct PluginQueueRetryArgs {
     /// Retry only the dead entry with this event id
     #[arg(long)]
     pub event_id: Option<Uuid>,
+}
+
+#[derive(Args, Default)]
+pub struct PluginListArgs {
+    /// Emit JSON output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Subcommand)]
@@ -223,8 +230,8 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
     }
 
     match command {
-        PluginCommands::List => {
-            list_plugins(&plugins);
+        PluginCommands::List(args) => {
+            list_plugins(&plugins, args.json)?;
         }
         PluginCommands::Queue(args) => {
             let queue_path = config.plugin_queue_path();
@@ -991,10 +998,15 @@ fn plugin_instance_label(definition: &PluginDefinition) -> String {
     }
 }
 
-fn list_plugins(plugins: &[PluginDefinition]) {
+fn list_plugins(plugins: &[PluginDefinition], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(plugins)?);
+        return Ok(());
+    }
+
     if plugins.is_empty() {
         println!("(no plugins configured)");
-        return;
+        return Ok(());
     }
 
     for plugin in plugins {
@@ -1024,6 +1036,8 @@ fn list_plugins(plugins: &[PluginDefinition]) {
             }
         }
     }
+
+    Ok(())
 }
 
 fn run_blocking<F, T>(f: F) -> Result<T>

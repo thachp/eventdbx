@@ -7,7 +7,6 @@ use eventdbx::{
         VerifyAggregateRequest, event_service_client::EventServiceClient,
     },
     config::Config,
-    plugin::PluginManager,
     server,
     token::{IssueTokenInput, TokenManager},
 };
@@ -31,7 +30,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
         }
         Err(err) => return Err(err.into()),
     };
-    let grpc_port = match allocate_port() {
+    let socket_port = match allocate_port() {
         Ok(port) => port,
         Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
             eprintln!("skipping grpc regression test: port binding not permitted ({err})");
@@ -42,8 +41,8 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
     config.port = http_port;
     config.restrict = false;
     config.data_encryption_key = Some(STANDARD.encode([7u8; 32]));
-    config.grpc.enabled = true;
-    config.grpc.bind_addr = format!("127.0.0.1:{grpc_port}");
+    config.grpc.bind_addr = format!("127.0.0.1:{http_port}");
+    config.socket.bind_addr = format!("127.0.0.1:{socket_port}");
     config.ensure_data_dir()?;
     let config_path = temp.path().join("config.toml");
     config.save(&config_path)?;
@@ -63,13 +62,12 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
         .token;
     drop(token_manager);
 
-    let plugins = PluginManager::from_config(&config)?;
-    let server_handle = spawn_server(config.clone(), config_path.clone(), plugins)?;
+    let server_handle = spawn_server(config.clone(), config_path.clone())?;
 
     let base_url = format!("http://127.0.0.1:{}", http_port);
     wait_for_http_health(&base_url).await?;
 
-    let endpoint = format!("http://127.0.0.1:{grpc_port}");
+    let endpoint = format!("http://127.0.0.1:{http_port}");
     let mut client = wait_for_grpc(&endpoint).await?;
 
     let aggregate_type = "grpc-person";
@@ -189,10 +187,9 @@ fn allocate_port() -> std::io::Result<u16> {
 fn spawn_server(
     config: Config,
     config_path: PathBuf,
-    plugins: PluginManager,
 ) -> TestResult<JoinHandle<eventdbx::error::Result<()>>> {
     Ok(tokio::spawn(async move {
-        server::run(config, config_path, plugins).await
+        server::run(config, config_path).await
     }))
 }
 

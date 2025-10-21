@@ -36,7 +36,7 @@ pub enum RemoteCommands {
     Remove(RemoteRemoveArgs),
     /// List configured remotes
     #[command(name = "ls")]
-    List,
+    List(RemoteListArgs),
     /// Show details for a remote
     Show(RemoteShowArgs),
     /// Display this node's replication public key
@@ -132,7 +132,7 @@ pub async fn execute(config_path: Option<PathBuf>, command: RemoteCommands) -> R
     match command {
         RemoteCommands::Add(args) => add_remote(config_path, args),
         RemoteCommands::Remove(args) => remove_remote(config_path, args),
-        RemoteCommands::List => list_remotes(config_path),
+        RemoteCommands::List(args) => list_remotes(config_path, args.json),
         RemoteCommands::Show(args) => show_remote(config_path, args),
         RemoteCommands::Key(args) => show_local_key(config_path, args),
         RemoteCommands::Push(args) => push_remote(config_path, args).await,
@@ -197,15 +197,24 @@ fn remove_remote(config_path: Option<PathBuf>, args: RemoteRemoveArgs) -> Result
     Ok(())
 }
 
-fn list_remotes(config_path: Option<PathBuf>) -> Result<()> {
+fn list_remotes(config_path: Option<PathBuf>, json: bool) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     if config.remotes.is_empty() {
-        println!("(no remotes configured)");
+        if json {
+            let empty: BTreeMap<String, RemoteConfig> = BTreeMap::new();
+            println!("{}", serde_json::to_string_pretty(&empty)?);
+        } else {
+            println!("(no remotes configured)");
+        }
         return Ok(());
     }
 
-    for (name, remote) in &config.remotes {
-        println!("{} {}", name, remote.endpoint);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&config.remotes)?);
+    } else {
+        for (name, remote) in &config.remotes {
+            println!("{} {}", name, remote.endpoint);
+        }
     }
     Ok(())
 }
@@ -1111,6 +1120,9 @@ mod tests {
             snapshot_threshold,
             locked,
             field_locks: field_locks.iter().map(|value| value.to_string()).collect(),
+            hidden: false,
+            hidden_fields: Vec::new(),
+            column_types: BTreeMap::new(),
             events: events
                 .iter()
                 .map(|(event, fields)| {
@@ -1211,4 +1223,10 @@ mod tests {
             other => panic!("expected Updated change, got {:?}", other),
         }
     }
+}
+#[derive(Args, Default)]
+pub struct RemoteListArgs {
+    /// Emit JSON output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
