@@ -9,15 +9,14 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
-use chrono::Utc;
 use serde::Deserialize;
 
 use crate::{
-    config::{AdminApiConfig, Config, PluginConfig, PluginDefinition, RemoteConfig},
+    config::{AdminApiConfig, PluginConfig, PluginDefinition, RemoteConfig},
     error::{EventError, Result},
-    schema::{AggregateSchema, CreateSchemaInput, SchemaUpdate},
-    server::{AppState, extract_bearer_token},
-    token::{IssueTokenInput, TokenRecord},
+    schema::{AggregateSchema, SchemaUpdate},
+    server::{AppState, extract_bearer_token, run_cli_command, run_cli_json},
+    token::TokenRecord,
 };
 
 const ADMIN_KEY_HEADER: &str = "x-admin-key";
@@ -87,8 +86,14 @@ fn extract_admin_key(headers: &HeaderMap) -> Option<String> {
     extract_bearer_token(headers)
 }
 
-async fn list_tokens(State(state): State<AppState>) -> Result<Json<Vec<TokenRecord>>> {
-    Ok(Json(state.tokens().list()))
+async fn list_tokens(State(_state): State<AppState>) -> Result<Json<Vec<TokenRecord>>> {
+    let tokens: Vec<TokenRecord> = run_cli_json(vec![
+        "token".to_string(),
+        "list".to_string(),
+        "--json".to_string(),
+    ])
+    .await?;
+    Ok(Json(tokens))
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,24 +109,39 @@ struct IssueTokenRequest {
 }
 
 async fn issue_token(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Json(request): Json<IssueTokenRequest>,
 ) -> Result<(StatusCode, Json<TokenRecord>)> {
-    let record = state.tokens().issue(IssueTokenInput {
-        group: request.group,
-        user: request.user,
-        expiration_secs: request.expiration_secs,
-        limit: request.limit,
-        keep_alive: request.keep_alive,
-    })?;
+    let mut args = vec![
+        "token".to_string(),
+        "generate".to_string(),
+        "--group".to_string(),
+        request.group.clone(),
+        "--user".to_string(),
+        request.user.clone(),
+    ];
+    if let Some(expiration) = request.expiration_secs {
+        args.push("--expiration".to_string());
+        args.push(expiration.to_string());
+    }
+    if let Some(limit) = request.limit {
+        args.push("--limit".to_string());
+        args.push(limit.to_string());
+    }
+    if request.keep_alive {
+        args.push("--keep-alive".to_string());
+    }
+    args.push("--json".to_string());
+
+    let record: TokenRecord = run_cli_json(args).await?;
     Ok((StatusCode::CREATED, Json(record)))
 }
 
 async fn revoke_token(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<StatusCode> {
-    state.tokens().revoke(&token)?;
+    run_cli_command(vec!["token".to_string(), "revoke".to_string(), token]).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -134,25 +154,45 @@ struct RefreshTokenRequest {
 }
 
 async fn refresh_token(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(token): Path<String>,
     Json(request): Json<RefreshTokenRequest>,
 ) -> Result<Json<TokenRecord>> {
-    let record = state
-        .tokens()
-        .refresh(&token, request.expiration_secs, request.limit)?;
+    let mut args = vec![
+        "token".to_string(),
+        "refresh".to_string(),
+        "--token".to_string(),
+        token,
+    ];
+    if let Some(expiration) = request.expiration_secs {
+        args.push("--expiration".to_string());
+        args.push(expiration.to_string());
+    }
+    if let Some(limit) = request.limit {
+        args.push("--limit".to_string());
+        args.push(limit.to_string());
+    }
+    args.push("--json".to_string());
+    let record: TokenRecord = run_cli_json(args).await?;
     Ok(Json(record))
 }
 
-async fn list_schemas(State(state): State<AppState>) -> Result<Json<Vec<AggregateSchema>>> {
-    Ok(Json(state.schemas().list()))
+async fn list_schemas(State(_state): State<AppState>) -> Result<Json<Vec<AggregateSchema>>> {
+    let schemas: Vec<AggregateSchema> = run_cli_json(vec![
+        "schema".to_string(),
+        "list".to_string(),
+        "--json".to_string(),
+    ])
+    .await?;
+    Ok(Json(schemas))
 }
 
 async fn get_schema(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(aggregate): Path<String>,
 ) -> Result<Json<AggregateSchema>> {
-    Ok(Json(state.schemas().get(&aggregate)?))
+    let schema: AggregateSchema = run_cli_json(vec!["schema".to_string(), aggregate]).await?;
+    Ok(Json(schema))
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,14 +204,24 @@ struct CreateSchemaRequest {
 }
 
 async fn create_schema(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Json(request): Json<CreateSchemaRequest>,
 ) -> Result<(StatusCode, Json<AggregateSchema>)> {
-    let schema = state.schemas().create(CreateSchemaInput {
-        aggregate: request.aggregate,
-        events: request.events,
-        snapshot_threshold: request.snapshot_threshold,
-    })?;
+    let mut args = vec![
+        "schema".to_string(),
+        "create".to_string(),
+        "--aggregate".to_string(),
+        request.aggregate.clone(),
+        "--events".to_string(),
+        request.events.join(","),
+    ];
+    if let Some(threshold) = request.snapshot_threshold {
+        args.push("--snapshot-threshold".to_string());
+        args.push(threshold.to_string());
+    }
+    args.push("--json".to_string());
+
+    let schema: AggregateSchema = run_cli_json(args).await?;
     Ok((StatusCode::CREATED, Json(schema)))
 }
 
@@ -229,14 +279,14 @@ async fn remove_schema_event(
 }
 
 async fn list_remotes(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
 ) -> Result<Json<BTreeMap<String, RemoteConfig>>> {
-    let config_arc = state.config();
-    let remotes = config_arc
-        .read()
-        .expect("config lock poisoned")
-        .remotes
-        .clone();
+    let remotes: BTreeMap<String, RemoteConfig> = run_cli_json(vec![
+        "remote".to_string(),
+        "ls".to_string(),
+        "--json".to_string(),
+    ])
+    .await?;
     Ok(Json(remotes))
 }
 
@@ -247,7 +297,7 @@ struct RemoteUpsertRequest {
 }
 
 async fn upsert_remote(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(name): Path<String>,
     Json(request): Json<RemoteUpsertRequest>,
 ) -> Result<(StatusCode, Json<RemoteConfig>)> {
@@ -255,54 +305,75 @@ async fn upsert_remote(
     if normalized_name.is_empty() {
         return Err(EventError::Config("remote name cannot be empty".into()));
     }
+    let endpoint = request.endpoint.trim();
+    if endpoint.is_empty() {
+        return Err(EventError::Config("remote endpoint cannot be empty".into()));
+    }
+    let public_key = request.public_key.trim();
+    if public_key.is_empty() {
+        return Err(EventError::Config(
+            "remote public key cannot be empty".into(),
+        ));
+    }
 
-    let (status, remote) = mutate_remotes(&state, |config| {
-        let was_new = !config.remotes.contains_key(normalized_name);
-        let remote = RemoteConfig {
-            endpoint: request.endpoint.trim().to_string(),
-            public_key: request.public_key.trim().to_string(),
-        };
-        if remote.endpoint.is_empty() {
-            return Err(EventError::Config("remote endpoint cannot be empty".into()));
-        }
-        if remote.public_key.is_empty() {
-            return Err(EventError::Config(
-                "remote public key cannot be empty".into(),
-            ));
-        }
-        config
-            .remotes
-            .insert(normalized_name.to_string(), remote.clone());
-        let status = if was_new {
-            StatusCode::CREATED
-        } else {
-            StatusCode::OK
-        };
-        Ok((status, remote))
+    let existing: BTreeMap<String, RemoteConfig> = run_cli_json(vec![
+        "remote".to_string(),
+        "ls".to_string(),
+        "--json".to_string(),
+    ])
+    .await?;
+    let existed = existing.contains_key(normalized_name);
+
+    let args = vec![
+        "remote".to_string(),
+        "add".to_string(),
+        normalized_name.to_string(),
+        endpoint.to_string(),
+        "--public-key".to_string(),
+        public_key.to_string(),
+        "--replace".to_string(),
+    ];
+    run_cli_command(args).await?;
+
+    let remotes: BTreeMap<String, RemoteConfig> = run_cli_json(vec![
+        "remote".to_string(),
+        "ls".to_string(),
+        "--json".to_string(),
+    ])
+    .await?;
+    let remote = remotes.get(normalized_name).cloned().ok_or_else(|| {
+        EventError::Config(format!("remote '{}' is not configured", normalized_name))
     })?;
+
+    let status = if existed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
 
     Ok((status, Json(remote)))
 }
 
 async fn delete_remote(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode> {
-    mutate_remotes(&state, |config| {
-        let removed = config.remotes.remove(name.trim());
-        match removed {
-            Some(_) => Ok(()),
-            None => Err(EventError::Config(format!(
-                "remote '{}' is not configured",
-                name
-            ))),
-        }
-    })?;
+    run_cli_command(vec![
+        "remote".to_string(),
+        "rm".to_string(),
+        name.trim().to_string(),
+    ])
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_plugins(State(state): State<AppState>) -> Result<Json<Vec<PluginDefinition>>> {
-    let definitions = snapshot_plugins(&state)?;
+async fn list_plugins(State(_state): State<AppState>) -> Result<Json<Vec<PluginDefinition>>> {
+    let definitions: Vec<PluginDefinition> = run_cli_json(vec![
+        "plugin".to_string(),
+        "list".to_string(),
+        "--json".to_string(),
+    ])
+    .await?;
     Ok(Json(definitions))
 }
 
@@ -316,7 +387,7 @@ struct PluginUpsertRequest {
 }
 
 async fn put_plugin(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(name): Path<String>,
     Json(request): Json<PluginUpsertRequest>,
 ) -> Result<(StatusCode, Json<PluginDefinition>)> {
@@ -335,123 +406,148 @@ async fn put_plugin(
         }
     }
 
-    let (status, definition) = update_plugins(&state, |definitions| {
-        let enabled = request.enabled.unwrap_or(true);
-        let definition = PluginDefinition {
-            enabled,
-            name: Some(normalized_name.to_string()),
-            config: request.config.clone(),
-        };
+    let existing_plugins = fetch_plugins().await?;
+    let existed = existing_plugins
+        .iter()
+        .any(|plugin| plugin.name.as_deref() == Some(normalized_name));
 
-        if let Some(existing) = definitions
-            .iter_mut()
-            .find(|item| item.name.as_deref() == Some(normalized_name))
-        {
-            *existing = definition.clone();
-            Ok((StatusCode::OK, definition))
-        } else {
-            definitions.push(definition.clone());
-            Ok((StatusCode::CREATED, definition))
-        }
-    })?;
+    let args = build_plugin_config_args(normalized_name, &request)?;
+    run_cli_command(args).await?;
+
+    if let Some(enabled) = request.enabled {
+        let command = if enabled { "enable" } else { "disable" };
+        run_cli_command(vec![
+            "plugin".to_string(),
+            command.to_string(),
+            normalized_name.to_string(),
+        ])
+        .await?;
+    }
+
+    let plugins = fetch_plugins().await?;
+    let definition = plugins
+        .into_iter()
+        .find(|plugin| plugin.name.as_deref() == Some(normalized_name))
+        .ok_or_else(|| {
+            EventError::Config(format!("plugin '{}' is not configured", normalized_name))
+        })?;
+
+    let status = if existed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
 
     Ok((status, Json(definition)))
 }
 
 async fn delete_plugin(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<StatusCode> {
-    update_plugins(&state, |definitions| {
-        let initial_len = definitions.len();
-        definitions.retain(|item| item.name.as_deref() != Some(name.trim()));
-        if definitions.len() == initial_len {
-            return Err(EventError::Config(format!(
-                "plugin '{}' is not configured",
-                name
-            )));
-        }
-        Ok(())
-    })?;
+    run_cli_command(vec![
+        "plugin".to_string(),
+        "remove".to_string(),
+        name.trim().to_string(),
+    ])
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn enable_plugin(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<PluginDefinition>> {
-    let definition = update_plugins(&state, |definitions| {
-        let Some(existing) = definitions
-            .iter_mut()
-            .find(|item| item.name.as_deref() == Some(name.trim()))
-        else {
-            return Err(EventError::Config(format!(
-                "plugin '{}' is not configured",
-                name
-            )));
-        };
-        existing.enabled = true;
-        Ok(existing.clone())
-    })?;
+    run_cli_command(vec![
+        "plugin".to_string(),
+        "enable".to_string(),
+        name.trim().to_string(),
+    ])
+    .await?;
+    let plugins = fetch_plugins().await?;
+    let definition = plugins
+        .into_iter()
+        .find(|plugin| plugin.name.as_deref() == Some(name.trim()))
+        .ok_or_else(|| EventError::Config(format!("plugin '{}' is not configured", name)))?;
     Ok(Json(definition))
 }
 
 async fn disable_plugin(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<PluginDefinition>> {
-    let definition = update_plugins(&state, |definitions| {
-        let Some(existing) = definitions
-            .iter_mut()
-            .find(|item| item.name.as_deref() == Some(name.trim()))
-        else {
-            return Err(EventError::Config(format!(
-                "plugin '{}' is not configured",
-                name
-            )));
-        };
-        existing.enabled = false;
-        Ok(existing.clone())
-    })?;
+    run_cli_command(vec![
+        "plugin".to_string(),
+        "disable".to_string(),
+        name.trim().to_string(),
+    ])
+    .await?;
+    let plugins = fetch_plugins().await?;
+    let definition = plugins
+        .into_iter()
+        .find(|plugin| plugin.name.as_deref() == Some(name.trim()))
+        .ok_or_else(|| EventError::Config(format!("plugin '{}' is not configured", name)))?;
     Ok(Json(definition))
 }
 
-fn snapshot_plugins(state: &AppState) -> Result<Vec<PluginDefinition>> {
-    let config_arc = state.config();
-    let config = config_arc.read().expect("config lock poisoned");
-    load_plugin_definitions(&config)
+async fn fetch_plugins() -> Result<Vec<PluginDefinition>> {
+    run_cli_json(vec![
+        "plugin".to_string(),
+        "list".to_string(),
+        "--json".to_string(),
+    ])
+    .await
 }
 
-fn load_plugin_definitions(config: &Config) -> Result<Vec<PluginDefinition>> {
-    let mut definitions = config.load_plugins()?;
-    if definitions.is_empty() && !config.plugins.is_empty() {
-        definitions = config.plugins.clone();
+fn build_plugin_config_args(name: &str, request: &PluginUpsertRequest) -> Result<Vec<String>> {
+    let mut args = vec!["plugin".to_string(), "config".to_string()];
+    match &request.config {
+        PluginConfig::Log(cfg) => {
+            args.push("log".to_string());
+            args.push("--name".to_string());
+            args.push(name.to_string());
+            args.push("--level".to_string());
+            args.push(cfg.level.clone());
+            if let Some(template) = &cfg.template {
+                args.push("--template".to_string());
+                args.push(template.clone());
+            }
+        }
+        PluginConfig::Http(cfg) => {
+            args.push("http".to_string());
+            args.push("--name".to_string());
+            args.push(name.to_string());
+            args.push("--endpoint".to_string());
+            args.push(cfg.endpoint.clone());
+            if cfg.https {
+                args.push("--https".to_string());
+            }
+            for (key, value) in &cfg.headers {
+                args.push("--header".to_string());
+                args.push(format!("{}={}", key, value));
+            }
+        }
+        PluginConfig::Grpc(cfg) => {
+            args.push("grpc".to_string());
+            args.push("--name".to_string());
+            args.push(name.to_string());
+            args.push("--endpoint".to_string());
+            args.push(cfg.endpoint.clone());
+        }
+        PluginConfig::Tcp(cfg) => {
+            args.push("tcp".to_string());
+            args.push("--name".to_string());
+            args.push(name.to_string());
+            args.push("--host".to_string());
+            args.push(cfg.host.clone());
+            args.push("--port".to_string());
+            args.push(cfg.port.to_string());
+        }
     }
-    Ok(definitions)
-}
 
-fn update_plugins<F, R>(state: &AppState, mutator: F) -> Result<R>
-where
-    F: FnOnce(&mut Vec<PluginDefinition>) -> Result<R>,
-{
-    let config_arc = state.config();
-    let mut config = config_arc.write().expect("config lock poisoned");
-    let mut definitions = load_plugin_definitions(&config)?;
-    let result = mutator(&mut definitions)?;
-    config.plugins = definitions.clone();
-    config.updated_at = Utc::now();
-    config.save_plugins(&definitions)?;
-    Ok(result)
-}
+    if matches!(request.enabled, Some(false)) {
+        args.push("--disable".to_string());
+    }
 
-fn mutate_remotes<F, R>(state: &AppState, mutator: F) -> Result<R>
-where
-    F: FnOnce(&mut Config) -> Result<R>,
-{
-    let config_arc = state.config();
-    let mut config = config_arc.write().expect("config lock poisoned");
-    let result = mutator(&mut config)?;
-    config.updated_at = Utc::now();
-    config.save(state.config_path().as_ref())?;
-    Ok(result)
+    Ok(args)
 }

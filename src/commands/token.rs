@@ -8,18 +8,16 @@ use eventdbx::{
     config::load_or_default,
     token::{IssueTokenInput, TokenManager},
 };
+use serde_json;
 
 #[derive(Subcommand)]
 pub enum TokenCommands {
     /// Generate a new token
     Generate(TokenGenerateArgs),
     /// List configured tokens
-    List,
+    List(TokenListArgs),
     /// Revoke an active token
-    Revoke {
-        /// Token value to revoke
-        token: String,
-    },
+    Revoke(TokenRevokeArgs),
     /// Refresh an existing token
     Refresh(TokenRefreshArgs),
 }
@@ -40,6 +38,17 @@ pub struct TokenGenerateArgs {
 
     #[arg(long, default_value_t = false)]
     pub keep_alive: bool,
+
+    /// Emit JSON output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Args, Default)]
+pub struct TokenListArgs {
+    /// Emit JSON output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -52,6 +61,20 @@ pub struct TokenRefreshArgs {
 
     #[arg(long)]
     pub limit: Option<u64>,
+
+    /// Emit JSON output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct TokenRevokeArgs {
+    /// Token value to revoke
+    pub token: String,
+
+    /// Emit JSON output
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<()> {
@@ -69,30 +92,14 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
                 limit: args.limit,
                 keep_alive: args.keep_alive,
             })?;
-            println!(
-                "token={} group={} user={} expires_at={} remaining_writes={}",
-                record.token,
-                record.group,
-                record.user,
-                record
-                    .expires_at
-                    .map(|ts| ts.to_rfc3339())
-                    .unwrap_or_else(|| "never".into()),
-                record
-                    .remaining_writes
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unlimited".into())
-            );
-        }
-        TokenCommands::List => {
-            for record in manager.list() {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&record)?);
+            } else {
                 println!(
-                    "token={} group={} user={} status={:?} issued_at={} expires_at={} remaining_writes={}",
+                    "token={} group={} user={} expires_at={} remaining_writes={}",
                     record.token,
                     record.group,
                     record.user,
-                    record.status,
-                    record.issued_at.to_rfc3339(),
                     record
                         .expires_at
                         .map(|ts| ts.to_rfc3339())
@@ -104,24 +111,63 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
                 );
             }
         }
-        TokenCommands::Revoke { token } => {
-            manager.revoke(&token)?;
-            println!("token {} revoked", token);
+        TokenCommands::List(args) => {
+            let records = manager.list();
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&records)?);
+            } else {
+                for record in records {
+                    println!(
+                        "token={} group={} user={} status={:?} issued_at={} expires_at={} remaining_writes={}",
+                        record.token,
+                        record.group,
+                        record.user,
+                        record.status,
+                        record.issued_at.to_rfc3339(),
+                        record
+                            .expires_at
+                            .map(|ts| ts.to_rfc3339())
+                            .unwrap_or_else(|| "never".into()),
+                        record
+                            .remaining_writes
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "unlimited".into())
+                    );
+                }
+            }
+        }
+        TokenCommands::Revoke(args) => {
+            manager.revoke(&args.token)?;
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "token": args.token,
+                        "revoked": true
+                    }))?
+                );
+            } else {
+                println!("token {} revoked", args.token);
+            }
         }
         TokenCommands::Refresh(args) => {
             let record = manager.refresh(&args.token, args.expiration, args.limit)?;
-            println!(
-                "token={} expires_at={} remaining_writes={}",
-                record.token,
-                record
-                    .expires_at
-                    .map(|ts| ts.to_rfc3339())
-                    .unwrap_or_else(|| "never".into()),
-                record
-                    .remaining_writes
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unlimited".into())
-            );
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&record)?);
+            } else {
+                println!(
+                    "token={} expires_at={} remaining_writes={}",
+                    record.token,
+                    record
+                        .expires_at
+                        .map(|ts| ts.to_rfc3339())
+                        .unwrap_or_else(|| "never".into()),
+                    record
+                        .remaining_writes
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "unlimited".into())
+                );
+            }
         }
     }
 

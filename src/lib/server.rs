@@ -37,7 +37,7 @@ pub(crate) struct AppState {
     tokens: Arc<TokenManager>,
     schemas: Arc<SchemaManager>,
     config: Arc<RwLock<Config>>,
-    config_path: Arc<PathBuf>,
+    _config_path: Arc<PathBuf>,
     restrict: bool,
     list_page_size: usize,
     page_limit: usize,
@@ -91,10 +91,6 @@ impl AppState {
 
     pub(crate) fn config(&self) -> Arc<RwLock<Config>> {
         Arc::clone(&self.config)
-    }
-
-    pub(crate) fn config_path(&self) -> Arc<PathBuf> {
-        Arc::clone(&self.config_path)
     }
 
     pub(crate) fn restrict(&self) -> bool {
@@ -166,7 +162,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         tokens: Arc::clone(&tokens),
         schemas: Arc::clone(&schemas),
         config: Arc::clone(&shared_config),
-        config_path: Arc::clone(&config_path),
+        _config_path: Arc::clone(&config_path),
         restrict: config_snapshot.restrict,
         list_page_size: config_snapshot.list_page_size,
         page_limit: config_snapshot.page_limit,
