@@ -14,12 +14,12 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 
    ```bash
    # Install prebuilt binaries via shell script
-   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.11.3/eventdbx-installer.sh | sh
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.12.2/eventdbx-installer.sh | sh
    ```
 
    ```bash
    # Install prebuilt binaries via powershell script
-   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.11.3/eventdbx-installer.ps1 | iex"
+   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.12.2/eventdbx-installer.ps1 | iex"
    ```
 
 2. **Start the server**
@@ -205,6 +205,7 @@ Clearing dead entries prompts for confirmation to avoid accidental removal. Manu
   Fast-forwards the local node from the remote, reporting changes in dry-run mode.
 
 Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. The Cap'n Proto listener that powers CLI automation and replication defaults to `[socket].bind_addr` (default `127.0.0.1:6363`); point remotes at that address with a `tcp://` endpoint or override the bind address in `config.toml` when you expose the replica on another interface. Remote `push` and `pull` commands connect over this socket—no gRPC listener is required—and every session is authenticated with the remote's pinned Ed25519 public key. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
+
 ### Maintenance
 
 - `eventdbx backup --output <path> [--force]`  
