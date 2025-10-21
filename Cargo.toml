@@ -28,6 +28,10 @@ path = "src/lib/mod.rs"
 name = "eventdbx"
 path = "src/main.rs"
 
+[[bin]]
+name = "dbx"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0"
 axum = { version = "0.8", features = ["macros", "json"] }

@@ -10,6 +10,8 @@ EventDBX is an event-sourced, key-value, write-side database system designed to 
 
 Follow the steps below to spin up EventDBX locally. The commands assume you installed the CLI globally; if you're contributing to the project, clone the repository and run them from the repo root instead.
 
+The CLI installs as `eventdbx` and also registers a shorter `dbx` alias. Every command below works with either name.
+
 1. **Install the CLI**
 
    ```bash
@@ -25,7 +27,7 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 2. **Start the server**
 
    ```bash
-   eventdbx start --foreground
+   dbx start --foreground
    ```
 
    - Omit `--foreground` to daemonise the process.
@@ -48,7 +50,7 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 3. **Define a schema (recommended when running in restricted mode)**
 
    ```bash
-   eventdbx schema create \
+   dbx schema create \
      --aggregate patient \
      --events patient-added,patient-updated \
      --snapshot-threshold 100
@@ -59,13 +61,13 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 4. **Issue a token for CLI access**
 
    ```bash
-   eventdbx token generate --group admin --user jane --expiration 3600
+   dbx token generate --group admin --user jane --expiration 3600
    ```
 
 5. **Append an event**
    - When the server is running the CLI proxies writes through the REST API automatically. Pass a token with `--token` or set `EVENTDBX_TOKEN` to reuse your own credentials; otherwise the CLI mints a short-lived token for the call.
      ```bash
-     eventdbx aggregate apply person p-002 patient-added \
+     dbx aggregate apply person p-002 patient-added \
        --field name="Jane Doe" \
        --field status=active
      ```

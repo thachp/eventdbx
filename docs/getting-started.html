@@ -11,7 +11,7 @@ nav_id: guides
             <span class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.3em] text-brand">Guide</span>
             <h1 class="text-4xl font-semibold leading-tight text-white sm:text-5xl">Launch EventDBX locally in four steps.</h1>
             <p class="max-w-xl text-lg text-slate-300">
-                Install the CLI, start the server, codify a schema, and write your first event. These commands mirror the ones we ship in production runbooks.
+                Install the CLI, start the server, codify a schema, and write your first event. These commands mirror the ones we ship in production runbooks. The binary installs as <code class="font-mono text-sm text-slate-200">eventdbx</code> and also registers a shorter <code class="font-mono text-sm text-slate-200">dbx</code> alias.
             </p>
             <div class="flex flex-wrap gap-3">
                 <a class="inline-flex items-center rounded-full bg-brand px-5 py-3 text-sm font-semibold text-slate-950 shadow-glow transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand/40" href="https://github.com/thachp/eventdbx/releases">
@@ -25,7 +25,7 @@ nav_id: guides
         <div>
             <pre class="overflow-x-auto rounded-3xl bg-slate-900/75 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ curl -LsSf https://github.com/thachp/eventdbx/releases/download/v1.12.2/eventdbx-installer.sh | sh
 
-$ eventdbx start --foreground
+$ dbx start --foreground
 REST and GraphQL listening on 127.0.0.1:7070
 CLI socket ready on 127.0.0.1:6363</code></pre>
         </div>
@@ -62,7 +62,7 @@ PS> irm https://github.com/thachp/eventdbx/releases/download/v1.12.2/eventdbx-in
             <p class="text-lg text-slate-300">
                 Run the server in the foreground while you iterate. When the process is alive, the CLI proxies writes through the REST API automatically.
             </p>
-            <pre class="overflow-x-auto rounded-3xl bg-slate-900/70 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ eventdbx start --foreground
+            <pre class="overflow-x-auto rounded-3xl bg-slate-900/70 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ dbx start --foreground
 INFO binding REST + GraphQL on 127.0.0.1:7070
 INFO binding CLI socket on 127.0.0.1:6363
 INFO restriction enabled (schema enforcement active)</code></pre>
@@ -85,7 +85,7 @@ INFO restriction enabled (schema enforcement active)</code></pre>
             <p class="text-lg text-slate-600">
                 Schemas lock down which events each aggregate accepts and how frequently snapshots occur. Keep them in version control and deploy them through CI.
             </p>
-            <pre class="overflow-x-auto rounded-3xl bg-white p-6 text-sm leading-relaxed text-slate-800 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200"><code>$ eventdbx schema create \
+            <pre class="overflow-x-auto rounded-3xl bg-white p-6 text-sm leading-relaxed text-slate-800 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200"><code>$ dbx schema create \
     --aggregate patient \
     --events patient-added,patient-updated \
     --snapshot-threshold 100
@@ -110,7 +110,7 @@ Schema stored at $HOME/.eventdbx/schemas/patient.json</code></pre>
             <p class="text-lg text-slate-300">
                 Use the CLI for the smoothest experience or hit the REST API directly. Both paths land the same immutable event.
             </p>
-            <pre class="overflow-x-auto rounded-3xl bg-slate-900/70 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ eventdbx aggregate apply patient p-002 patient-added \
+            <pre class="overflow-x-auto rounded-3xl bg-slate-900/70 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ dbx aggregate apply patient p-002 patient-added \
     --field name="Jane Doe" \
     --field status=active
 
@@ -130,7 +130,7 @@ $ curl -X POST http://127.0.0.1:7070/v1/events \
         <div class="rounded-3xl border border-white/10 bg-slate-900/60 p-8 shadow-2xl shadow-black/30 backdrop-blur">
             <h3 class="text-lg font-semibold text-white">Next steps</h3>
             <ul class="mt-5 space-y-3 text-sm text-slate-200">
-                <li><strong class="text-white">Inspect timelines</strong> with <code class="font-mono text-xs text-slate-200">eventdbx aggregate events patient p-002</code>.</li>
+                <li><strong class="text-white">Inspect timelines</strong> with <code class="font-mono text-xs text-slate-200">dbx aggregate events patient p-002</code>.</li>
                 <li><strong class="text-white">Monitor health</strong> at <code class="font-mono text-xs text-slate-200">http://127.0.0.1:7070/health</code>.</li>
                 <li><strong class="text-white">Promote to staging</strong> by replaying the event log or restoring a snapshot.</li>
             </ul>
