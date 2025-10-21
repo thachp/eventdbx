@@ -26,8 +26,8 @@ nav_id: guides
             <pre class="overflow-x-auto rounded-3xl bg-slate-900/75 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ curl -LsSf https://github.com/thachp/eventdbx/releases/download/v1.12.2/eventdbx-installer.sh | sh
 
 $ dbx start --foreground
-REST and GraphQL listening on 127.0.0.1:7070
-CLI socket ready on 127.0.0.1:6363</code></pre>
+REST and GraphQL listening on 0.0.0.0:7070
+CLI socket ready on 0.0.0.0:6363</code></pre>
         </div>
     </div>
 </section>
@@ -63,8 +63,8 @@ PS> irm https://github.com/thachp/eventdbx/releases/download/v1.12.2/eventdbx-in
                 Run the server in the foreground while you iterate. When the process is alive, the CLI proxies writes through the REST API automatically.
             </p>
             <pre class="overflow-x-auto rounded-3xl bg-slate-900/70 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ dbx start --foreground
-INFO binding REST + GraphQL on 127.0.0.1:7070
-INFO binding CLI socket on 127.0.0.1:6363
+INFO binding REST + GraphQL on 0.0.0.0:7070
+INFO binding CLI socket on 0.0.0.0:6363
 INFO restriction enabled (schema enforcement active)</code></pre>
         </div>
         <div class="rounded-3xl border border-white/10 bg-slate-900/60 p-8 shadow-2xl shadow-black/30 backdrop-blur">
