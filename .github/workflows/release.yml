@@ -15,7 +15,7 @@
 
 name: Release
 permissions:
-  "contents": "write"
+  'contents': 'write'
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -47,7 +47,7 @@ on:
 jobs:
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:
-    runs-on: "ubuntu-22.04"
+    runs-on: 'ubuntu-22.04'
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
@@ -65,8 +65,6 @@ jobs:
         # failing. otherwise `sh` won't catch that `curl` returned non-0
         shell: bash
         run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-installer.sh | sh"
-      - name: Install Cap'n Proto (Linux)
-        run: sudo apt-get update && sudo apt-get install -y capnproto
       - name: Cache dist
         uses: actions/upload-artifact@v4
         with:
@@ -83,7 +81,7 @@ jobs:
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
-      - name: "Upload dist-manifest.json"
+      - name: 'Upload dist-manifest.json'
         uses: actions/upload-artifact@v4
         with:
           name: artifacts-plan-dist-manifest
@@ -132,15 +130,6 @@ jobs:
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
-      - name: Fetch local artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: artifacts-*
-          path: target/distrib/
-          merge-multiple: true
-      - name: Install dependencies
-        run: |
-          ${{ matrix.packages_install }}
       - name: Install Cap'n Proto (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y capnproto
@@ -151,6 +140,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: choco install capnproto --yes
+
+      - name: Fetch local artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Install dependencies
+        run: |
+          ${{ matrix.packages_install }}
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
@@ -169,7 +168,7 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
-      - name: "Upload artifacts"
+      - name: 'Upload artifacts'
         uses: actions/upload-artifact@v4
         with:
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
@@ -182,7 +181,7 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
-    runs-on: "ubuntu-22.04"
+    runs-on: 'ubuntu-22.04'
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
@@ -204,16 +203,6 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
-      - name: Install Cap'n Proto (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y capnproto
-      - name: Install Cap'n Proto (macOS)
-        if: runner.os == 'macOS'
-        run: brew install capnp
-      - name: Install Cap'n Proto (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: choco install capnproto --yes
       - id: cargo-dist
         shell: bash
         run: |
@@ -226,7 +215,7 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
-      - name: "Upload artifacts"
+      - name: 'Upload artifacts'
         uses: actions/upload-artifact@v4
         with:
           name: artifacts-build-global
@@ -243,7 +232,7 @@ jobs:
     if: ${{ always() && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    runs-on: "ubuntu-22.04"
+    runs-on: 'ubuntu-22.04'
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
@@ -271,14 +260,14 @@ jobs:
           echo "artifacts uploaded and released successfully"
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
-      - name: "Upload dist-manifest.json"
+      - name: 'Upload dist-manifest.json'
         uses: actions/upload-artifact@v4
         with:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
       # Create a GitHub Release while uploading all files to it
-      - name: "Download GitHub Artifacts"
+      - name: 'Download GitHub Artifacts'
         uses: actions/download-artifact@v4
         with:
           pattern: artifacts-*
@@ -291,9 +280,9 @@ jobs:
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
-          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
-          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
-          RELEASE_COMMIT: "${{ github.sha }}"
+          ANNOUNCEMENT_TITLE: '${{ fromJson(steps.host.outputs.manifest).announcement_title }}'
+          ANNOUNCEMENT_BODY: '${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}'
+          RELEASE_COMMIT: '${{ github.sha }}'
         run: |
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
@@ -308,7 +297,7 @@ jobs:
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
     if: ${{ always() && needs.host.result == 'success' }}
-    runs-on: "ubuntu-22.04"
+    runs-on: 'ubuntu-22.04'
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
