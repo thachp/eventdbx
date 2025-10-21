@@ -3,11 +3,12 @@ use std::collections::BTreeMap;
 use async_graphql::Result as GqlResult;
 use async_graphql::{Context, EmptySubscription, Json, Object, Schema, SimpleObject};
 use axum::http::HeaderMap;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::EventError;
-use crate::server::{AppState, extract_bearer_token, notify_plugins, replicate_events};
-use crate::store::{AggregateState, AppendEvent, EventMetadata, EventRecord, payload_to_map};
+use crate::server::{AppState, extract_bearer_token, run_cli_json};
+use crate::store::{AggregateState, EventMetadata, EventRecord, payload_to_map};
 use crate::token::AccessKind;
 
 #[derive(Clone)]
@@ -47,23 +48,29 @@ impl QueryRoot {
         let state = ctx.data::<GraphqlState>()?;
         let app = &state.app;
         let skip = skip.unwrap_or(0);
-        let mut take = take.unwrap_or(app.list_page_size);
+        let mut take = take.unwrap_or(app.list_page_size());
         if take == 0 {
             return Ok(Vec::new());
         }
-        if take > app.page_limit {
-            take = app.page_limit;
+        if take > app.page_limit() {
+            take = app.page_limit();
         }
-        let aggregates = app.store.aggregates();
+        let args = vec![
+            "aggregate".to_string(),
+            "list".to_string(),
+            "--skip".to_string(),
+            skip.to_string(),
+            "--take".to_string(),
+            take.to_string(),
+            "--json".to_string(),
+        ];
+        let aggregates: Vec<AggregateState> = run_cli_json(args)
+            .await
+            .map_err(async_graphql::Error::from)?;
         Ok(aggregates
             .into_iter()
             .filter(|aggregate| !app.is_hidden_aggregate(&aggregate.aggregate_type))
-            .skip(skip)
-            .take(take)
-            .map(|aggregate| {
-                app.cache_store(&aggregate);
-                app.sanitize_aggregate(aggregate).into()
-            })
+            .map(|aggregate| app.sanitize_aggregate(aggregate).into())
             .collect())
     }
 
@@ -78,10 +85,16 @@ impl QueryRoot {
         if app.is_hidden_aggregate(&aggregate_type) {
             return Ok(None);
         }
-        match app.load_aggregate(&aggregate_type, &aggregate_id) {
-            Ok(state) => Ok(Some(state.into())),
-            Err(crate::error::EventError::AggregateNotFound) => Ok(None),
-            Err(err) => Err(err.into()),
+        let args = vec![
+            "aggregate".to_string(),
+            "get".to_string(),
+            aggregate_type.clone(),
+            aggregate_id.clone(),
+        ];
+        match run_cli_json::<AggregateState>(args).await {
+            Ok(state) => Ok(Some(app.sanitize_aggregate(state).into())),
+            Err(EventError::AggregateNotFound) => Ok(None),
+            Err(err) => Err(async_graphql::Error::from(err)),
         }
     }
 
@@ -99,21 +112,29 @@ impl QueryRoot {
             return Err(EventError::AggregateNotFound.into());
         }
         let skip = skip.unwrap_or(0);
-        let mut take = take.unwrap_or(app.page_limit);
+        let mut take = take.unwrap_or(app.page_limit());
         if take == 0 {
             return Ok(Vec::new());
         }
-        if take > app.page_limit {
-            take = app.page_limit;
+        if take > app.page_limit() {
+            take = app.page_limit();
         }
 
-        let events = app.store.list_events(&aggregate_type, &aggregate_id)?;
-        let events = events
-            .into_iter()
-            .skip(skip)
-            .take(take)
-            .map(Into::into)
-            .collect();
+        let args = vec![
+            "aggregate".to_string(),
+            "replay".to_string(),
+            aggregate_type.clone(),
+            aggregate_id.clone(),
+            "--skip".to_string(),
+            skip.to_string(),
+            "--take".to_string(),
+            take.to_string(),
+            "--json".to_string(),
+        ];
+        let events: Vec<EventRecord> = run_cli_json(args)
+            .await
+            .map_err(async_graphql::Error::from)?;
+        let events = events.into_iter().map(Into::into).collect();
         Ok(events)
     }
 
@@ -128,9 +149,18 @@ impl QueryRoot {
         if app.is_hidden_aggregate(&aggregate_type) {
             return Err(EventError::AggregateNotFound.into());
         }
-        let merkle = app.store.verify(&aggregate_type, &aggregate_id)?;
+        let args = vec![
+            "aggregate".to_string(),
+            "verify".to_string(),
+            aggregate_type,
+            aggregate_id,
+            "--json".to_string(),
+        ];
+        let response: VerifyPayload = run_cli_json(args)
+            .await
+            .map_err(async_graphql::Error::from)?;
         Ok(VerifyResult {
-            merkle_root: merkle,
+            merkle_root: response.merkle_root,
         })
     }
 }
@@ -148,28 +178,31 @@ impl MutationRoot {
             .map_err(|_| async_graphql::Error::from(EventError::Unauthorized))?;
         let token = extract_bearer_token(headers)
             .ok_or_else(|| async_graphql::Error::from(EventError::Unauthorized))?;
-        let claims = app.tokens.authorize(&token, AccessKind::Write)?.into();
+        app.tokens()
+            .authorize(&token, AccessKind::Write)
+            .map_err(async_graphql::Error::from)?;
 
         let payload_map = payload_to_map(&input.payload);
-        if app.restrict {
-            app.schemas
+        if app.restrict() {
+            app.schemas()
                 .validate_event(&input.aggregate_type, &input.event_type, &payload_map)?;
         }
 
-        let aggregate_type = input.aggregate_type.clone();
-        let aggregate_id = input.aggregate_id.clone();
-        let record = app.store.append(AppendEvent {
-            aggregate_type: input.aggregate_type.clone(),
-            aggregate_id: input.aggregate_id.clone(),
-            event_type: input.event_type.clone(),
-            payload: input.payload.clone(),
-            issued_by: Some(claims),
+        let payload_json = serde_json::to_string(&input.payload).map_err(|err| {
+            async_graphql::Error::from(EventError::Serialization(err.to_string()))
         })?;
-
-        app.maybe_create_snapshot(&record);
-        notify_plugins(app, &record);
-        replicate_events(app, std::slice::from_ref(&record));
-        app.refresh_cached_aggregate(&aggregate_type, &aggregate_id);
+        let args = vec![
+            "aggregate".to_string(),
+            "apply".to_string(),
+            input.aggregate_type.clone(),
+            input.aggregate_id.clone(),
+            input.event_type.clone(),
+            "--payload".to_string(),
+            payload_json,
+        ];
+        let record: EventRecord = run_cli_json(args)
+            .await
+            .map_err(async_graphql::Error::from)?;
 
         Ok(record.into())
     }
@@ -185,6 +218,11 @@ struct AppendEventInput {
 
 #[derive(async_graphql::SimpleObject)]
 struct VerifyResult {
+    merkle_root: String,
+}
+
+#[derive(Deserialize)]
+struct VerifyPayload {
     merkle_root: String,
 }
 

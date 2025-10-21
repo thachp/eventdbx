@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
+use serde::Deserialize;
 use serde_json::Value;
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 
 use crate::{
     error::EventError,
-    server::{AppState, notify_plugins, replicate_events},
-    store::{self, AppendEvent, EventRecord},
+    server::{AppState, run_cli_json},
+    store::{self, EventRecord},
     token::AccessKind,
 };
 
@@ -114,6 +115,11 @@ impl GrpcApi {
     }
 }
 
+#[derive(Deserialize)]
+struct VerifyPayload {
+    merkle_root: String,
+}
+
 #[tonic::async_trait]
 impl EventService for GrpcApi {
     async fn health(
@@ -136,16 +142,14 @@ impl EventService for GrpcApi {
         let payload_value: Value = serde_json::from_str(&payload.payload_json)
             .map_err(|err| Status::invalid_argument(format!("invalid payload_json: {}", err)))?;
 
-        let claims = self
-            .state
-            .tokens
+        self.state
+            .tokens()
             .authorize(&token, AccessKind::Write)
-            .map_err(Self::map_error)?
-            .into();
+            .map_err(Self::map_error)?;
 
         let payload_map = store::payload_to_map(&payload_value);
-        if self.state.restrict {
-            if let Err(err) = self.state.schemas.validate_event(
+        if self.state.restrict() {
+            if let Err(err) = self.state.schemas().validate_event(
                 &payload.aggregate_type,
                 &payload.event_type,
                 &payload_map,
@@ -154,25 +158,19 @@ impl EventService for GrpcApi {
             }
         }
 
-        let aggregate_type = payload.aggregate_type.clone();
-        let aggregate_id = payload.aggregate_id.clone();
+        let payload_json = serde_json::to_string(&payload_value)
+            .map_err(|err| Status::internal(err.to_string()))?;
+        let args = vec![
+            "aggregate".to_string(),
+            "apply".to_string(),
+            payload.aggregate_type.clone(),
+            payload.aggregate_id.clone(),
+            payload.event_type.clone(),
+            "--payload".to_string(),
+            payload_json,
+        ];
 
-        let record = self
-            .state
-            .store
-            .append(AppendEvent {
-                aggregate_type: payload.aggregate_type,
-                aggregate_id: payload.aggregate_id,
-                event_type: payload.event_type,
-                payload: payload_value,
-                issued_by: Some(claims),
-            })
-            .map_err(Self::map_error)?;
-
-        notify_plugins(&self.state, &record);
-        replicate_events(&self.state, std::slice::from_ref(&record));
-        self.state
-            .refresh_cached_aggregate(&aggregate_type, &aggregate_id);
+        let record: EventRecord = run_cli_json(args).await.map_err(Self::map_error)?;
 
         let event = Self::convert_event(record)?;
         Ok(Response::new(AppendEventResponse { event: Some(event) }))
@@ -185,7 +183,7 @@ impl EventService for GrpcApi {
         let params = request.into_inner();
         let skip = params.skip as usize;
         let mut take = if params.take == 0 {
-            self.state.list_page_size
+            self.state.list_page_size()
         } else {
             params.take as usize
         };
@@ -194,20 +192,26 @@ impl EventService for GrpcApi {
                 aggregates: Vec::new(),
             }));
         }
-        if take > self.state.page_limit {
-            take = self.state.page_limit;
+        if take > self.state.page_limit() {
+            take = self.state.page_limit();
         }
 
-        let aggregates = self.state.store.aggregates();
+        let args = vec![
+            "aggregate".to_string(),
+            "list".to_string(),
+            "--skip".to_string(),
+            skip.to_string(),
+            "--take".to_string(),
+            take.to_string(),
+            "--json".to_string(),
+        ];
+
+        let aggregates: Vec<crate::store::AggregateState> =
+            run_cli_json(args).await.map_err(Self::map_error)?;
         let page = aggregates
             .into_iter()
             .filter(|aggregate| !self.state.is_hidden_aggregate(&aggregate.aggregate_type))
-            .skip(skip)
-            .take(take)
-            .map(|aggregate| {
-                self.state.cache_store(&aggregate);
-                self.sanitize_aggregate(aggregate)
-            })
+            .map(|aggregate| self.sanitize_aggregate(aggregate))
             .collect();
 
         Ok(Response::new(ListAggregatesResponse { aggregates: page }))
@@ -221,10 +225,13 @@ impl EventService for GrpcApi {
         if self.state.is_hidden_aggregate(&params.aggregate_type) {
             return Err(Status::not_found("aggregate not found"));
         }
-        let aggregate = match self
-            .state
-            .load_aggregate(&params.aggregate_type, &params.aggregate_id)
-        {
+        let args = vec![
+            "aggregate".to_string(),
+            "get".to_string(),
+            params.aggregate_type.clone(),
+            params.aggregate_id.clone(),
+        ];
+        let aggregate = match run_cli_json::<crate::store::AggregateState>(args).await {
             Ok(aggregate) => aggregate,
             Err(EventError::AggregateNotFound) => {
                 return Err(Status::not_found("aggregate not found"));
@@ -248,26 +255,32 @@ impl EventService for GrpcApi {
         }
         let skip = params.skip as usize;
         let mut take = if params.take == 0 {
-            self.state.page_limit
+            self.state.page_limit()
         } else {
             params.take as usize
         };
         if take == 0 {
             return Ok(Response::new(ListEventsResponse { events: Vec::new() }));
         }
-        if take > self.state.page_limit {
-            take = self.state.page_limit;
+        if take > self.state.page_limit() {
+            take = self.state.page_limit();
         }
 
-        let events = self
-            .state
-            .store
-            .list_events(&params.aggregate_type, &params.aggregate_id)
-            .map_err(Self::map_error)?;
+        let args = vec![
+            "aggregate".to_string(),
+            "replay".to_string(),
+            params.aggregate_type.clone(),
+            params.aggregate_id.clone(),
+            "--skip".to_string(),
+            skip.to_string(),
+            "--take".to_string(),
+            take.to_string(),
+            "--json".to_string(),
+        ];
+
+        let events: Vec<EventRecord> = run_cli_json(args).await.map_err(Self::map_error)?;
         let page = events
             .into_iter()
-            .skip(skip)
-            .take(take)
             .map(Self::convert_event)
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -283,13 +296,18 @@ impl EventService for GrpcApi {
             return Err(Status::not_found("aggregate not found"));
         }
 
-        let merkle_root = self
-            .state
-            .store
-            .verify(&params.aggregate_type, &params.aggregate_id)
-            .map_err(Self::map_error)?;
+        let args = vec![
+            "aggregate".to_string(),
+            "verify".to_string(),
+            params.aggregate_type.clone(),
+            params.aggregate_id.clone(),
+            "--json".to_string(),
+        ];
+        let response: VerifyPayload = run_cli_json(args).await.map_err(Self::map_error)?;
 
-        Ok(Response::new(VerifyAggregateResponse { merkle_root }))
+        Ok(Response::new(VerifyAggregateResponse {
+            merkle_root: response.merkle_root,
+        }))
     }
 }
 

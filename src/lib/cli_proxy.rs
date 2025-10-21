@@ -3,7 +3,7 @@ use std::{path::PathBuf, process::Stdio, sync::Arc};
 use anyhow::{Context, Result};
 use capnp::message::ReaderOptions;
 use capnp::serialize::{OwnedSegments, write_message_to_words};
-use capnp_futures::serialize::{read_message, try_read_message, write_message};
+use capnp_futures::serialize::{read_message, try_read_message};
 use futures::AsyncWriteExt;
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -183,16 +183,20 @@ pub async fn invoke(args: &[String]) -> Result<CliCommandResult> {
         .context("failed to connect to CLI proxy")?;
     let (reader, writer) = stream.into_split();
     let mut writer = writer.compat_write();
-    let mut message = capnp::message::Builder::new_default();
-    {
-        let mut request = message.init_root::<cli_request::Builder>();
-        let mut list = request.init_args(args.len() as u32);
-        for (idx, arg) in args.iter().enumerate() {
-            list.set(idx as u32, arg);
+    let message_bytes = {
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let mut request = message.init_root::<cli_request::Builder>();
+            let mut list = request.init_args(args.len() as u32);
+            for (idx, arg) in args.iter().enumerate() {
+                list.set(idx as u32, arg);
+            }
         }
-    }
+        write_message_to_words(&message)
+    };
 
-    write_message(&mut writer, &message)
+    writer
+        .write_all(&message_bytes)
         .await
         .context("failed to send CLI request")?;
     writer

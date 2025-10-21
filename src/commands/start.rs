@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use eventdbx::{
     config::{ApiMode, Config, ConfigUpdate, load_or_default},
-    plugin::PluginManager,
     restrict::{self, RESTRICT_ENV},
     server,
 };
@@ -220,8 +219,7 @@ async fn start_foreground(config_path: Option<PathBuf>, args: StartArgs) -> Resu
         "configuration loaded; starting server (pid={})",
         std::process::id()
     );
-    let plugins = PluginManager::from_config(&config)?;
-    server::run(config, path, plugins).await?;
+    server::run(config, path).await?;
     Ok(())
 }
 

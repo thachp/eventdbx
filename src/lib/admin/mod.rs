@@ -15,8 +15,6 @@ use serde::Deserialize;
 use crate::{
     config::{AdminApiConfig, Config, PluginConfig, PluginDefinition, RemoteConfig},
     error::{EventError, Result},
-    plugin::PluginManager,
-    replication::ReplicationManager,
     schema::{AggregateSchema, CreateSchemaInput, SchemaUpdate},
     server::{AppState, extract_bearer_token},
     token::{IssueTokenInput, TokenRecord},
@@ -68,7 +66,8 @@ fn check_admin_auth(state: &AppState, headers: &HeaderMap) -> Result<bool> {
         return Ok(false);
     };
 
-    let guard = state.config.read().expect("admin config lock poisoned");
+    let config = state.config();
+    let guard = config.read().expect("admin config lock poisoned");
     if !guard.admin_master_key_configured() {
         return Ok(false);
     }
@@ -89,7 +88,7 @@ fn extract_admin_key(headers: &HeaderMap) -> Option<String> {
 }
 
 async fn list_tokens(State(state): State<AppState>) -> Result<Json<Vec<TokenRecord>>> {
-    Ok(Json(state.tokens.list()))
+    Ok(Json(state.tokens().list()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,7 +107,7 @@ async fn issue_token(
     State(state): State<AppState>,
     Json(request): Json<IssueTokenRequest>,
 ) -> Result<(StatusCode, Json<TokenRecord>)> {
-    let record = state.tokens.issue(IssueTokenInput {
+    let record = state.tokens().issue(IssueTokenInput {
         group: request.group,
         user: request.user,
         expiration_secs: request.expiration_secs,
@@ -122,7 +121,7 @@ async fn revoke_token(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<StatusCode> {
-    state.tokens.revoke(&token)?;
+    state.tokens().revoke(&token)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -140,20 +139,20 @@ async fn refresh_token(
     Json(request): Json<RefreshTokenRequest>,
 ) -> Result<Json<TokenRecord>> {
     let record = state
-        .tokens
+        .tokens()
         .refresh(&token, request.expiration_secs, request.limit)?;
     Ok(Json(record))
 }
 
 async fn list_schemas(State(state): State<AppState>) -> Result<Json<Vec<AggregateSchema>>> {
-    Ok(Json(state.schemas.list()))
+    Ok(Json(state.schemas().list()))
 }
 
 async fn get_schema(
     State(state): State<AppState>,
     Path(aggregate): Path<String>,
 ) -> Result<Json<AggregateSchema>> {
-    Ok(Json(state.schemas.get(&aggregate)?))
+    Ok(Json(state.schemas().get(&aggregate)?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,7 +167,7 @@ async fn create_schema(
     State(state): State<AppState>,
     Json(request): Json<CreateSchemaRequest>,
 ) -> Result<(StatusCode, Json<AggregateSchema>)> {
-    let schema = state.schemas.create(CreateSchemaInput {
+    let schema = state.schemas().create(CreateSchemaInput {
         aggregate: request.aggregate,
         events: request.events,
         snapshot_threshold: request.snapshot_threshold,
@@ -217,7 +216,7 @@ async fn update_schema(
     if let Some(mut removals) = request.remove_fields {
         update.event_remove_fields.append(&mut removals);
     }
-    let schema = state.schemas.update(&aggregate, update)?;
+    let schema = state.schemas().update(&aggregate, update)?;
     Ok(Json(schema))
 }
 
@@ -225,15 +224,15 @@ async fn remove_schema_event(
     State(state): State<AppState>,
     Path((aggregate, event)): Path<(String, String)>,
 ) -> Result<Json<AggregateSchema>> {
-    let schema = state.schemas.remove_event(&aggregate, &event)?;
+    let schema = state.schemas().remove_event(&aggregate, &event)?;
     Ok(Json(schema))
 }
 
 async fn list_remotes(
     State(state): State<AppState>,
 ) -> Result<Json<BTreeMap<String, RemoteConfig>>> {
-    let remotes = state
-        .config
+    let config_arc = state.config();
+    let remotes = config_arc
         .read()
         .expect("config lock poisoned")
         .remotes
@@ -418,7 +417,8 @@ async fn disable_plugin(
 }
 
 fn snapshot_plugins(state: &AppState) -> Result<Vec<PluginDefinition>> {
-    let config = state.config.read().expect("config lock poisoned");
+    let config_arc = state.config();
+    let config = config_arc.read().expect("config lock poisoned");
     load_plugin_definitions(&config)
 }
 
@@ -434,18 +434,13 @@ fn update_plugins<F, R>(state: &AppState, mutator: F) -> Result<R>
 where
     F: FnOnce(&mut Vec<PluginDefinition>) -> Result<R>,
 {
-    let (result, manager) = {
-        let mut config = state.config.write().expect("config lock poisoned");
-        let mut definitions = load_plugin_definitions(&config)?;
-        let result = mutator(&mut definitions)?;
-        config.plugins = definitions.clone();
-        config.updated_at = Utc::now();
-        config.save_plugins(&definitions)?;
-        let manager = PluginManager::from_config(&config)?;
-        (result, manager)
-    };
-
-    state.replace_plugins(manager);
+    let config_arc = state.config();
+    let mut config = config_arc.write().expect("config lock poisoned");
+    let mut definitions = load_plugin_definitions(&config)?;
+    let result = mutator(&mut definitions)?;
+    config.plugins = definitions.clone();
+    config.updated_at = Utc::now();
+    config.save_plugins(&definitions)?;
     Ok(result)
 }
 
@@ -453,19 +448,10 @@ fn mutate_remotes<F, R>(state: &AppState, mutator: F) -> Result<R>
 where
     F: FnOnce(&mut Config) -> Result<R>,
 {
-    let (result, manager) = {
-        let mut config = state.config.write().expect("config lock poisoned");
-        let result = mutator(&mut config)?;
-        config.updated_at = Utc::now();
-        config.save(state.config_path.as_ref())?;
-        let manager = if config.remotes.is_empty() {
-            None
-        } else {
-            Some(ReplicationManager::from_config(&config))
-        };
-        (result, manager)
-    };
-
-    state.set_replication_manager(manager);
+    let config_arc = state.config();
+    let mut config = config_arc.write().expect("config lock poisoned");
+    let result = mutator(&mut config)?;
+    config.updated_at = Utc::now();
+    config.save(state.config_path().as_ref())?;
     Ok(result)
 }
