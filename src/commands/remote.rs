@@ -37,10 +37,6 @@ pub enum RemoteCommands {
     Show(RemoteShowArgs),
     /// Display this node's replication public key
     Key(RemoteKeyArgs),
-    /// Push events to a remote standby
-    Push(RemotePushArgs),
-    /// Pull events from a remote primary
-    Pull(RemotePullArgs),
 }
 
 #[derive(Args)]
@@ -131,8 +127,6 @@ pub async fn execute(config_path: Option<PathBuf>, command: RemoteCommands) -> R
         RemoteCommands::List(args) => list_remotes(config_path, args.json),
         RemoteCommands::Show(args) => show_remote(config_path, args),
         RemoteCommands::Key(args) => show_local_key(config_path, args),
-        RemoteCommands::Push(args) => push_remote(config_path, args).await,
-        RemoteCommands::Pull(args) => pull_remote(config_path, args).await,
     }
 }
 
@@ -245,7 +239,7 @@ fn show_local_key(config_path: Option<PathBuf>, args: RemoteKeyArgs) -> Result<(
     Ok(())
 }
 
-async fn push_remote(config_path: Option<PathBuf>, mut args: RemotePushArgs) -> Result<()> {
+pub async fn push(config_path: Option<PathBuf>, mut args: RemotePushArgs) -> Result<()> {
     if args.schema_only {
         args.schema = true;
     }
@@ -291,7 +285,7 @@ async fn push_remote(config_path: Option<PathBuf>, mut args: RemotePushArgs) -> 
     .await
 }
 
-async fn pull_remote(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Result<()> {
+pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Result<()> {
     if args.schema_only {
         args.schema = true;
     }

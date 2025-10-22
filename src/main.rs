@@ -62,6 +62,10 @@ enum Commands {
         #[command(subcommand)]
         command: AggregateCommands,
     },
+    /// Push events to a remote standby
+    Push(commands::remote::RemotePushArgs),
+    /// Pull events from a remote primary
+    Pull(commands::remote::RemotePullArgs),
     /// Manage replication remotes
     Remote {
         #[command(subcommand)]
@@ -93,6 +97,8 @@ async fn main() -> Result<()> {
         Commands::Schema { command } => commands::schema::execute(config, command)?,
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
+        Commands::Push(args) => commands::remote::push(config, args).await?,
+        Commands::Pull(args) => commands::remote::pull(config, args).await?,
         Commands::Remote { command } => commands::remote::execute(config, command).await?,
         Commands::Backup(args) => commands::system::backup(config, args)?,
         Commands::Restore(args) => commands::system::restore(config, args)?,
