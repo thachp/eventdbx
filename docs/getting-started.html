@@ -5,112 +5,158 @@ nav_id: guides
 ---
 
 <section class="relative overflow-hidden py-24 sm:py-28">
-    <div class="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top,_rgba(255,79,109,0.18),_transparent_60%)]"></div>
-    <div class="mx-auto grid max-w-6xl items-center gap-14 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-        <div class="space-y-7">
-            <span class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.3em] text-brand">Guide</span>
-            <h1 class="text-4xl font-semibold leading-tight text-white sm:text-5xl">Launch EventDBX locally in four steps.</h1>
-            <p class="max-w-xl text-lg text-slate-300">
-                Install the CLI, start the server, codify a schema, and write your first event. These commands mirror the ones we ship in production runbooks. The binary installs as <code class="font-mono text-sm text-slate-200">eventdbx</code> and also registers a shorter <code class="font-mono text-sm text-slate-200">dbx</code> alias.
-            </p>
-            <div class="flex flex-wrap gap-3">
-                <a class="inline-flex items-center rounded-full bg-brand px-5 py-3 text-sm font-semibold text-slate-950 shadow-glow transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand/40" href="https://github.com/thachp/eventdbx/releases">
-                    Download the CLI
-                </a>
-                <a class="inline-flex items-center rounded-full border border-brand/40 px-5 py-3 text-sm font-semibold text-brand transition hover:border-brand hover:bg-brand/10" href="{{ '/apis/' | relative_url }}">
-                    Review the APIs
-                </a>
-            </div>
-        </div>
-        <div>
-            <pre class="overflow-x-auto rounded-3xl bg-slate-900/75 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ curl -LsSf https://github.com/thachp/eventdbx/releases/download/v1.12.2/eventdbx-installer.sh | sh
+  <div
+    class="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top,_rgba(255,79,109,0.18),_transparent_60%)]"
+  ></div>
+  <div
+    class="mx-auto grid max-w-6xl items-center gap-14 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]"
+  >
+    <div class="space-y-7">
+      <span
+        class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.3em] text-brand"
+        >Guide</span
+      >
+      <h1 class="text-4xl font-semibold leading-tight text-white sm:text-5xl">
+        Launch EventDBX locally in four steps.
+      </h1>
+      <p class="max-w-xl text-lg text-slate-300">
+        Install the CLI, start the server, codify a schema, and write your first event. These
+        commands mirror the ones we ship in production runbooks. The binary installs as
+        <code class="font-mono text-sm text-slate-200">eventdbx</code> and also registers a shorter
+        <code class="font-mono text-sm text-slate-200">dbx</code> alias.
+      </p>
+      <div class="flex flex-wrap gap-3">
+        <a
+          class="inline-flex items-center rounded-full bg-brand px-5 py-3 text-sm font-semibold text-slate-950 shadow-glow transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand/40"
+          href="https://github.com/thachp/eventdbx/releases"
+        >
+          Download the CLI
+        </a>
+        <a
+          class="inline-flex items-center rounded-full border border-brand/40 px-5 py-3 text-sm font-semibold text-brand transition hover:border-brand hover:bg-brand/10"
+          href="{{ '/apis/' | relative_url }}"
+        >
+          Review the APIs
+        </a>
+      </div>
+    </div>
+    <div>
+      <pre
+        class="overflow-x-auto rounded-3xl bg-slate-900/75 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"
+      ><code>$ curl -LsSf https://github.com/thachp/eventdbx/releases/download/v1.12.2/eventdbx-installer.sh | sh
 
 $ dbx start --foreground
-REST and GraphQL listening on 0.0.0.0:7070
-CLI socket ready on 0.0.0.0:6363</code></pre>
-        </div>
+REST and GraphQL listening on http://0.0.0.0:7070
+CLI socket ready on tcp://0.0.0.0:6363</code></pre>
     </div>
+  </div>
 </section>
 
 <section class="bg-slate-100 py-24 text-slate-900 sm:py-28">
-    <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-        <div class="space-y-4">
-            <h2 class="text-3xl font-semibold sm:text-4xl">1. Install the CLI</h2>
-            <p class="text-lg text-slate-600">
-                Grab the latest release for macOS, Linux, or Windows. Install scripts add the binary to your path and create a config directory under <code class="font-mono text-sm text-slate-700">$HOME/.eventdbx</code>.
-            </p>
-            <pre class="overflow-x-auto rounded-3xl bg-white p-6 text-sm leading-relaxed text-slate-800 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200"><code>$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.12.2/eventdbx-installer.sh | sh
+  <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+    <div class="space-y-4">
+      <h2 class="text-3xl font-semibold sm:text-4xl">1. Install the CLI</h2>
+      <p class="text-lg text-slate-600">
+        Grab the latest release for macOS, Linux, or Windows. Install scripts add the binary to your
+        path and create a config directory under
+        <code class="font-mono text-sm text-slate-700">$HOME/.eventdbx</code>.
+      </p>
+      <pre
+        class="overflow-x-auto rounded-3xl bg-white p-6 text-sm leading-relaxed text-slate-800 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200"
+      ><code>$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.12.4/eventdbx-installer.sh | sh
 
 # PowerShell
-PS> irm https://github.com/thachp/eventdbx/releases/download/v1.12.2/eventdbx-installer.ps1 | iex</code></pre>
-        </div>
-        <div class="rounded-3xl bg-white p-8 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200">
-            <h3 class="text-lg font-semibold text-slate-900">What the installer handles</h3>
-            <ul class="mt-5 space-y-3 text-sm text-slate-600">
-                <li><strong class="text-slate-900">Downloads native binaries</strong> for x86 and arm.</li>
-                <li><strong class="text-slate-900">Initialises config</strong> with sane defaults.</li>
-                <li><strong class="text-slate-900">Bootstraps completions</strong> when your shell supports them.</li>
-            </ul>
-        </div>
+PS> irm https://github.com/thachp/eventdbx/releases/download/v1.12.4/eventdbx-installer.ps1 | iex</code></pre>
     </div>
+    <div class="rounded-3xl bg-white p-8 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200">
+      <h3 class="text-lg font-semibold text-slate-900">What the installer handles</h3>
+      <ul class="mt-5 space-y-3 text-sm text-slate-600">
+        <li><strong class="text-slate-900">Downloads native binaries</strong> for x86 and arm.</li>
+        <li><strong class="text-slate-900">Initialises config</strong> with sane defaults.</li>
+        <li>
+          <strong class="text-slate-900">Bootstraps completions</strong> when your shell supports
+          them.
+        </li>
+      </ul>
+    </div>
+  </div>
 </section>
 
 <section class="py-24 sm:py-28">
-    <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-        <div class="space-y-4">
-            <h2 class="text-3xl font-semibold text-white sm:text-4xl">2. Start the server</h2>
-            <p class="text-lg text-slate-300">
-                Run the server in the foreground while you iterate. When the process is alive, the CLI proxies writes through the REST API automatically.
-            </p>
-            <pre class="overflow-x-auto rounded-3xl bg-slate-900/70 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ dbx start --foreground
-INFO binding REST + GraphQL on 0.0.0.0:7070
-INFO binding CLI socket on 0.0.0.0:6363
+  <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+    <div class="space-y-4">
+      <h2 class="text-3xl font-semibold text-white sm:text-4xl">2. Start the server</h2>
+      <p class="text-lg text-slate-300">
+        Run the server in the foreground while you iterate. When the process is alive, the CLI
+        proxies writes through the REST API automatically.
+      </p>
+      <pre
+        class="overflow-x-auto rounded-3xl bg-slate-900/70 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"
+      ><code>$ dbx start --foreground
+INFO binding REST + GraphQL on http://0.0.0.0:7070
+INFO binding CLI socket on tcp://0.0.0.0:6363
 INFO restriction enabled (schema enforcement active)</code></pre>
-        </div>
-        <div class="rounded-3xl border border-white/10 bg-slate-900/60 p-8 shadow-2xl shadow-black/30 backdrop-blur">
-            <h3 class="text-lg font-semibold text-white">Configuration tips</h3>
-            <ul class="mt-5 space-y-3 text-sm text-slate-200">
-                <li><strong class="text-white">--api rest,graphql,grpc</strong> toggles surfaces.</li>
-                <li><strong class="text-white">--data-dir ./state</strong> attaches storage anywhere.</li>
-                <li><strong class="text-white">--restrict=false</strong> relaxes schema enforcement for experiments.</li>
-            </ul>
-        </div>
     </div>
+    <div
+      class="rounded-3xl border border-white/10 bg-slate-900/60 p-8 shadow-2xl shadow-black/30 backdrop-blur"
+    >
+      <h3 class="text-lg font-semibold text-white">Configuration tips</h3>
+      <ul class="mt-5 space-y-3 text-sm text-slate-200">
+        <li><strong class="text-white">--api rest,graphql,grpc</strong> toggles surfaces.</li>
+        <li><strong class="text-white">--data-dir ./state</strong> attaches storage anywhere.</li>
+        <li>
+          <strong class="text-white">--restrict=false</strong> relaxes schema enforcement for
+          experiments.
+        </li>
+      </ul>
+    </div>
+  </div>
 </section>
 
 <section class="bg-slate-100 py-24 text-slate-900 sm:py-28">
-    <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-        <div class="space-y-4">
-            <h2 class="text-3xl font-semibold sm:text-4xl">3. Define a schema</h2>
-            <p class="text-lg text-slate-600">
-                Schemas lock down which events each aggregate accepts and how frequently snapshots occur. Keep them in version control and deploy them through CI.
-            </p>
-            <pre class="overflow-x-auto rounded-3xl bg-white p-6 text-sm leading-relaxed text-slate-800 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200"><code>$ dbx schema create \
+  <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+    <div class="space-y-4">
+      <h2 class="text-3xl font-semibold sm:text-4xl">3. Define a schema</h2>
+      <p class="text-lg text-slate-600">
+        Schemas lock down which events each aggregate accepts and how frequently snapshots occur.
+        Keep them in version control and deploy them through CI.
+      </p>
+      <pre
+        class="overflow-x-auto rounded-3xl bg-white p-6 text-sm leading-relaxed text-slate-800 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200"
+      ><code>$ dbx schema create \
     --aggregate patient \
     --events patient-added,patient-updated \
     --snapshot-threshold 100
 
 Schema stored at $HOME/.eventdbx/schemas/patient.json</code></pre>
-        </div>
-        <div class="rounded-3xl bg-white p-8 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200">
-            <h3 class="text-lg font-semibold text-slate-900">Schema fields</h3>
-            <ul class="mt-5 space-y-3 text-sm text-slate-600">
-                <li><strong class="text-slate-900">aggregate</strong> is the identifier used in API calls.</li>
-                <li><strong class="text-slate-900">events</strong> enumerates permitted event types.</li>
-                <li><strong class="text-slate-900">snapshot-threshold</strong> controls hydration speed for large timelines.</li>
-            </ul>
-        </div>
     </div>
+    <div class="rounded-3xl bg-white p-8 shadow-xl shadow-slate-400/10 ring-1 ring-slate-200">
+      <h3 class="text-lg font-semibold text-slate-900">Schema fields</h3>
+      <ul class="mt-5 space-y-3 text-sm text-slate-600">
+        <li>
+          <strong class="text-slate-900">aggregate</strong> is the identifier used in API calls.
+        </li>
+        <li><strong class="text-slate-900">events</strong> enumerates permitted event types.</li>
+        <li>
+          <strong class="text-slate-900">snapshot-threshold</strong> controls hydration speed for
+          large timelines.
+        </li>
+      </ul>
+    </div>
+  </div>
 </section>
 
 <section class="py-24 sm:py-28">
-    <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-        <div class="space-y-4">
-            <h2 class="text-3xl font-semibold text-white sm:text-4xl">4. Append your first event</h2>
-            <p class="text-lg text-slate-300">
-                Use the CLI for the smoothest experience or hit the REST API directly. Both paths land the same immutable event.
-            </p>
-            <pre class="overflow-x-auto rounded-3xl bg-slate-900/70 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ dbx aggregate apply patient p-002 patient-added \
+  <div class="mx-auto grid max-w-6xl gap-12 px-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+    <div class="space-y-4">
+      <h2 class="text-3xl font-semibold text-white sm:text-4xl">4. Append your first event</h2>
+      <p class="text-lg text-slate-300">
+        Use the CLI for the smoothest experience or hit the REST API directly. Both paths land the
+        same immutable event.
+      </p>
+      <pre
+        class="overflow-x-auto rounded-3xl bg-slate-900/70 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"
+      ><code>$ dbx aggregate apply patient p-002 patient-added \
     --field name="Jane Doe" \
     --field status=active
 
@@ -126,34 +172,53 @@ $ curl -X POST http://127.0.0.1:7070/v1/events \
             "status": "active"
         }
     }'</code></pre>
-        </div>
-        <div class="rounded-3xl border border-white/10 bg-slate-900/60 p-8 shadow-2xl shadow-black/30 backdrop-blur">
-            <h3 class="text-lg font-semibold text-white">Next steps</h3>
-            <ul class="mt-5 space-y-3 text-sm text-slate-200">
-                <li><strong class="text-white">Inspect timelines</strong> with <code class="font-mono text-xs text-slate-200">dbx aggregate events patient p-002</code>.</li>
-                <li><strong class="text-white">Monitor health</strong> at <code class="font-mono text-xs text-slate-200">http://127.0.0.1:7070/health</code>.</li>
-                <li><strong class="text-white">Promote to staging</strong> by replaying the event log or restoring a snapshot.</li>
-            </ul>
-        </div>
     </div>
+    <div
+      class="rounded-3xl border border-white/10 bg-slate-900/60 p-8 shadow-2xl shadow-black/30 backdrop-blur"
+    >
+      <h3 class="text-lg font-semibold text-white">Next steps</h3>
+      <ul class="mt-5 space-y-3 text-sm text-slate-200">
+        <li>
+          <strong class="text-white">Inspect timelines</strong> with
+          <code class="font-mono text-xs text-slate-200">dbx aggregate events patient p-002</code>.
+        </li>
+        <li>
+          <strong class="text-white">Monitor health</strong> at
+          <code class="font-mono text-xs text-slate-200">http://127.0.0.1:7070/health</code>.
+        </li>
+        <li>
+          <strong class="text-white">Promote to staging</strong> by replaying the event log or
+          restoring a snapshot.
+        </li>
+      </ul>
+    </div>
+  </div>
 </section>
 
 <section class="py-24">
-    <div class="mx-auto max-w-6xl px-6">
-        <div class="relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-brand to-brand-400 p-12 text-slate-950 shadow-2xl shadow-brand/40">
-            <div class="absolute -right-10 top-12 h-48 w-48 rounded-full bg-white/30 blur-3xl"></div>
-            <h2 class="text-3xl font-semibold sm:text-4xl">Keep going.</h2>
-            <p class="mt-4 text-lg text-slate-900/80">
-                Dive into the API and CLI references to wire EventDBX into your workflows and automation.
-            </p>
-            <div class="mt-6 flex flex-wrap gap-3">
-                <a class="inline-flex items-center rounded-full bg-slate-950 px-6 py-3 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-slate-900" href="{{ '/apis/' | relative_url }}">
-                    Explore APIs
-                </a>
-                <a class="inline-flex items-center rounded-full border border-slate-900/40 px-6 py-3 text-sm font-semibold text-slate-900 transition hover:border-slate-900" href="{{ '/cli/' | relative_url }}">
-                    CLI commands
-                </a>
-            </div>
-        </div>
+  <div class="mx-auto max-w-6xl px-6">
+    <div
+      class="relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-brand to-brand-400 p-12 text-slate-950 shadow-2xl shadow-brand/40"
+    >
+      <div class="absolute -right-10 top-12 h-48 w-48 rounded-full bg-white/30 blur-3xl"></div>
+      <h2 class="text-3xl font-semibold sm:text-4xl">Keep going.</h2>
+      <p class="mt-4 text-lg text-slate-900/80">
+        Dive into the API and CLI references to wire EventDBX into your workflows and automation.
+      </p>
+      <div class="mt-6 flex flex-wrap gap-3">
+        <a
+          class="inline-flex items-center rounded-full bg-slate-950 px-6 py-3 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-slate-900"
+          href="{{ '/apis/' | relative_url }}"
+        >
+          Explore APIs
+        </a>
+        <a
+          class="inline-flex items-center rounded-full border border-slate-900/40 px-6 py-3 text-sm font-semibold text-slate-900 transition hover:border-slate-900"
+          href="{{ '/cli/' | relative_url }}"
+        >
+          CLI commands
+        </a>
+      </div>
     </div>
+  </div>
 </section>
