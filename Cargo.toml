@@ -14,7 +14,7 @@ keywords = [
 categories = ["database"]
 authors = ["Patrick Thach <thachp@gmail.com>"]
 license = "MIT"
-license-file = "LICENSE.txt"
+license-file = "LICENSE"
 
 exclude = [
     "docs/*",
