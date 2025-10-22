@@ -37,21 +37,21 @@ pub enum RemoteCommands {
     Show(RemoteShowArgs),
     /// Display this node's replication public key
     Key(RemoteKeyArgs),
-    /// Push events to a remote standby
-    Push(RemotePushArgs),
-    /// Pull events from a remote primary
-    Pull(RemotePullArgs),
 }
 
 #[derive(Args)]
 pub struct RemoteAddArgs {
     /// Remote alias (e.g. standby1)
     pub name: String,
-    /// Remote replication endpoint (e.g. tcp://10.0.0.1:7443)
-    pub endpoint: String,
+    /// Remote replication IP address (e.g. 10.0.0.1)
+    #[arg(value_name = "IP")]
+    pub ip: String,
     /// Base64-encoded Ed25519 public key for the remote
     #[arg(long = "public-key")]
     pub public_key: String,
+    /// Remote replication port
+    #[arg(long, default_value_t = 6363)]
+    pub port: u16,
     /// Replace existing remote with the same name
     #[arg(long, default_value_t = false)]
     pub replace: bool,
@@ -131,8 +131,6 @@ pub async fn execute(config_path: Option<PathBuf>, command: RemoteCommands) -> R
         RemoteCommands::List(args) => list_remotes(config_path, args.json),
         RemoteCommands::Show(args) => show_remote(config_path, args),
         RemoteCommands::Key(args) => show_local_key(config_path, args),
-        RemoteCommands::Push(args) => push_remote(config_path, args).await,
-        RemoteCommands::Pull(args) => pull_remote(config_path, args).await,
     }
 }
 
@@ -144,9 +142,16 @@ fn add_remote(config_path: Option<PathBuf>, args: RemoteAddArgs) -> Result<()> {
         bail!("remote name cannot be empty");
     }
 
-    let endpoint = args.endpoint.trim();
-    if endpoint.is_empty() {
-        bail!("remote endpoint cannot be empty");
+    let ip = args.ip.trim();
+    if ip.is_empty() {
+        bail!("remote IP address cannot be empty");
+    }
+    if ip.contains("://") {
+        bail!("remote IP address must not include a protocol scheme");
+    }
+
+    if args.port == 0 {
+        bail!("remote port must be greater than zero");
     }
 
     let public_key = normalize_public_key(&args.public_key)?;
@@ -158,10 +163,12 @@ fn add_remote(config_path: Option<PathBuf>, args: RemoteAddArgs) -> Result<()> {
         );
     }
 
+    let endpoint = format!("tcp://{}:{}", ip, args.port);
+
     config.remotes.insert(
         name.to_string(),
         RemoteConfig {
-            endpoint: endpoint.to_string(),
+            endpoint: endpoint.clone(),
             public_key: public_key.clone(),
         },
     );
@@ -245,7 +252,7 @@ fn show_local_key(config_path: Option<PathBuf>, args: RemoteKeyArgs) -> Result<(
     Ok(())
 }
 
-async fn push_remote(config_path: Option<PathBuf>, mut args: RemotePushArgs) -> Result<()> {
+pub async fn push(config_path: Option<PathBuf>, mut args: RemotePushArgs) -> Result<()> {
     if args.schema_only {
         args.schema = true;
     }
@@ -291,7 +298,7 @@ async fn push_remote(config_path: Option<PathBuf>, mut args: RemotePushArgs) -> 
     .await
 }
 
-async fn pull_remote(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Result<()> {
+pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Result<()> {
     if args.schema_only {
         args.schema = true;
     }

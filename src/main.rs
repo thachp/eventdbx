@@ -15,6 +15,7 @@ use crate::commands::{
     start::{DestroyArgs, StartArgs},
     system::{BackupArgs, RestoreArgs},
     token::TokenCommands,
+    upgrade::UpgradeArgs,
 };
 
 #[derive(Parser)]
@@ -62,6 +63,12 @@ enum Commands {
         #[command(subcommand)]
         command: AggregateCommands,
     },
+    /// Push events to a remote standby
+    Push(commands::remote::RemotePushArgs),
+    /// Pull events from a remote primary
+    Pull(commands::remote::RemotePullArgs),
+    /// Upgrade or switch the EventDBX CLI binary
+    Upgrade(UpgradeArgs),
     /// Manage replication remotes
     Remote {
         #[command(subcommand)]
@@ -74,6 +81,8 @@ enum Commands {
     /// Internal command used for daemonized server execution
     #[command(name = "__internal:server", hide = true)]
     InternalServer,
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 #[tokio::main]
@@ -93,10 +102,22 @@ async fn main() -> Result<()> {
         Commands::Schema { command } => commands::schema::execute(config, command)?,
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
+        Commands::Push(args) => commands::remote::push(config, args).await?,
+        Commands::Pull(args) => commands::remote::pull(config, args).await?,
+        Commands::Upgrade(args) => commands::upgrade::execute(args).await?,
         Commands::Remote { command } => commands::remote::execute(config, command).await?,
         Commands::Backup(args) => commands::system::backup(config, args)?,
         Commands::Restore(args) => commands::system::restore(config, args)?,
         Commands::InternalServer => commands::start::run_internal(config).await?,
+        Commands::External(argv) => {
+            if !commands::upgrade::try_handle_shortcut(&argv).await? {
+                if let Some(name) = argv.first() {
+                    anyhow::bail!("unknown command '{}'", name);
+                } else {
+                    anyhow::bail!("unknown command");
+                }
+            }
+        }
     }
 
     Ok(())
