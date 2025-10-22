@@ -21,6 +21,8 @@ pub enum SchemaCommands {
     List(SchemaListArgs),
     /// Hide a field from aggregate detail responses
     Hide(SchemaHideArgs),
+    /// Validate payload against a schema definition
+    Validate(SchemaValidateArgs),
     /// Fallback handler for positional aggregate commands
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -77,6 +79,21 @@ pub struct SchemaHideArgs {
     /// Field/property name to hide
     #[arg(long)]
     pub field: String,
+}
+
+#[derive(Args)]
+pub struct SchemaValidateArgs {
+    /// Aggregate name to validate against
+    #[arg(long)]
+    pub aggregate: String,
+
+    /// Event name to validate against
+    #[arg(long)]
+    pub event: String,
+
+    /// JSON payload to validate
+    #[arg(long)]
+    pub payload: String,
 }
 
 pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<()> {
@@ -148,6 +165,17 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
                     );
                 }
             }
+            Ok(())
+        }
+        SchemaCommands::Validate(args) => {
+            let (config, _) = load_or_default(config_path)?;
+            let manager = SchemaManager::load(config.schema_store_path())?;
+            let payload: serde_json::Value = serde_json::from_str(&args.payload)?;
+            manager.validate_event(&args.aggregate, &args.event, &payload)?;
+            println!(
+                "aggregate={} event={} validation=ok",
+                args.aggregate, args.event
+            );
             Ok(())
         }
         SchemaCommands::External(args) => {

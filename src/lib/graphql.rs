@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::error::EventError;
 use crate::server::{AppState, extract_bearer_token, run_cli_json};
-use crate::store::{AggregateState, EventMetadata, EventRecord, payload_to_map};
+use crate::store::{AggregateState, EventMetadata, EventRecord};
 use crate::token::AccessKind;
 
 #[derive(Clone)]
@@ -182,10 +182,12 @@ impl MutationRoot {
             .authorize(&token, AccessKind::Write)
             .map_err(async_graphql::Error::from)?;
 
-        let payload_map = payload_to_map(&input.payload);
         if app.restrict() {
-            app.schemas()
-                .validate_event(&input.aggregate_type, &input.event_type, &payload_map)?;
+            app.schemas().validate_event(
+                &input.aggregate_type,
+                &input.event_type,
+                &input.payload,
+            )?;
         }
 
         let payload_json = serde_json::to_string(&input.payload).map_err(|err| {

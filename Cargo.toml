@@ -14,7 +14,6 @@ keywords = [
 categories = ["database"]
 authors = ["Patrick Thach <thachp@gmail.com>"]
 license = "MIT"
-license-file = "LICENSE"
 
 exclude = [
     "docs/*",
@@ -49,6 +48,8 @@ hex = "0.4"
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+regex = "1.10"
+rust_decimal = "1.36"
 sha2 = "0.10"
 thiserror = "1.0"
 tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "signal", "process"] }
@@ -82,6 +83,7 @@ capnp-futures = "0.19"
 tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
 semver = "1.0"
+validator = { version = "0.16", features = ["card"] }
 
 [dev-dependencies]
 fake = "3"
