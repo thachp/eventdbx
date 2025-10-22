@@ -191,8 +191,8 @@ Clearing dead entries prompts for confirmation to avoid accidental removal. Manu
 
 ### Replication
 
-- `eventdbx remote add <name> <endpoint> --public-key <base64>`  
-  Registers a standby and pins its Ed25519 public key.
+- `eventdbx remote add <name> <ip> --public-key <base64> [--port <n>]`  
+  Registers a standby and pins its Ed25519 public key. The CLI formats the IP and port into a `tcp://` endpoint (default port `6363`).
 - `eventdbx remote rm <name>`  
   Removes a configured remote.
 - `eventdbx remote ls`  
