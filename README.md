@@ -10,6 +10,8 @@ EventDBX is an event-sourced, key-value, write-side database system designed to 
 
 Follow the steps below to spin up EventDBX locally. The commands assume you installed the CLI globally; if you're contributing to the project, clone the repository and run them from the repo root instead.
 
+The CLI installs as `eventdbx` and also registers a shorter `dbx` alias. Every command below works with either name.
+
 1. **Install the CLI**
 
    ```bash
@@ -25,7 +27,7 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 2. **Start the server**
 
    ```bash
-   eventdbx start --foreground
+   dbx start --foreground
    ```
 
    - Omit `--foreground` to daemonise the process.
@@ -42,13 +44,13 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
   ```
 - Default ports can be overridden in `config.toml`:
   - REST and GraphQL share the HTTP listener defined by `port` (default `7070`).
-  - gRPC uses `[grpc].bind_addr` (default `127.0.0.1:7070`, sharing the HTTP listener).
-  - The CLI socket listens on `[socket].bind_addr` (default `127.0.0.1:6363`).
+  - gRPC uses `[grpc].bind_addr` (default `0.0.0.0:7070`, sharing the HTTP listener).
+  - The CLI socket listens on `[socket].bind_addr` (default `0.0.0.0:6363`).
 
 3. **Define a schema (recommended when running in restricted mode)**
 
    ```bash
-   eventdbx schema create \
+   dbx schema create \
      --aggregate patient \
      --events patient-added,patient-updated \
      --snapshot-threshold 100
@@ -59,13 +61,13 @@ Follow the steps below to spin up EventDBX locally. The commands assume you inst
 4. **Issue a token for CLI access**
 
    ```bash
-   eventdbx token generate --group admin --user jane --expiration 3600
+   dbx token generate --group admin --user jane --expiration 3600
    ```
 
 5. **Append an event**
    - When the server is running the CLI proxies writes through the REST API automatically. Pass a token with `--token` or set `EVENTDBX_TOKEN` to reuse your own credentials; otherwise the CLI mints a short-lived token for the call.
      ```bash
-     eventdbx aggregate apply person p-002 patient-added \
+     dbx aggregate apply person p-002 patient-added \
        --field name="Jane Doe" \
        --field status=active
      ```
@@ -204,7 +206,7 @@ Clearing dead entries prompts for confirmation to avoid accidental removal. Manu
 - `eventdbx remote pull <name> [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
   Fast-forwards the local node from the remote, reporting changes in dry-run mode.
 
-Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. The Cap'n Proto listener that powers CLI automation and replication defaults to `[socket].bind_addr` (default `127.0.0.1:6363`); point remotes at that address with a `tcp://` endpoint or override the bind address in `config.toml` when you expose the replica on another interface. Remote `push` and `pull` commands connect over this socket—no gRPC listener is required—and every session is authenticated with the remote's pinned Ed25519 public key. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
+Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. The Cap'n Proto listener that powers CLI automation and replication defaults to `[socket].bind_addr` (default `0.0.0.0:6363`); point remotes at that address with a `tcp://` endpoint or override the bind address in `config.toml` when you expose the replica on another interface. Remote `push` and `pull` commands connect over this socket—no gRPC listener is required—and every session is authenticated with the remote's pinned Ed25519 public key. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
 
 ### Maintenance
 
@@ -337,7 +339,7 @@ curl \
 
 ## gRPC API
 
-Enable the gRPC surface by setting `[api] grpc = true` in `config.toml`. The `[grpc]` table configures the bind address (default `127.0.0.1:7070`, reusing the HTTP listener). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
+Enable the gRPC surface by setting `[api] grpc = true` in `config.toml`. The `[grpc]` table configures the bind address (default `0.0.0.0:7070`, reusing the HTTP listener). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
 
 Example `grpcurl` invocation:
 

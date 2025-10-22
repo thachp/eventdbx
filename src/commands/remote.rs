@@ -13,7 +13,8 @@ use chrono::Utc;
 use clap::{Args, Subcommand};
 
 use eventdbx::{
-    config::{RemoteConfig, load_or_default},
+    config::{Config, RemoteConfig, load_or_default},
+    error::EventError,
     replication_capnp_client::{
         CapnpReplicationClient, decode_public_key_bytes, decode_schemas, normalize_capnp_endpoint,
     },
@@ -308,28 +309,67 @@ async fn pull_remote(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> 
 
     let remote_name = args.name.clone();
 
+    let mut proxied_via_server = false;
+
     if !args.schema_only {
-        let store = Arc::new(EventStore::open(
-            config.event_store_path(),
-            config.encryption_key()?,
-        )?);
-        let local_positions = store.aggregate_positions()?;
         let filter = normalize_filter(&args.aggregates, &args.aggregate_ids)?;
-        pull_remote_impl(
-            store,
-            local_positions,
-            remote.clone(),
-            remote_name.clone(),
-            args.dry_run,
-            args.batch_size.max(1),
-            filter,
-        )
-        .await?;
+        let batch_size = args.batch_size.max(1);
+        if args.dry_run {
+            let store = Arc::new(EventStore::open_read_only(
+                config.event_store_path(),
+                config.encryption_key()?,
+            )?);
+            let local_positions = store.aggregate_positions()?;
+            pull_remote_impl(
+                store,
+                local_positions,
+                remote.clone(),
+                remote_name.clone(),
+                true,
+                batch_size,
+                filter,
+            )
+            .await?;
+        } else {
+            match EventStore::open(config.event_store_path(), config.encryption_key()?) {
+                Ok(store) => {
+                    let store = Arc::new(store);
+                    let local_positions = store.aggregate_positions()?;
+                    pull_remote_impl(
+                        store,
+                        local_positions,
+                        remote.clone(),
+                        remote_name.clone(),
+                        false,
+                        batch_size,
+                        filter.clone(),
+                    )
+                    .await?;
+                }
+                Err(EventError::Storage(message)) if is_lock_error(&message) => {
+                    pull_remote_via_daemon(
+                        &config,
+                        remote.clone(),
+                        remote_name.clone(),
+                        false,
+                        batch_size,
+                        filter,
+                    )
+                    .await?;
+                    proxied_via_server = true;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
     }
 
     if args.schema {
-        let manager = Arc::new(SchemaManager::load(config.schema_store_path())?);
-        pull_remote_schemas(manager, remote, &remote_name, args.dry_run).await?;
+        if proxied_via_server {
+            pull_remote_schemas_via_daemon(&config, remote, &remote_name, args.dry_run).await?;
+        } else {
+            let manager = Arc::new(SchemaManager::load(config.schema_store_path())?);
+            pull_remote_schemas(manager, remote, &remote_name, args.dry_run).await?;
+        }
     }
 
     Ok(())
@@ -551,6 +591,87 @@ async fn pull_remote_impl(
     Ok(())
 }
 
+async fn pull_remote_via_daemon(
+    config: &Config,
+    remote: RemoteConfig,
+    remote_name: String,
+    dry_run: bool,
+    batch_size: usize,
+    filter: Option<ReplicationFilter>,
+) -> Result<()> {
+    let mut remote_client = connect_client(&remote).await?;
+    let remote_positions = remote_client
+        .list_positions()
+        .await
+        .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?;
+
+    let mut local_client = connect_local_replication_client(config).await?;
+    let local_positions = local_client
+        .list_positions()
+        .await
+        .map_err(|err| anyhow!("local list_positions failed: {}", err))?;
+
+    let filter_ref = filter.as_ref();
+    let remote_map = positions_to_map(&remote_positions, filter_ref);
+    let local_map = positions_to_map(&local_positions, filter_ref);
+
+    let plans = build_pull_plans(&local_map, &remote_map);
+    if plans.is_empty() {
+        println!(
+            "local store already includes remote '{}' changes",
+            remote_name
+        );
+        return Ok(());
+    }
+
+    let stats = summarize_plans(&plans);
+    if dry_run {
+        print_summary(
+            &format!("Pull from remote '{}' (dry run)", remote_name),
+            &stats,
+        );
+        return Ok(());
+    }
+
+    let mut sequence = 0u64;
+    let mut total_applied = 0u64;
+    for plan in &plans {
+        let mut current = plan.from_version;
+        while current < plan.to_version {
+            let events = remote_client
+                .pull_events(
+                    &plan.aggregate_type,
+                    &plan.aggregate_id,
+                    current,
+                    Some(batch_size),
+                )
+                .await
+                .map_err(|err| {
+                    anyhow!("failed to pull events from remote {}: {}", remote_name, err)
+                })?;
+
+            if events.is_empty() {
+                break;
+            }
+
+            sequence = sequence.wrapping_add(1);
+            local_client
+                .apply_events(sequence, &events)
+                .await
+                .map_err(|err| anyhow!("failed to apply events via local server: {}", err))?;
+
+            total_applied += events.len() as u64;
+            current = events.last().map(|event| event.version).unwrap_or(current);
+        }
+    }
+
+    print_summary(
+        &format!("Pulled {} event(s) from '{}'", total_applied, remote_name),
+        &stats,
+    );
+    Ok(())
+}
+
 async fn pull_remote_schemas(
     manager: Arc<SchemaManager>,
     remote: RemoteConfig,
@@ -588,6 +709,60 @@ async fn pull_remote_schemas(
     }
 
     manager.replace_all(remote_map)?;
+    print_schema_changes(
+        &format!("Pulled schema changes from '{}'", remote_name),
+        &changes,
+    );
+    Ok(())
+}
+
+async fn pull_remote_schemas_via_daemon(
+    config: &Config,
+    remote: RemoteConfig,
+    remote_name: &str,
+    dry_run: bool,
+) -> Result<()> {
+    let mut remote_client = connect_client(&remote).await?;
+    let payload = remote_client
+        .pull_schemas()
+        .await
+        .map_err(|err| anyhow!("remote {} pull_schemas failed: {}", remote_name, err))?;
+    let remote_map: BTreeMap<String, AggregateSchema> =
+        decode_schemas(&payload).map_err(|err| {
+            anyhow!(
+                "remote {} returned invalid schema payload: {}",
+                remote_name,
+                err
+            )
+        })?;
+
+    let mut local_client = connect_local_replication_client(config).await?;
+    let local_payload = local_client
+        .pull_schemas()
+        .await
+        .map_err(|err| anyhow!("failed to snapshot local schemas via server: {}", err))?;
+    let local_map = decode_schemas(&local_payload)
+        .map_err(|err| anyhow!("failed to decode local schema snapshot: {}", err))?;
+
+    let changes = diff_schemas(&local_map, &remote_map);
+    if changes.is_empty() {
+        println!("Schema store already matches remote '{}'", remote_name);
+        return Ok(());
+    }
+
+    if dry_run {
+        print_schema_changes(
+            &format!("Schema pull from '{}' (dry run)", remote_name),
+            &changes,
+        );
+        return Ok(());
+    }
+
+    let payload = serde_json::to_vec(&remote_map)?;
+    local_client
+        .apply_schemas(&payload)
+        .await
+        .map_err(|err| anyhow!("failed to apply schemas via local server: {}", err))?;
     print_schema_changes(
         &format!("Pulled schema changes from '{}'", remote_name),
         &changes,
@@ -647,6 +822,17 @@ async fn push_remote_schemas(
     Ok(())
 }
 
+async fn connect_local_replication_client(config: &Config) -> Result<CapnpReplicationClient> {
+    let endpoint = normalize_capnp_endpoint(&config.socket.bind_addr)?;
+    let public_key = config
+        .load_public_key()
+        .context("failed to load local replication public key")?;
+    let expected_key = decode_public_key_bytes(&public_key)?;
+    CapnpReplicationClient::connect(&endpoint, &expected_key)
+        .await
+        .map_err(|err| anyhow!("failed to connect to local replication endpoint: {}", err))
+}
+
 async fn connect_client(remote: &RemoteConfig) -> Result<CapnpReplicationClient> {
     let endpoint = normalize_capnp_endpoint(&remote.endpoint)?;
     let expected_key = decode_public_key_bytes(&remote.public_key)?;
@@ -693,6 +879,11 @@ fn positions_to_map(
             )
         })
         .collect()
+}
+
+fn is_lock_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("lock file") || lower.contains("resource temporarily unavailable")
 }
 
 fn validate_fast_forward(

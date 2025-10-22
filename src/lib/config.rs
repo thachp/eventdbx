@@ -704,11 +704,11 @@ fn default_plugin_max_attempts() -> u32 {
 }
 
 fn default_grpc_bind_addr() -> String {
-    format!("127.0.0.1:{}", DEFAULT_PORT)
+    format!("0.0.0.0:{}", DEFAULT_PORT)
 }
 
 fn default_socket_bind_addr() -> String {
-    format!("127.0.0.1:{}", DEFAULT_SOCKET_PORT)
+    format!("0.0.0.0:{}", DEFAULT_SOCKET_PORT)
 }
 
 fn default_cache_threshold() -> usize {
@@ -724,7 +724,7 @@ fn default_identity_key() -> PathBuf {
 }
 
 fn default_replication_bind() -> String {
-    "127.0.0.1:7443".to_string()
+    "0.0.0.0:7443".to_string()
 }
 
 fn default_admin_enabled() -> bool {
@@ -732,7 +732,7 @@ fn default_admin_enabled() -> bool {
 }
 
 fn default_admin_bind_addr() -> String {
-    "127.0.0.1".to_string()
+    "0.0.0.0".to_string()
 }
 
 fn default_admin_port() -> Option<u16> {

@@ -11,7 +11,7 @@ nav_id: cli
             <span class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.3em] text-brand">Reference</span>
             <h1 class="text-4xl font-semibold leading-tight text-white sm:text-5xl">The EventDBX CLI, demystified.</h1>
             <p class="max-w-xl text-lg text-slate-300">
-                Operate clusters, deploy schemas, rotate tokens, and inspect data from one binary. Use these commands interactively or inside CI scripts.
+                Operate clusters, deploy schemas, rotate tokens, and inspect data from one binary. Use these commands interactively or inside CI scripts—the CLI registers as both <code class="font-mono text-sm text-slate-200">eventdbx</code> and the shorter <code class="font-mono text-sm text-slate-200">dbx</code>.
             </p>
             <div class="flex flex-wrap gap-3">
                 <a class="inline-flex items-center rounded-full bg-brand px-5 py-3 text-sm font-semibold text-slate-950 shadow-glow transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-brand/40" href="{{ '/getting-started/' | relative_url }}">
@@ -23,8 +23,8 @@ nav_id: cli
             </div>
         </div>
         <div>
-            <pre class="overflow-x-auto rounded-3xl bg-slate-900/75 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ eventdbx --help
-Usage: eventdbx [OPTIONS] &lt;COMMAND&gt;
+            <pre class="overflow-x-auto rounded-3xl bg-slate-900/75 p-6 text-sm leading-relaxed text-slate-200 shadow-2xl ring-1 ring-white/10"><code>$ dbx --help
+Usage: dbx [OPTIONS] &lt;COMMAND&gt;
 
 Global options:
     --config &lt;PATH&gt;

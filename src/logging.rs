@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate};
 use parking_lot::Mutex;
 use tracing_appender::non_blocking::{self, WorkerGuard};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 const LOG_DIR_ENV: &str = "EVENTDBX_LOG_DIR";
 const LOG_PREFIX: &str = "eventdbx";
@@ -45,8 +45,7 @@ pub fn init() -> Result<()> {
         .lossy(false)
         .finish(writer);
 
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let stdout_layer = fmt::layer().with_target(false);
     let file_layer = fmt::layer()
@@ -76,9 +75,8 @@ pub fn init() -> Result<()> {
 impl DailyRotatingWriter {
     fn new<P: Into<PathBuf>>(dir: P) -> Result<Self> {
         let log_dir = dir.into();
-        fs::create_dir_all(&log_dir).with_context(|| {
-            format!("failed to create log directory {}", log_dir.display())
-        })?;
+        fs::create_dir_all(&log_dir)
+            .with_context(|| format!("failed to create log directory {}", log_dir.display()))?;
 
         let active_path = log_dir.join(ACTIVE_FILE_NAME);
         let now = Local::now();
@@ -100,20 +98,18 @@ impl DailyRotatingWriter {
         })
     }
 
-    fn rotate_stale_file(
-        log_dir: &Path,
-        active_path: &Path,
-        now: DateTime<Local>,
-    ) -> Result<()> {
+    fn rotate_stale_file(log_dir: &Path, active_path: &Path, now: DateTime<Local>) -> Result<()> {
         let metadata = match fs::metadata(active_path) {
             Ok(metadata) => metadata,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err).with_context(|| {
-                format!(
-                    "unable to inspect existing log file {}",
-                    active_path.display()
-                )
-            }),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "unable to inspect existing log file {}",
+                        active_path.display()
+                    )
+                });
+            }
         };
 
         let modified = metadata.modified().ok().map(DateTime::<Local>::from);
@@ -153,11 +149,7 @@ impl DailyRotatingWriter {
         Ok(BufWriter::new(file))
     }
 
-    fn rotate(
-        &self,
-        state: &mut WriterState,
-        now: DateTime<Local>,
-    ) -> Result<()> {
+    fn rotate(&self, state: &mut WriterState, now: DateTime<Local>) -> Result<()> {
         if let Some(mut writer) = state.file.take() {
             if let Err(err) = writer.flush() {
                 eprintln!("failed to flush log file before rotation: {err}");
@@ -185,11 +177,7 @@ impl DailyRotatingWriter {
     }
 
     fn unique_rotated_path(dir: &Path, timestamp: DateTime<Local>) -> PathBuf {
-        let base = format!(
-            "{}_{}",
-            LOG_PREFIX,
-            timestamp.format("%Y-%m-%d_%H-%M-%S")
-        );
+        let base = format!("{}_{}", LOG_PREFIX, timestamp.format("%Y-%m-%d_%H-%M-%S"));
         let mut candidate = dir.join(format!("{}.log", base));
         let mut counter = 1;
         while candidate.exists() {
@@ -248,8 +236,8 @@ fn resolve_log_dir() -> Result<PathBuf> {
         if path.is_absolute() {
             return Ok(path);
         }
-        let base = std::env::current_dir()
-            .context("failed to resolve current working directory")?;
+        let base =
+            std::env::current_dir().context("failed to resolve current working directory")?;
         return Ok(base.join(path));
     }
 
@@ -279,9 +267,9 @@ fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Days;
     use std::fs;
     use tempfile::tempdir;
-    use chrono::Days;
 
     #[test]
     fn rotates_when_forced() {
@@ -301,9 +289,6 @@ mod tests {
         writer.flush().unwrap();
 
         let entries: Vec<_> = fs::read_dir(dir).unwrap().collect();
-        assert!(
-            entries.len() >= 2,
-            "expected rotated log file to exist"
-        );
+        assert!(entries.len() >= 2, "expected rotated log file to exist");
     }
 }
