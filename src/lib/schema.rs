@@ -1,8 +1,129 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    fs,
+    path::PathBuf,
+    str::FromStr,
+};
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum ColumnType {
+    Integer,
+    Float,
+    Decimal { precision: u8, scale: u8 },
+    Boolean,
+    Text,
+    Timestamp,
+    Date,
+    Json,
+    Binary,
+}
+
+impl ColumnType {
+    fn as_str(&self) -> String {
+        match self {
+            ColumnType::Integer => "integer".to_string(),
+            ColumnType::Float => "float".to_string(),
+            ColumnType::Decimal { precision, scale } => {
+                format!("decimal({},{})", precision, scale)
+            }
+            ColumnType::Boolean => "boolean".to_string(),
+            ColumnType::Text => "text".to_string(),
+            ColumnType::Timestamp => "timestamp".to_string(),
+            ColumnType::Date => "date".to_string(),
+            ColumnType::Json => "json".to_string(),
+            ColumnType::Binary => "binary".to_string(),
+        }
+    }
+
+    fn parse_decimal(value: &str) -> Result<Self, ColumnTypeParseError> {
+        let start = value.find('(').ok_or_else(|| ColumnTypeParseError(value.to_string()))?;
+        let end = value
+            .rfind(')')
+            .filter(|pos| *pos > start)
+            .ok_or_else(|| ColumnTypeParseError(value.to_string()))?;
+        let inner = &value[start + 1..end];
+        let mut parts = inner.split(',').map(|part| part.trim());
+        let precision = parts
+            .next()
+            .ok_or_else(|| ColumnTypeParseError(value.to_string()))?
+            .parse()
+            .map_err(|_| ColumnTypeParseError(value.to_string()))?;
+        let scale = parts
+            .next()
+            .ok_or_else(|| ColumnTypeParseError(value.to_string()))?
+            .parse()
+            .map_err(|_| ColumnTypeParseError(value.to_string()))?;
+
+        if parts.next().is_some() {
+            return Err(ColumnTypeParseError(value.to_string()));
+        }
+
+        Ok(ColumnType::Decimal { precision, scale })
+    }
+}
+
+impl fmt::Display for ColumnType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl From<ColumnType> for String {
+    fn from(value: ColumnType) -> Self {
+        value.as_str()
+    }
+}
+
+impl TryFrom<String> for ColumnType {
+    type Error = ColumnTypeParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        ColumnType::from_str(&value)
+    }
+}
+
+impl FromStr for ColumnType {
+    type Err = ColumnTypeParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(ColumnTypeParseError(value.to_string()));
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        match lower.as_str() {
+            "integer" | "int" => Ok(ColumnType::Integer),
+            "float" | "double" => Ok(ColumnType::Float),
+            "boolean" | "bool" => Ok(ColumnType::Boolean),
+            "text" | "string" => Ok(ColumnType::Text),
+            "timestamp" => Ok(ColumnType::Timestamp),
+            "date" => Ok(ColumnType::Date),
+            "json" => Ok(ColumnType::Json),
+            "binary" | "bytes" => Ok(ColumnType::Binary),
+            _ if lower.starts_with("decimal(") || lower.starts_with("numeric(") => {
+                ColumnType::parse_decimal(trimmed)
+            }
+            _ => Err(ColumnTypeParseError(value.to_string())),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ColumnTypeParseError(String);
+
+impl fmt::Display for ColumnTypeParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid column type '{}'", self.0)
+    }
+}
+
+impl std::error::Error for ColumnTypeParseError {}
 
 use super::error::{EventError, Result};
 
@@ -29,7 +150,7 @@ pub struct AggregateSchema {
     #[serde(default)]
     pub hidden_fields: Vec<String>,
     #[serde(default)]
-    pub column_types: BTreeMap<String, String>,
+    pub column_types: BTreeMap<String, ColumnType>,
     pub events: BTreeMap<String, EventSchema>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -69,7 +190,7 @@ pub struct SchemaUpdate {
     pub event_remove_fields: BTreeMap<String, Vec<String>>,
     pub hidden: Option<bool>,
     pub hidden_field: Option<(String, bool)>,
-    pub column_type: Option<(String, Option<String>)>,
+    pub column_type: Option<(String, Option<ColumnType>)>,
 }
 
 impl SchemaManager {
@@ -195,10 +316,10 @@ impl SchemaManager {
                     ));
                 }
                 match data_type {
-                    Some(value) if !value.trim().is_empty() => {
+                    Some(value) => {
                         schema.column_types.insert(field, value);
                     }
-                    _ => {
+                    None => {
                         schema.column_types.remove(&field);
                     }
                 }
@@ -377,7 +498,7 @@ impl SchemaManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, str::FromStr};
 
     #[test]
     fn create_and_update_schema() {
@@ -506,5 +627,78 @@ mod tests {
 
         // Unknown aggregate returns false.
         assert!(!manager.should_snapshot("missing", 3));
+    }
+
+    #[test]
+    fn column_type_from_str_parses_decimal() {
+        let ty = ColumnType::from_str("decimal(12, 4)").unwrap();
+        assert_eq!(
+            ty,
+            ColumnType::Decimal {
+                precision: 12,
+                scale: 4
+            }
+        );
+    }
+
+    #[test]
+    fn column_type_round_trip_serialization() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "amount".to_string(),
+            ColumnType::Decimal {
+                precision: 8,
+                scale: 2,
+            },
+        );
+        map.insert("flag".to_string(), ColumnType::Boolean);
+
+        let json = serde_json::to_string(&map).unwrap();
+        assert_eq!(json, r#"{"amount":"decimal(8,2)","flag":"boolean"}"#);
+
+        let decoded: BTreeMap<String, ColumnType> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, map);
+    }
+
+    #[test]
+    fn update_schema_column_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schemas.json");
+        let manager = SchemaManager::load(path).unwrap();
+
+        manager
+            .create(CreateSchemaInput {
+                aggregate: "order".into(),
+                events: vec!["order_created".into()],
+                snapshot_threshold: None,
+            })
+            .unwrap();
+
+        let mut update = SchemaUpdate::default();
+        update.column_type = Some((
+            "total".to_string(),
+            Some(ColumnType::Decimal {
+                precision: 12,
+                scale: 2,
+            }),
+        ));
+
+        let schema = manager.update("order", update).unwrap();
+        let column_type = schema
+            .column_types
+            .get("total")
+            .expect("column type should be recorded");
+        assert_eq!(
+            column_type,
+            &ColumnType::Decimal {
+                precision: 12,
+                scale: 2
+            }
+        );
+
+        let mut removal = SchemaUpdate::default();
+        removal.column_type = Some(("total".to_string(), None));
+        let schema = manager.update("order", removal).unwrap();
+        assert!(!schema.column_types.contains_key("total"));
     }
 }
