@@ -104,13 +104,13 @@ async fn main() -> Result<()> {
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
         Commands::Push(args) => commands::remote::push(config, args).await?,
         Commands::Pull(args) => commands::remote::pull(config, args).await?,
-        Commands::Upgrade(args) => commands::upgrade::execute(args)?,
+        Commands::Upgrade(args) => commands::upgrade::execute(args).await?,
         Commands::Remote { command } => commands::remote::execute(config, command).await?,
         Commands::Backup(args) => commands::system::backup(config, args)?,
         Commands::Restore(args) => commands::system::restore(config, args)?,
         Commands::InternalServer => commands::start::run_internal(config).await?,
         Commands::External(argv) => {
-            if !commands::upgrade::try_handle_shortcut(&argv)? {
+            if !commands::upgrade::try_handle_shortcut(&argv).await? {
                 if let Some(name) = argv.first() {
                     anyhow::bail!("unknown command '{}'", name);
                 } else {
