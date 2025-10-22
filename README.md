@@ -208,6 +208,11 @@ Clearing dead entries prompts for confirmation to avoid accidental removal. Manu
 
 Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. The Cap'n Proto listener that powers CLI automation and replication defaults to `[socket].bind_addr` (default `0.0.0.0:6363`); point remotes at that address with a `tcp://` endpoint or override the bind address in `config.toml` when you expose the replica on another interface. The `eventdbx push` and `eventdbx pull` commands connect over this socket—no gRPC listener is required—and every session is authenticated with the remote's pinned Ed25519 public key. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
 
+### Upgrades
+
+- `eventdbx upgrade [<version>|latest] [--print-only]`  
+  Downloads and runs the platform-specific installer to switch binaries. The version defaults to `latest`; omit the leading `v` (`1.12.4`) or pass the full tag (`v1.12.4`). Use `--print-only` to show the command without executing it. Shortcut syntax `eventdbx upgrade@<version>` also works for quick switching.
+
 ### Maintenance
 
 - `eventdbx backup --output <path> [--force]`  
