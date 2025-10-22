@@ -4,7 +4,6 @@ description = "An event-sourced, key-value, write-side database system."
 version = "1.13.2"
 edition = "2024"
 repository = "https://github.com/thachp/eventdbx"
-license = "MIT"
 keywords = [
   "immutable",
   "events",
@@ -14,6 +13,8 @@ keywords = [
 ]
 categories = ["database"]
 authors = ["Patrick Thach <thachp@gmail.com>"]
+license = "MIT"
+license-file = "LICENSE.txt"
 
 exclude = [
     "docs/*",
