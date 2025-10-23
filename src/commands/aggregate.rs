@@ -341,8 +341,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             };
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
             if config.restrict {
-                let map = payload_to_map(&payload);
-                schema_manager.validate_event(&aggregate, &event, &map)?;
+                schema_manager.validate_event(&aggregate, &event, &payload)?;
             }
 
             if stage {
@@ -529,11 +528,10 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
 
             for staged_event in &staged_events {
                 if config.restrict {
-                    let payload_map = payload_to_map(&staged_event.payload);
                     schema_manager.validate_event(
                         &staged_event.aggregate,
                         &staged_event.event,
-                        &payload_map,
+                        &staged_event.payload,
                     )?;
                 }
 

@@ -543,6 +543,11 @@ fn build_plugin_config_args(name: &str, request: &PluginUpsertRequest) -> Result
             args.push("--port".to_string());
             args.push(cfg.port.to_string());
         }
+        PluginConfig::Process(_) => {
+            return Err(EventError::Config(
+                "process plugins must be managed via the CLI".into(),
+            ));
+        }
     }
 
     if matches!(request.enabled, Some(false)) {

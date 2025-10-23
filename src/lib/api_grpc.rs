@@ -7,7 +7,7 @@ use tonic::{Request, Response, Status, metadata::MetadataMap};
 use crate::{
     error::EventError,
     server::{AppState, run_cli_json},
-    store::{self, EventRecord},
+    store::{AggregateState, EventRecord},
     token::AccessKind,
 };
 
@@ -102,7 +102,7 @@ impl GrpcApi {
         Ok(event)
     }
 
-    fn sanitize_aggregate(&self, aggregate: crate::store::AggregateState) -> Aggregate {
+    fn sanitize_aggregate(&self, aggregate: AggregateState) -> Aggregate {
         let filtered = self.state.sanitize_aggregate(aggregate);
         Aggregate {
             aggregate_type: filtered.aggregate_type,
@@ -147,12 +147,11 @@ impl EventService for GrpcApi {
             .authorize(&token, AccessKind::Write)
             .map_err(Self::map_error)?;
 
-        let payload_map = store::payload_to_map(&payload_value);
         if self.state.restrict() {
             if let Err(err) = self.state.schemas().validate_event(
                 &payload.aggregate_type,
                 &payload.event_type,
-                &payload_map,
+                &payload_value,
             ) {
                 return Err(Self::map_error(err));
             }
@@ -206,8 +205,7 @@ impl EventService for GrpcApi {
             "--json".to_string(),
         ];
 
-        let aggregates: Vec<crate::store::AggregateState> =
-            run_cli_json(args).await.map_err(Self::map_error)?;
+        let aggregates: Vec<AggregateState> = run_cli_json(args).await.map_err(Self::map_error)?;
         let page = aggregates
             .into_iter()
             .filter(|aggregate| !self.state.is_hidden_aggregate(&aggregate.aggregate_type))
@@ -231,7 +229,7 @@ impl EventService for GrpcApi {
             params.aggregate_type.clone(),
             params.aggregate_id.clone(),
         ];
-        let aggregate = match run_cli_json::<crate::store::AggregateState>(args).await {
+        let aggregate = match run_cli_json::<AggregateState>(args).await {
             Ok(aggregate) => aggregate,
             Err(EventError::AggregateNotFound) => {
                 return Err(Status::not_found("aggregate not found"));

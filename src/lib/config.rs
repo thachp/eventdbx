@@ -777,6 +777,7 @@ pub enum PluginConfig {
     Http(HttpPluginConfig),
     Grpc(GrpcPluginConfig),
     Log(LogPluginConfig),
+    Process(ProcessPluginConfig),
 }
 
 impl PluginConfig {
@@ -786,6 +787,7 @@ impl PluginConfig {
             PluginConfig::Http(_) => PluginKind::Http,
             PluginConfig::Grpc(_) => PluginKind::Grpc,
             PluginConfig::Log(_) => PluginKind::Log,
+            PluginConfig::Process(_) => PluginKind::Process,
         }
     }
 }
@@ -797,6 +799,7 @@ pub enum PluginKind {
     Http,
     Grpc,
     Log,
+    Process,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -825,6 +828,18 @@ pub struct LogPluginConfig {
     pub level: String,
     #[serde(default)]
     pub template: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProcessPluginConfig {
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub working_dir: Option<PathBuf>,
 }
 
 fn default_log_level() -> String {

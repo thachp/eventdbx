@@ -1,8 +1,11 @@
 use std::{
     collections::{BTreeMap, HashSet},
+    env,
+    ffi::OsStr,
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -14,9 +17,12 @@ use uuid::Uuid;
 
 use eventdbx::config::{
     Config, GrpcPluginConfig, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition,
-    PluginKind, TcpPluginConfig, load_or_default,
+    PluginKind, ProcessPluginConfig, TcpPluginConfig, load_or_default,
 };
-use eventdbx::plugin::{Plugin, establish_connection, instantiate_plugin};
+use eventdbx::plugin::{
+    Plugin, establish_connection, instantiate_plugin,
+    registry::{self, InstalledPluginRecord, PluginSource},
+};
 use eventdbx::store::{
     ActorClaims, AggregateState, EventMetadata, EventRecord, EventStore, payload_to_map,
 };
@@ -28,9 +34,20 @@ use std::any::Any;
 use std::thread;
 
 use tokio::runtime::Handle;
+use zip::ZipArchive;
+
+use flate2::read::GzDecoder;
+use tar::Archive;
+use tempfile::NamedTempFile;
+
+use reqwest::blocking::Client;
+use sha2::{Digest, Sha256};
 
 #[derive(Subcommand)]
 pub enum PluginCommands {
+    /// Install a plugin binary into the local registry
+    #[command(name = "install")]
+    Install(PluginInstallArgs),
     /// Configure plugins
     #[command(subcommand)]
     Config(PluginConfigureCommands),
@@ -73,6 +90,31 @@ pub enum PluginQueueAction {
     Retry(PluginQueueRetryArgs),
 }
 
+#[derive(Args, Clone, Debug)]
+pub struct PluginInstallArgs {
+    /// Unique plugin name (e.g. `search`)
+    pub name: String,
+
+    /// Plugin version identifier being installed
+    pub version: String,
+
+    /// Source URL or local file system path to the plugin bundle
+    #[arg(long, short = 's')]
+    pub source: String,
+
+    /// Binary filename inside the archive (if ambiguous)
+    #[arg(long = "bin")]
+    pub binary_name: Option<String>,
+
+    /// Optional SHA256 checksum for verification
+    #[arg(long)]
+    pub checksum: Option<String>,
+
+    /// Overwrite an existing installation of the same name/version/target
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
+}
+
 #[derive(Args, Clone, Copy)]
 pub struct PluginQueueRetryArgs {
     /// Retry only the dead entry with this event id
@@ -101,6 +143,9 @@ pub enum PluginConfigureCommands {
     /// Configure the logging plugin
     #[command(name = "log")]
     Log(PluginLogConfigureArgs),
+    /// Configure a subprocess plugin installed via the registry
+    #[command(name = "process")]
+    Process(PluginProcessConfigureArgs),
 }
 
 #[derive(Args)]
@@ -179,6 +224,37 @@ pub struct PluginLogConfigureArgs {
     pub name: String,
 }
 
+#[derive(Args)]
+pub struct PluginProcessConfigureArgs {
+    /// Instance name for this process plugin
+    #[arg(long)]
+    pub name: String,
+
+    /// Installed plugin identifier to execute
+    #[arg(long = "plugin")]
+    pub plugin_name: String,
+
+    /// Plugin version to select from the local registry
+    #[arg(long)]
+    pub version: String,
+
+    /// Additional arguments to pass when launching the plugin (repeatable)
+    #[arg(long = "arg", value_name = "ARG", action = clap::ArgAction::Append)]
+    pub args: Vec<String>,
+
+    /// Additional environment variables (KEY=VALUE) provided at launch
+    #[arg(long = "env", value_parser = parse_key_value, value_name = "KEY=VALUE")]
+    pub env: Vec<KeyValue>,
+
+    /// Working directory to set before launching the plugin
+    #[arg(long = "working-dir")]
+    pub working_dir: Option<PathBuf>,
+
+    /// Disable the plugin after configuring
+    #[arg(long, default_value_t = false)]
+    pub disable: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct KeyValue {
     pub key: String,
@@ -230,6 +306,9 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
     }
 
     match command {
+        PluginCommands::Install(args) => {
+            install_plugin_bundle(&config, args)?;
+        }
         PluginCommands::List(args) => {
             list_plugins(&plugins, args.json)?;
         }
@@ -425,6 +504,67 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                     }
                 );
             }
+            PluginConfigureCommands::Process(args) => {
+                let instance = args.name.trim();
+                if instance.is_empty() {
+                    bail!("plugin name cannot be empty");
+                }
+
+                let plugin_name = args.plugin_name.trim();
+                if plugin_name.is_empty() {
+                    bail!("plugin identifier cannot be empty");
+                }
+
+                let version = args.version.trim();
+                if version.is_empty() {
+                    bail!("plugin version cannot be empty");
+                }
+
+                validate_process_installation(&config, plugin_name, version)?;
+
+                let mut env_map = BTreeMap::new();
+                for entry in &args.env {
+                    env_map.insert(entry.key.clone(), entry.value.clone());
+                }
+
+                let process_config = ProcessPluginConfig {
+                    name: plugin_name.to_string(),
+                    version: version.to_string(),
+                    args: args.args.clone(),
+                    env: env_map,
+                    working_dir: args.working_dir.clone(),
+                };
+
+                let label = display_label(instance);
+                let instance_owned = instance.to_string();
+
+                match find_plugin_mut(&mut plugins, PluginKind::Process, Some(instance))? {
+                    Some(plugin) => {
+                        plugin.enabled = !args.disable;
+                        plugin.name = Some(instance_owned.clone());
+                        plugin.config = PluginConfig::Process(process_config);
+                    }
+                    None => {
+                        ensure_unique_plugin_name(&plugins, instance)?;
+                        plugins.push(PluginDefinition {
+                            enabled: !args.disable,
+                            name: Some(instance_owned.clone()),
+                            config: PluginConfig::Process(process_config),
+                        });
+                    }
+                }
+
+                config.save_plugins(&plugins)?;
+                println!(
+                    "Process plugin '{}' {}",
+                    label,
+                    if args.disable {
+                        "disabled"
+                    } else {
+                        "configured"
+                    }
+                );
+            }
         },
         PluginCommands::Enable(args) => {
             let name = args.name.trim();
@@ -572,10 +712,11 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 let definition_clone = definition.clone();
                 let record_clone = record.clone();
                 let state_clone = aggregate_state.clone();
+                let cfg = config.clone();
 
                 let result = run_blocking(move || {
                     establish_connection(&definition_clone).map_err(anyhow::Error::from)?;
-                    let plugin = instantiate_plugin(&definition_clone);
+                    let plugin = instantiate_plugin(&definition_clone, &cfg);
                     plugin
                         .notify_event(&record_clone, &state_clone, None)
                         .map_err(anyhow::Error::from)
@@ -606,6 +747,385 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
         }
     }
 
+    Ok(())
+}
+
+fn install_plugin_bundle(config: &Config, args: PluginInstallArgs) -> Result<()> {
+    config.ensure_data_dir()?;
+
+    let PluginInstallArgs {
+        name,
+        version,
+        source,
+        binary_name,
+        checksum,
+        force,
+    } = args;
+
+    let target = current_target_triple();
+    let plugins_root = config.data_dir.join("plugins");
+    let install_dir = plugins_root.join(&name).join(&version).join(&target);
+    let registry_path = plugins_root.join("registry.json");
+
+    if install_dir.exists() {
+        if !force {
+            bail!(
+                "plugin '{}' v{} for target {} is already installed; rerun with --force to overwrite",
+                name,
+                version,
+                target
+            );
+        }
+        fs::remove_dir_all(&install_dir).with_context(|| {
+            format!(
+                "failed to remove existing installation at {}",
+                install_dir.display()
+            )
+        })?;
+    }
+    fs::create_dir_all(&install_dir)?;
+
+    let (temp_file, source_hint, source_descriptor) = fetch_plugin_source(&source)?;
+
+    if let Some(expected) = checksum.as_deref() {
+        verify_checksum(temp_file.path(), expected)?;
+    }
+
+    let header = read_file_header(temp_file.path())?;
+    let bundle_format = detect_bundle_format(&source_hint, &header);
+
+    let binary_path = match bundle_format {
+        BundleFormat::Binary => {
+            let file_name = binary_name
+                .clone()
+                .unwrap_or_else(|| default_binary_name(&name));
+            let dest_path = install_dir.join(&file_name);
+            fs::copy(temp_file.path(), &dest_path).with_context(|| {
+                format!("failed to copy plugin binary into {}", dest_path.display())
+            })?;
+            dest_path
+        }
+        BundleFormat::TarGz => {
+            extract_tar_gz(temp_file.path(), &install_dir)?;
+            locate_binary(&install_dir, binary_name.as_deref(), &name)?
+        }
+        BundleFormat::Zip => {
+            extract_zip(temp_file.path(), &install_dir)?;
+            locate_binary(&install_dir, binary_name.as_deref(), &name)?
+        }
+    };
+
+    set_executable(&binary_path)?;
+
+    let mut registry = load_installed_registry(&registry_path)?;
+    registry.retain(|record| {
+        !(record.name == name && record.version == version && record.target == target)
+    });
+
+    registry.push(InstalledPluginRecord {
+        name: name.clone(),
+        version: version.clone(),
+        target: target.clone(),
+        install_dir: install_dir.clone(),
+        binary_path: binary_path.clone(),
+        source: Some(source_descriptor),
+        checksum,
+        installed_at: Utc::now(),
+    });
+
+    registry.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(a.version.cmp(&b.version))
+            .then(a.target.cmp(&b.target))
+    });
+
+    save_installed_registry(&registry_path, &registry)?;
+
+    println!(
+        "installed plugin '{}' v{} for {} at {}",
+        name,
+        version,
+        target,
+        binary_path.display()
+    );
+
+    Ok(())
+}
+
+fn current_target_triple() -> String {
+    format!("{}-{}", env::consts::OS, env::consts::ARCH)
+}
+
+fn fetch_plugin_source(source: &str) -> Result<(NamedTempFile, String, PluginSource)> {
+    let mut file = NamedTempFile::new().context("failed to create temporary file")?;
+    if is_url(source) {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .context("failed to build HTTP client")?;
+        let mut response = client
+            .get(source)
+            .send()
+            .with_context(|| format!("failed to download plugin bundle from {source}"))?
+            .error_for_status()
+            .with_context(|| format!("received error response from {source}"))?;
+        response
+            .copy_to(&mut file)
+            .context("failed to stream plugin bundle to disk")?;
+        let final_url = response.url().clone();
+        let hint = final_url
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .filter(|segment| !segment.is_empty())
+            .unwrap_or("plugin")
+            .to_string();
+        Ok((
+            file,
+            hint,
+            PluginSource::Remote {
+                registry: final_url.to_string(),
+            },
+        ))
+    } else {
+        let path = Path::new(source);
+        let mut reader = fs::File::open(path)
+            .with_context(|| format!("failed to open plugin bundle at {}", path.display()))?;
+        io::copy(&mut reader, &mut file)
+            .with_context(|| format!("failed to copy plugin bundle from {}", path.display()))?;
+        let resolved = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        let hint = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("plugin")
+            .to_string();
+        Ok((file, hint, PluginSource::Local { path: resolved }))
+    }
+}
+
+fn is_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn verify_checksum(path: &Path, expected: &str) -> Result<()> {
+    let mut file = fs::File::open(path).with_context(|| {
+        format!(
+            "failed to open {} for checksum verification",
+            path.display()
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    let actual = hex::encode(digest);
+    if actual.eq_ignore_ascii_case(expected.trim()) {
+        Ok(())
+    } else {
+        bail!(
+            "checksum mismatch: expected {}, computed {}",
+            expected.trim(),
+            actual
+        );
+    }
+}
+
+fn read_file_header(path: &Path) -> Result<[u8; 4]> {
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0u8; 4];
+    let _ = file.read(&mut buffer)?;
+    Ok(buffer)
+}
+
+fn detect_bundle_format(hint: &str, header: &[u8; 4]) -> BundleFormat {
+    let lowered = hint.to_ascii_lowercase();
+    if lowered.ends_with(".tar.gz") || lowered.ends_with(".tgz") {
+        return BundleFormat::TarGz;
+    }
+    if lowered.ends_with(".zip") {
+        return BundleFormat::Zip;
+    }
+    if header.starts_with(&[0x1F, 0x8B]) {
+        return BundleFormat::TarGz;
+    }
+    if header.starts_with(b"PK\x03\x04") {
+        return BundleFormat::Zip;
+    }
+    BundleFormat::Binary
+}
+
+enum BundleFormat {
+    TarGz,
+    Zip,
+    Binary,
+}
+
+fn extract_tar_gz(source: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest)?;
+    let file = fs::File::open(source)?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    archive.unpack(dest)?;
+    Ok(())
+}
+
+fn extract_zip(source: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest)?;
+    let file = fs::File::open(source)?;
+    let mut archive = ZipArchive::new(file)?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let entry_path = entry.mangled_name();
+        let out_path = dest.join(&entry_path);
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut out_file = fs::File::create(&out_path)?;
+            io::copy(&mut entry, &mut out_file)?;
+            #[cfg(unix)]
+            if let Some(mode) = entry.unix_mode() {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&out_path, fs::Permissions::from_mode(mode))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn locate_binary(root: &Path, binary_name: Option<&str>, plugin_name: &str) -> Result<PathBuf> {
+    let files = collect_files(root)?;
+    if files.is_empty() {
+        bail!("plugin bundle did not contain any files");
+    }
+
+    let selected = if let Some(name) = binary_name {
+        let needle = OsStr::new(name);
+        files
+            .iter()
+            .find(|path| path.file_name() == Some(needle))
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "could not find binary '{}' in plugin bundle; available files: {}",
+                    name,
+                    display_file_list(root, &files)
+                )
+            })?
+    } else if files.len() == 1 {
+        files[0].clone()
+    } else {
+        let exe_candidate = if env::consts::EXE_SUFFIX.is_empty() {
+            None
+        } else {
+            Some(format!("{}{}", plugin_name, env::consts::EXE_SUFFIX))
+        };
+        let candidates: Vec<PathBuf> = files
+            .iter()
+            .filter(|path| {
+                let file_name = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("");
+                file_name == plugin_name
+                    || exe_candidate
+                        .as_deref()
+                        .map(|candidate| candidate == file_name)
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        if candidates.len() == 1 {
+            candidates[0].clone()
+        } else {
+            bail!(
+                "plugin bundle contains multiple files; specify --bin <filename>. candidates: {}",
+                display_file_list(root, &files)
+            );
+        }
+    };
+
+    if !selected.starts_with(root) {
+        bail!(
+            "resolved binary {} is outside installation directory",
+            selected.display()
+        );
+    }
+
+    Ok(selected)
+}
+
+fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                walk(&path, files)?;
+            } else if file_type.is_file() || file_type.is_symlink() {
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+    walk(root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn display_file_list(root: &Path, files: &[PathBuf]) -> String {
+    files
+        .iter()
+        .map(|path| {
+            path.strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn load_installed_registry(path: &Path) -> Result<Vec<InstalledPluginRecord>> {
+    registry::load_registry(path).map_err(|err| anyhow!(err))
+}
+
+fn save_installed_registry(path: &Path, registry: &[InstalledPluginRecord]) -> Result<()> {
+    registry::save_registry(path, registry).map_err(|err| anyhow!(err))
+}
+
+fn default_binary_name(plugin_name: &str) -> String {
+    if env::consts::EXE_SUFFIX.is_empty() {
+        plugin_name.to_string()
+    } else {
+        format!("{}{}", plugin_name, env::consts::EXE_SUFFIX)
+    }
+}
+
+fn set_executable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)?.permissions();
+        let mode = permissions.mode();
+        permissions.set_mode(mode | 0o111);
+        fs::set_permissions(path, permissions)?;
+    }
     Ok(())
 }
 
@@ -642,7 +1162,7 @@ fn replay_blocking(
         .cloned()
         .ok_or_else(|| anyhow!("no enabled plugin named '{}' is configured", plugin_name))?;
 
-    let plugin_instance = instantiate_plugin(&target_plugin);
+    let plugin_instance = instantiate_plugin(&target_plugin, &config);
     let plugin = plugin_instance.as_ref();
     let schema = schema_manager.get(&aggregate).ok();
 
@@ -820,7 +1340,7 @@ fn retry_dead_events(
             continue;
         }
         let label = plugin_instance_label(definition);
-        let instance = instantiate_plugin(definition);
+        let instance = instantiate_plugin(definition, config);
         active_plugins.push((label, instance));
     }
 
@@ -1099,6 +1619,28 @@ fn plugin_kind_name(kind: PluginKind) -> &'static str {
         PluginKind::Http => "http",
         PluginKind::Grpc => "grpc",
         PluginKind::Log => "log",
+        PluginKind::Process => "process",
+    }
+}
+
+fn validate_process_installation(config: &Config, plugin_name: &str, version: &str) -> Result<()> {
+    let registry_path = registry::registry_path(&config.data_dir);
+    let records = registry::load_registry(&registry_path)?;
+    let target = current_target_triple();
+
+    let found = records.iter().any(|entry| {
+        entry.name == plugin_name && entry.version == version && entry.target == target
+    });
+
+    if found {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "plugin '{}' version {} is not installed for target {}; run `dbx plugin install` first",
+            plugin_name,
+            version,
+            target
+        ))
     }
 }
 

@@ -37,7 +37,7 @@ use super::{
     plugin::PluginManager,
     replication_capnp_client::decode_public_key_bytes,
     schema::SchemaManager,
-    store::{self, ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore},
+    store::{ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore},
     token::{AccessKind, TokenManager},
 };
 
@@ -618,11 +618,10 @@ async fn append_event_global(
         payload,
     } = request;
 
-    let payload_map = store::payload_to_map(&payload);
     if state.restrict() {
         state
             .schemas()
-            .validate_event(&aggregate_type, &event_type, &payload_map)?;
+            .validate_event(&aggregate_type, &event_type, &payload)?;
     }
 
     let issued_by: Option<ActorClaims> = Some(grant.into());
