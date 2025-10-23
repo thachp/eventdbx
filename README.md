@@ -217,8 +217,12 @@ Replication keys live alongside the data directory (`replication.key` / `replica
 
 - `dbx upgrade [<version>|latest] [--print-only]`  
   Downloads and runs the platform-specific installer to switch binaries. The CLI looks up releases from GitHub, so you can use `latest` or supply a tag like `v1.13.2` (omitting the leading `v` also works). Versions lower than `v1.13.2` are rejected because upgrades are unsupported before that release. Use `--print-only` to show the command without executing it. Shortcut syntax `dbx upgrade@<version>` resolves through the same lookup.
+- `dbx upgrade --suppress <version>`  
+  Suppresses the upgrade reminder for the provided release tag. Combine it with `latest` to ignore the current release until a newer one ships. Use `dbx upgrade --clear-suppress` to re-enable reminders for all releases.
 - `dbx upgrade list [--limit <n>] [--json]`  
   Queries the GitHub releases API and prints the most recent versions. The default limit is 20; use `--json` for a machine-readable list, and call `dbx upgrade@list` for the same shortcut.
+
+> The CLI checks for new releases on startup and prints a reminder when a newer version is available. Set `DBX_NO_UPGRADE_CHECK=1` to bypass the check for automation scenarios.
 
 ### Maintenance
 

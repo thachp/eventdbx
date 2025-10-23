@@ -94,6 +94,12 @@ async fn main() -> Result<()> {
 
     let Cli { config, command } = Cli::parse();
 
+    if !matches!(&command, Commands::Upgrade(_)) {
+        if let Err(err) = commands::upgrade::maybe_print_upgrade_notice().await {
+            tracing::debug!("upgrade notice check failed: {err:?}");
+        }
+    }
+
     match command {
         Commands::Start(args) => commands::start::execute(config, args).await?,
         Commands::Stop => commands::start::stop(config)?,
