@@ -273,7 +273,7 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
 
     let patch_document = json!([
         { "op": "replace", "path": "/status", "value": "inactive" },
-        { "op": "replace", "path": "/contact/address/city", "value": "Spokane" }
+        { "op": "add", "path": "/contact", "value": { "address": { "city": "Spokane" } } }
     ]);
     let patch_note = "GraphQL regression patch";
 
@@ -340,14 +340,14 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         Some("inactive"),
         "patch should update status"
     );
+    let contact_state = aggregate_state
+        .get("contact")
+        .and_then(Value::as_str)
+        .expect("contact should be persisted in aggregate state");
+    let parsed_contact: Value = serde_json::from_str(contact_state)
+        .expect("contact state should deserialize as JSON");
     assert_eq!(
-        aggregate_state
-            .get("contact")
-            .and_then(Value::as_object)
-            .and_then(|contact| contact
-                .get("address")
-                .and_then(Value::as_object)
-                .and_then(|address| address.get("city").and_then(Value::as_str))),
+        parsed_contact["address"]["city"].as_str(),
         Some("Spokane"),
         "patch should update nested contact address"
     );

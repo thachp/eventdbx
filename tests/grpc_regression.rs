@@ -140,7 +140,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
 
     let patch_document = json!([
         { "op": "replace", "path": "/status", "value": "inactive" },
-        { "op": "replace", "path": "/contact/address/city", "value": "Spokane" }
+        { "op": "add", "path": "/contact", "value": { "address": { "city": "Spokane" } } }
     ])
     .to_string();
     let patch_note = "gRPC regression patch";
