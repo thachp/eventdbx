@@ -18,7 +18,6 @@ use super::{
     error::{EventError, Result},
     merkle::{compute_merkle_root, empty_root},
     schema::MAX_EVENT_NOTE_LENGTH,
-    token::TokenGrant,
 };
 
 const SEP: u8 = 0x1F;
@@ -52,15 +51,6 @@ pub struct EventMetadata {
 pub struct ActorClaims {
     pub group: String,
     pub user: String,
-}
-
-impl From<TokenGrant> for ActorClaims {
-    fn from(value: TokenGrant) -> Self {
-        Self {
-            group: value.group,
-            user: value.user,
-        }
-    }
 }
 
 impl<'a> Transaction<'a> {

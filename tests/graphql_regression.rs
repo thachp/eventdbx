@@ -5,7 +5,7 @@ use eventdbx::{
     config::Config,
     restrict::RestrictMode,
     server,
-    token::{IssueTokenInput, TokenManager},
+    token::{IssueTokenInput, JwtLimits, TokenManager},
 };
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -46,14 +46,28 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
     let encryptor = config
         .encryption_key()?
         .expect("encryption key should be configured");
-    let token_manager = TokenManager::load(config.tokens_path(), Some(encryptor.clone()))?;
+    let jwt_config = config.jwt_manager_config()?;
+    let token_manager = TokenManager::load(
+        jwt_config,
+        config.tokens_path(),
+        config.jwt_revocations_path(),
+        Some(encryptor.clone()),
+    )?;
     let token = token_manager
         .issue(IssueTokenInput {
+            subject: "testers:graphql-regression".into(),
             group: "testers".into(),
             user: "graphql-regression".into(),
-            expiration_secs: Some(3600),
-            limit: None,
-            keep_alive: true,
+            root: true,
+            actions: Vec::new(),
+            resources: Vec::new(),
+            ttl_secs: Some(3600),
+            not_before: None,
+            issued_by: "tests".into(),
+            limits: JwtLimits {
+                write_events: None,
+                keep_alive: true,
+            },
         })?
         .token;
     drop(token_manager);
@@ -344,8 +358,8 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         .get("contact")
         .and_then(Value::as_str)
         .expect("contact should be persisted in aggregate state");
-    let parsed_contact: Value = serde_json::from_str(contact_state)
-        .expect("contact state should deserialize as JSON");
+    let parsed_contact: Value =
+        serde_json::from_str(contact_state).expect("contact state should deserialize as JSON");
     assert_eq!(
         parsed_contact["address"]["city"].as_str(),
         Some("Spokane"),

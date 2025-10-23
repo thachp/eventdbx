@@ -10,7 +10,6 @@ use crate::error::EventError;
 use crate::restrict;
 use crate::server::{AppState, extract_bearer_token, run_cli_json};
 use crate::store::{AggregateState, EventMetadata, EventRecord};
-use crate::token::AccessKind;
 
 #[derive(Clone)]
 pub struct GraphqlState {
@@ -179,8 +178,10 @@ impl MutationRoot {
             .map_err(|_| async_graphql::Error::from(EventError::Unauthorized))?;
         let token = extract_bearer_token(headers)
             .ok_or_else(|| async_graphql::Error::from(EventError::Unauthorized))?;
-        app.tokens()
-            .authorize(&token, AccessKind::Write)
+        let resource = format!("aggregate:{}:{}", input.aggregate_type, input.aggregate_id);
+        let _claims = app
+            .tokens()
+            .authorize_action(&token, "aggregate.append", Some(resource.as_str()))
             .map_err(async_graphql::Error::from)?;
 
         let mode = app.restrict();

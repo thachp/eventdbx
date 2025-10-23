@@ -15,7 +15,7 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::SigningKey;
 use rand_core::{OsRng, RngCore};
 use serde::de::{Deserializer, Error as DeError};
@@ -26,6 +26,7 @@ use super::{
     encryption::Encryptor,
     error::{EventError, Result},
     restrict::{self, RestrictMode},
+    token::JwtManagerConfig,
 };
 
 pub const DEFAULT_PORT: u16 = 7070;
@@ -123,6 +124,35 @@ impl<'de> Deserialize<'de> for ApiConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default = "default_jwt_issuer")]
+    pub issuer: String,
+    #[serde(default = "default_jwt_audience")]
+    pub audience: String,
+    #[serde(default)]
+    pub secret: Option<String>,
+    #[serde(default)]
+    pub key_id: Option<String>,
+    #[serde(default = "default_jwt_ttl_secs")]
+    pub default_ttl_secs: u64,
+    #[serde(default = "default_jwt_clock_skew_secs")]
+    pub clock_skew_secs: u64,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            issuer: default_jwt_issuer(),
+            audience: default_jwt_audience(),
+            secret: Some(generate_jwt_secret()),
+            key_id: Some(format!("key-{}", Utc::now().format("%Y%m%d%H%M%S"))),
+            default_ttl_secs: default_jwt_ttl_secs(),
+            clock_skew_secs: default_jwt_clock_skew_secs(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub port: u16,
     pub data_dir: PathBuf,
@@ -158,6 +188,8 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default)]
     pub admin: AdminApiConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 impl Default for Config {
@@ -182,6 +214,7 @@ impl Default for Config {
             socket: SocketConfig::default(),
             api: default_api_config(),
             admin: AdminApiConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }
@@ -241,16 +274,18 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
         cfg.grpc.legacy_enabled = None;
 
         let updated = cfg.ensure_encryption_key();
+        let auth_updated = cfg.ensure_auth_secret();
         cfg.ensure_data_dir()?;
         cfg.ensure_replication_identity()?;
         let migrated = cfg.migrate_plugins()?;
-        if updated || migrated {
+        if updated || migrated || auth_updated {
             cfg.save(&config_path)?;
         }
         Ok((cfg, config_path))
     } else {
         let mut cfg = Config::default();
         let _ = cfg.ensure_encryption_key();
+        let _ = cfg.ensure_auth_secret();
         cfg.ensure_data_dir()?;
         cfg.ensure_replication_identity()?;
         let _ = cfg.migrate_plugins()?;
@@ -363,6 +398,25 @@ impl Config {
         true
     }
 
+    pub fn ensure_auth_secret(&mut self) -> bool {
+        let needs_secret = self
+            .auth
+            .secret
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true);
+        if !needs_secret {
+            return false;
+        }
+
+        self.auth.secret = Some(generate_jwt_secret());
+        if self.auth.key_id.is_none() {
+            self.auth.key_id = Some(format!("key-{}", Utc::now().format("%Y%m%d%H%M%S")));
+        }
+        self.updated_at = Utc::now();
+        true
+    }
+
     pub fn identity_key_path(&self) -> PathBuf {
         let path = &self.replication.identity_key;
         if path.is_absolute() {
@@ -434,6 +488,36 @@ impl Config {
 
     pub fn tokens_path(&self) -> PathBuf {
         self.data_dir.join("tokens.json")
+    }
+
+    pub fn jwt_revocations_path(&self) -> PathBuf {
+        self.data_dir.join("jwt_revocations.json")
+    }
+
+    pub fn jwt_manager_config(&self) -> Result<JwtManagerConfig> {
+        let secret = self
+            .auth
+            .secret
+            .as_ref()
+            .ok_or_else(|| EventError::Config("jwt secret not configured".to_string()))?;
+        let secret_bytes = STANDARD
+            .decode(secret.trim())
+            .map_err(|err| EventError::Config(format!("invalid jwt secret: {err}")))?;
+        if secret_bytes.len() < 32 {
+            return Err(EventError::Config(
+                "jwt secret must decode to at least 32 bytes".to_string(),
+            ));
+        }
+        let ttl = self.auth.default_ttl_secs.max(60);
+        let clock_skew = self.auth.clock_skew_secs.clamp(0, 300);
+        Ok(JwtManagerConfig {
+            issuer: self.auth.issuer.clone(),
+            audience: self.auth.audience.clone(),
+            secret: secret_bytes,
+            key_id: self.auth.key_id.clone(),
+            default_ttl: Duration::seconds(ttl as i64),
+            clock_skew: Duration::seconds(clock_skew as i64),
+        })
     }
 
     pub fn schema_store_path(&self) -> PathBuf {
@@ -682,6 +766,26 @@ fn generate_data_encryption_key() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     STANDARD.encode(bytes)
+}
+
+fn default_jwt_issuer() -> String {
+    "eventdbx://self".to_string()
+}
+
+fn default_jwt_audience() -> String {
+    "eventdbx-clients".to_string()
+}
+
+fn default_jwt_ttl_secs() -> u64 {
+    3_600
+}
+
+fn default_jwt_clock_skew_secs() -> u64 {
+    30
+}
+
+fn generate_jwt_secret() -> String {
+    generate_data_encryption_key()
 }
 
 fn default_data_dir() -> PathBuf {

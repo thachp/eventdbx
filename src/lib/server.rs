@@ -39,7 +39,7 @@ use super::{
     restrict::RestrictMode,
     schema::SchemaManager,
     store::{ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore},
-    token::{AccessKind, TokenManager},
+    token::TokenManager,
 };
 
 static CLI_PROXY_ADDR: OnceLock<Arc<AsyncRwLock<String>>> = OnceLock::new();
@@ -173,8 +173,11 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     let config_path = Arc::new(config_path);
 
     let encryption = config_snapshot.encryption_key()?;
+    let jwt_config = config_snapshot.jwt_manager_config()?;
     let tokens = Arc::new(TokenManager::load(
+        jwt_config,
         config_snapshot.tokens_path(),
+        config_snapshot.jwt_revocations_path(),
         encryption.clone(),
     )?);
     let store = Arc::new(EventStore::open(
@@ -615,8 +618,6 @@ async fn append_event_global(
     Json(request): Json<AppendEventGlobalRequest>,
 ) -> Result<Json<EventRecord>> {
     let token = extract_bearer_token(&headers).ok_or(EventError::Unauthorized)?;
-    let grant = state.tokens().authorize(&token, AccessKind::Write)?;
-
     let AppendEventGlobalRequest {
         aggregate_type,
         aggregate_id,
@@ -625,6 +626,11 @@ async fn append_event_global(
         patch,
         note,
     } = request;
+    let resource = format!("aggregate:{}:{}", aggregate_type, aggregate_id);
+    let claims =
+        state
+            .tokens()
+            .authorize_action(&token, "aggregate.append", Some(resource.as_str()))?;
 
     if patch.is_some() && payload.is_some() {
         return Err(EventError::InvalidSchema(
@@ -657,7 +663,8 @@ async fn append_event_global(
         schemas.validate_event(&aggregate_type, &event_type, &effective_payload)?;
     }
 
-    let issued_by: Option<ActorClaims> = Some(grant.into());
+    let actor_claims = claims.actor_claims().ok_or(EventError::Unauthorized)?;
+    let issued_by: Option<ActorClaims> = Some(actor_claims);
     let append_input = AppendEvent {
         aggregate_type: aggregate_type.clone(),
         aggregate_id: aggregate_id.clone(),

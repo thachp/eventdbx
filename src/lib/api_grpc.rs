@@ -9,7 +9,6 @@ use crate::{
     restrict,
     server::{AppState, run_cli_json},
     store::{AggregateState, EventRecord},
-    token::AccessKind,
 };
 
 pub mod proto {
@@ -175,9 +174,14 @@ impl EventService for GrpcApi {
                 .map_err(|err| Status::invalid_argument(format!("invalid payload_json: {}", err)))?
         };
 
-        self.state
+        let resource = format!(
+            "aggregate:{}:{}",
+            payload.aggregate_type, payload.aggregate_id
+        );
+        let _claims = self
+            .state
             .tokens()
-            .authorize(&token, AccessKind::Write)
+            .authorize_action(&token, "aggregate.append", Some(resource.as_str()))
             .map_err(Self::map_error)?;
 
         let mode = self.state.restrict();

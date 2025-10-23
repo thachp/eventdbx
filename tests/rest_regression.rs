@@ -5,7 +5,7 @@ use eventdbx::{
     config::Config,
     restrict::RestrictMode,
     server,
-    token::{IssueTokenInput, TokenManager},
+    token::{IssueTokenInput, JwtLimits, TokenManager},
 };
 use fake::{
     Fake,
@@ -124,14 +124,28 @@ async fn rest_person_company_flow() -> TestResult<()> {
     let encryptor = config
         .encryption_key()?
         .expect("encryption key should be configured");
-    let token_manager = TokenManager::load(config.tokens_path(), Some(encryptor.clone()))?;
+    let jwt_config = config.jwt_manager_config()?;
+    let token_manager = TokenManager::load(
+        jwt_config,
+        config.tokens_path(),
+        config.jwt_revocations_path(),
+        Some(encryptor.clone()),
+    )?;
     let token = token_manager
         .issue(IssueTokenInput {
+            subject: "testers:regression".into(),
             group: "testers".into(),
             user: "regression".into(),
-            expiration_secs: Some(3600),
-            limit: None,
-            keep_alive: true,
+            root: true,
+            actions: Vec::new(),
+            resources: Vec::new(),
+            ttl_secs: Some(3600),
+            not_before: None,
+            issued_by: "tests".into(),
+            limits: JwtLimits {
+                write_events: None,
+                keep_alive: true,
+            },
         })?
         .token;
     drop(token_manager);

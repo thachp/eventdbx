@@ -85,6 +85,7 @@ futures = "0.3"
 semver = "1.0"
 validator = { version = "0.16", features = ["card"] }
 json-patch = "1.2"
+jsonwebtoken = "9.3"
 
 [dev-dependencies]
 fake = "3"

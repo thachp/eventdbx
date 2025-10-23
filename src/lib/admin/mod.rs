@@ -16,7 +16,7 @@ use crate::{
     error::{EventError, Result},
     schema::{AggregateSchema, SchemaUpdate},
     server::{AppState, extract_bearer_token, run_cli_command, run_cli_json},
-    token::{IssueTokenInput, TokenRecord},
+    token::{IssueTokenInput, JwtLimits, RevokeTokenInput, TokenRecord},
 };
 
 const ADMIN_KEY_HEADER: &str = "x-admin-key";
@@ -88,7 +88,8 @@ fn extract_admin_key(headers: &HeaderMap) -> Option<String> {
 
 async fn list_tokens(State(state): State<AppState>) -> Result<Json<Vec<TokenRecord>>> {
     let manager = state.tokens();
-    Ok(Json(manager.list()))
+    let records = manager.list()?;
+    Ok(Json(records))
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,9 +97,19 @@ struct IssueTokenRequest {
     group: String,
     user: String,
     #[serde(default)]
-    expiration_secs: Option<u64>,
+    subject: Option<String>,
     #[serde(default)]
-    limit: Option<u64>,
+    root: bool,
+    #[serde(default)]
+    actions: Vec<String>,
+    #[serde(default)]
+    resources: Vec<String>,
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+    #[serde(default)]
+    issued_by: Option<String>,
+    #[serde(default)]
+    write_limit: Option<u64>,
     #[serde(default)]
     keep_alive: bool,
 }
@@ -108,12 +119,43 @@ async fn issue_token(
     Json(request): Json<IssueTokenRequest>,
 ) -> Result<(StatusCode, Json<TokenRecord>)> {
     let manager = state.tokens();
+    let IssueTokenRequest {
+        group,
+        user,
+        subject,
+        root,
+        actions,
+        mut resources,
+        ttl_secs,
+        issued_by,
+        write_limit,
+        keep_alive,
+    } = request;
+
+    if !root && actions.is_empty() {
+        return Err(EventError::Config(
+            "actions must be provided for non-root tokens".to_string(),
+        ));
+    }
+
+    if resources.is_empty() {
+        resources.push("*".to_string());
+    }
+
     let record = manager.issue(IssueTokenInput {
-        group: request.group,
-        user: request.user,
-        expiration_secs: request.expiration_secs,
-        limit: request.limit,
-        keep_alive: request.keep_alive,
+        subject: subject.unwrap_or_else(|| format!("{}:{}", group, user)),
+        group,
+        user,
+        root,
+        actions,
+        resources,
+        ttl_secs,
+        not_before: None,
+        issued_by: issued_by.unwrap_or_else(|| "admin".to_string()),
+        limits: JwtLimits {
+            write_events: write_limit,
+            keep_alive,
+        },
     })?;
     Ok((StatusCode::CREATED, Json(record)))
 }
@@ -123,16 +165,17 @@ async fn revoke_token(
     Path(token): Path<String>,
 ) -> Result<StatusCode> {
     let manager = state.tokens();
-    manager.revoke(&token)?;
+    manager.revoke(RevokeTokenInput {
+        token_or_id: token,
+        reason: None,
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]
 struct RefreshTokenRequest {
     #[serde(default)]
-    expiration_secs: Option<u64>,
-    #[serde(default)]
-    limit: Option<u64>,
+    ttl_secs: Option<u64>,
 }
 
 async fn refresh_token(
@@ -141,7 +184,7 @@ async fn refresh_token(
     Json(request): Json<RefreshTokenRequest>,
 ) -> Result<Json<TokenRecord>> {
     let manager = state.tokens();
-    let record = manager.refresh(&token, request.expiration_secs, request.limit)?;
+    let record = manager.refresh(&token, request.ttl_secs)?;
     Ok(Json(record))
 }
 

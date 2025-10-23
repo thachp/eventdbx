@@ -88,13 +88,15 @@ async fn adminapi_regression() -> TestResult<()> {
         "admin endpoints must require authentication"
     );
 
-    // Issue a new token with explicit expiration and write limit.
+    // Issue a new token with explicit actions and TTL.
     let issue_payload = json!({
         "group": "ops",
         "user": "scheduler",
-        "expiration_secs": 600,
-        "limit": 5,
-        "keep_alive": true
+        "actions": ["aggregate.append", "schema.read"],
+        "resources": ["aggregate:admin-managed:*"],
+        "ttl_secs": 600,
+        "issued_by": "admin-test",
+        "keep_alive": false
     });
     let issued_token: Value = client
         .post(format!("{admin_base}/tokens"))
@@ -114,15 +116,15 @@ async fn adminapi_regression() -> TestResult<()> {
         "issued token should be active initially"
     );
     assert_eq!(
-        issued_token["remaining_writes"].as_u64(),
-        Some(5),
-        "remaining writes should match requested limit"
+        issued_token["actions"],
+        json!(["aggregate.append", "schema.read"]),
+        "issued token should retain requested actions"
     );
     assert_eq!(
-        issued_token["keep_alive"], true,
+        issued_token["limits"]["keep_alive"], false,
         "issued token should honor keep-alive flag"
     );
-    let token_str = issued_token["token"]
+    let mut token_str = issued_token["token"]
         .as_str()
         .expect("issued token response should include token value")
         .to_string();
@@ -144,15 +146,17 @@ async fn adminapi_regression() -> TestResult<()> {
         .find(|item| item["token"] == token_str)
         .expect("issued token must be in list");
     assert_eq!(
-        issued_entry["limit"].as_u64(),
-        Some(5),
-        "token list entry should include configured limit"
+        issued_entry["status"], "active",
+        "token list entry should reflect active status"
+    );
+    assert_eq!(
+        issued_entry["actions"], issued_token["actions"],
+        "token list should surface action scopes"
     );
 
     // Refresh the token to update expiration and increase write limit.
     let refresh_payload = json!({
-        "expiration_secs": 900,
-        "limit": 10
+        "ttl_secs": 900
     });
     let refreshed_token: Value = client
         .post(format!("{admin_base}/tokens/{token_str}/refresh"))
@@ -163,15 +167,23 @@ async fn adminapi_regression() -> TestResult<()> {
         .error_for_status()?
         .json()
         .await?;
-    assert_eq!(
-        refreshed_token["token"], token_str,
-        "token identifier should remain stable after refresh"
+    let refreshed_token_str = refreshed_token["token"]
+        .as_str()
+        .expect("refresh response should include token")
+        .to_string();
+    assert_ne!(
+        refreshed_token_str, token_str,
+        "refresh should issue a replacement token"
     );
     assert_eq!(
-        refreshed_token["remaining_writes"].as_u64(),
-        Some(10),
-        "refresh should update remaining writes to the new limit"
+        refreshed_token["status"], "active",
+        "refreshed token should remain active"
     );
+    assert_eq!(
+        refreshed_token["actions"], issued_token["actions"],
+        "refresh should preserve action scopes"
+    );
+    token_str = refreshed_token_str;
 
     // Revoke the token and verify it is marked as revoked.
     let revoke_response = client

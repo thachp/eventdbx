@@ -22,7 +22,7 @@ use eventdbx::{
     restrict::{self, RestrictMode},
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{self, ActorClaims, AppendEvent, EventRecord, EventStore, payload_to_map},
-    token::{IssueTokenInput, TokenManager},
+    token::{IssueTokenInput, JwtLimits, TokenManager},
 };
 
 use crate::commands::client::ServerClient;
@@ -708,14 +708,29 @@ fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> 
 
 fn issue_ephemeral_token(config: &Config) -> Result<String> {
     let encryptor = config.encryption_key()?;
-    let manager = TokenManager::load(config.tokens_path(), encryptor)?;
+    let jwt_config = config.jwt_manager_config()?;
+    let manager = TokenManager::load(
+        jwt_config,
+        config.tokens_path(),
+        config.jwt_revocations_path(),
+        encryptor,
+    )?;
     let user = proxy_user_identity();
+    let subject = format!("cli:{}", user);
     let record = manager.issue(IssueTokenInput {
+        subject,
         group: "cli".to_string(),
         user,
-        expiration_secs: Some(60),
-        limit: Some(1),
-        keep_alive: false,
+        root: true,
+        actions: Vec::new(),
+        resources: Vec::new(),
+        ttl_secs: Some(120),
+        not_before: None,
+        issued_by: "cli".to_string(),
+        limits: JwtLimits {
+            write_events: None,
+            keep_alive: false,
+        },
     })?;
     Ok(record.token)
 }
@@ -733,10 +748,7 @@ fn proxy_user_identity() -> String {
             }
         });
 
-    match env_value {
-        Some(user) => format!("cli:{}", user),
-        None => "cli:local".to_string(),
-    }
+    env_value.unwrap_or_else(|| "local".to_string())
 }
 
 fn normalize_token(token: String) -> Option<String> {
