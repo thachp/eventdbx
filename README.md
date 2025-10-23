@@ -173,10 +173,12 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 
 ### Plugins
 
+- `dbx plugin install <plugin> <version> --source <path|url> [--bin <file>] [--checksum <sha256>] [--force]`
 - `dbx plugin config tcp --name <label> --host <hostname> --port <u16> [--disable]`
 - `dbx plugin config http --name <label> --endpoint <host|url> [--https] [--header KEY=VALUE]... [--disable]`
 - `dbx plugin config grpc --name <label> --endpoint <host|url> [--disable]`
 - `dbx plugin config log --name <label> --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
+- `dbx plugin config process --name <instance> --plugin <id> --version <semver> [--arg <value>]... [--env KEY=VALUE]... [--working-dir <path>] [--disable]`
 - `dbx plugin enable <label>`
 - `dbx plugin disable <label>`
 - `dbx plugin remove <label>`
@@ -224,15 +226,30 @@ Replication keys live alongside the data directory (`replication.key` / `replica
 
 Plugins fire after every committed event to keep external systems in sync. Remaining plugins deliver events through different channels:
 
-Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications.
-Use `dbx plugin queue` to inspect pending/dead event IDs.
+- **TCP** – Writes a single-line JSON `EventRecord` to the configured socket.
+- **HTTP** – POSTs the `EventRecord` JSON to an endpoint with optional headers; add `--https` during configuration to force HTTPS when the endpoint lacks a scheme.
+- **gRPC** – Sends `EventRecord` batches to a remote gRPC endpoint compatible with the replication `ApplyEvents` API.
+- **Log** – Emits a formatted line via `tracing` at the configured level. By default: `aggregate=<type> id=<id> event=<event>`.
+- **Process** – Launches an installed plugin binary as a supervised subprocess and streams events to it over Cap'n Proto. Use this for first-party plugins from the [`dbx_plugins`](https://github.com/thachp/dbx_plugins) workspace or your own extensions.
+
+Process plugins are distributed as zip/tar bundles. Install them with `dbx plugin install <plugin> <version> --source <path-or-url>`—the bundle is unpacked to `~/.eventdbx/plugins/<plugin>/<version>/<target>/`, where `<target>` matches the current OS/architecture (for example, `x86_64-apple-darwin`). Official bundles live in the `dbx_plugins` releases; pass the asset URL to `--source` or point it at a local build while developing. After installation, bind the binary to an instance:
+
+```bash
+dbx plugin config process \
+  --name search \
+  --plugin dbx_search \
+  --version 1.0.0 \
+  --arg "--listen=0.0.0.0:8081" \
+  --env SEARCH_CLUSTER=https://example.com
+
+dbx plugin enable search
+```
+
+EventDBX supervises the subprocess, restarts it on failure, and delivers every `EventRecord`/aggregate snapshot over the stream. Plugins that run as independent services can continue to use the TCP/HTTP/GRPC emitters instead.
+
+Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications. Use `dbx plugin queue` to inspect pending/dead event IDs.
 
 Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instance requires a unique `--name` so you can update, enable, disable, remove, or replay it later. `plugin enable` validates connectivity (creating directories, touching files, or checking network access) before marking the plugin active. Remove a plugin only after disabling it with `plugin disable <name>`. `plugin replay` resends stored events for a single aggregate instance—or every instance of a type—through the selected plugin.
-
-- **TCP**: Writes a single-line JSON `EventRecord` to the configured socket.
-- **HTTP**: POSTs the `EventRecord` JSON to an endpoint with optional headers; add `--https` during configuration to force HTTPS when the endpoint lacks a scheme.
-- **gRPC**: Sends `EventRecord` batches to a remote gRPC endpoint compatible with the replication `ApplyEvents` API.
-- **Log**: Emits a formatted line via `tracing` at the configured level. By default: `aggregate=<type> id=<id> event=<event>`.
 
 Need point-in-time snapshots instead of streaming plugins? Use `dbx aggregate export` to capture aggregate state as CSV or JSON on demand.
 
