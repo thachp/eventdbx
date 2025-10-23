@@ -3,6 +3,7 @@ use std::{net::TcpListener, path::PathBuf, time::Duration};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use eventdbx::{
     config::Config,
+    restrict::RestrictMode,
     server,
     token::{IssueTokenInput, TokenManager},
 };
@@ -35,7 +36,7 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         Err(err) => return Err(err.into()),
     };
     config.port = port;
-    config.restrict = false;
+    config.restrict = RestrictMode::Off;
     config.data_encryption_key = Some(STANDARD.encode([42u8; 32]));
     config.socket.bind_addr = format!("127.0.0.1:{socket_port}");
     config.ensure_data_dir()?;

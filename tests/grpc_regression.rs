@@ -7,6 +7,7 @@ use eventdbx::{
         VerifyAggregateRequest, event_service_client::EventServiceClient,
     },
     config::Config,
+    restrict::RestrictMode,
     server,
     token::{IssueTokenInput, TokenManager},
 };
@@ -39,7 +40,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
         Err(err) => return Err(err.into()),
     };
     config.port = http_port;
-    config.restrict = false;
+    config.restrict = RestrictMode::Off;
     config.data_encryption_key = Some(STANDARD.encode([7u8; 32]));
     config.grpc.bind_addr = format!("127.0.0.1:{http_port}");
     config.socket.bind_addr = format!("127.0.0.1:{socket_port}");

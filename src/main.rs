@@ -10,6 +10,7 @@ use crate::commands::{
     aggregate::AggregateCommands,
     config::ConfigArgs,
     plugin::PluginCommands,
+    queue::QueueArgs,
     remote::RemoteCommands,
     schema::SchemaCommands,
     start::{DestroyArgs, StartArgs},
@@ -58,6 +59,8 @@ enum Commands {
         #[command(subcommand)]
         command: PluginCommands,
     },
+    /// Show or manage the plugin retry queue
+    Queue(QueueArgs),
     /// Manage aggregates
     Aggregate {
         #[command(subcommand)]
@@ -101,6 +104,7 @@ async fn main() -> Result<()> {
         Commands::Token { command } => commands::token::execute(config, command)?,
         Commands::Schema { command } => commands::schema::execute(config, command)?,
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
+        Commands::Queue(args) => commands::queue::execute(config, args)?,
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
         Commands::Push(args) => commands::remote::push(config, args).await?,
         Commands::Pull(args) => commands::remote::pull(config, args).await?,

@@ -19,6 +19,7 @@ use eventdbx::{
     error::EventError,
     merkle::compute_merkle_root,
     plugin::PluginManager,
+    restrict::{self, RestrictMode},
     schema::SchemaManager,
     store::{self, ActorClaims, AppendEvent, EventRecord, EventStore, payload_to_map},
     token::{IssueTokenInput, TokenManager},
@@ -340,7 +341,8 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 None => collect_payload(fields),
             };
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
-            if config.restrict {
+            if config.restrict.enforces_validation() {
+                ensure_schema_for_mode(config.restrict, &schema_manager, &aggregate)?;
                 schema_manager.validate_event(&aggregate, &event, &payload)?;
             }
 
@@ -527,7 +529,12 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             let mut tx = store.transaction()?;
 
             for staged_event in &staged_events {
-                if config.restrict {
+                if config.restrict.enforces_validation() {
+                    ensure_schema_for_mode(
+                        config.restrict,
+                        &schema_manager,
+                        &staged_event.aggregate,
+                    )?;
                     schema_manager.validate_event(
                         &staged_event.aggregate,
                         &staged_event.event,
@@ -595,6 +602,19 @@ fn maybe_auto_snapshot(store: &EventStore, schemas: &SchemaManager, record: &Eve
             record.aggregate_type, record.aggregate_id, record.version, err
         ),
     }
+}
+
+fn ensure_schema_for_mode(
+    mode: RestrictMode,
+    schema_manager: &SchemaManager,
+    aggregate: &str,
+) -> Result<()> {
+    if mode.requires_declared_schema() {
+        schema_manager.get(aggregate).map(|_| ()).map_err(|_| {
+            EventError::SchemaViolation(restrict::strict_mode_missing_schema_message(aggregate))
+        })?;
+    }
+    Ok(())
 }
 
 fn proxy_append_via_http(
@@ -1166,4 +1186,37 @@ fn save_staged_events(path: &Path, events: &[StagedEvent]) -> Result<()> {
     let payload = serde_json::to_string_pretty(events)?;
     fs::write(path, payload)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eventdbx::schema::CreateSchemaInput;
+
+    #[test]
+    fn ensure_schema_for_mode_respects_modes() {
+        let dir = tempdir().expect("tempdir should be created");
+        let manager = SchemaManager::load(dir.path().join("schemas.json"))
+            .expect("schema manager should load");
+
+        ensure_schema_for_mode(RestrictMode::Off, &manager, "account")
+            .expect("off mode bypasses schema checks");
+        ensure_schema_for_mode(RestrictMode::Default, &manager, "account")
+            .expect("default mode allows missing schema");
+
+        let err = ensure_schema_for_mode(RestrictMode::Strict, &manager, "account")
+            .expect_err("strict mode should reject missing schemas");
+        assert!(err.to_string().contains("restrict=strict"));
+
+        manager
+            .create(CreateSchemaInput {
+                aggregate: "account".into(),
+                events: vec!["opened".into()],
+                snapshot_threshold: None,
+            })
+            .expect("schema creation should succeed");
+
+        ensure_schema_for_mode(RestrictMode::Strict, &manager, "account")
+            .expect("strict mode accepts existing schema");
+    }
 }
