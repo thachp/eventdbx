@@ -1,8 +1,8 @@
 pub mod aggregate;
 pub mod client;
 pub mod config;
-pub mod queue;
 pub mod plugin;
+pub mod queue;
 pub mod remote;
 pub mod schema;
 pub mod start;

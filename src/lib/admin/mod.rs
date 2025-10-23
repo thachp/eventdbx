@@ -16,7 +16,7 @@ use crate::{
     error::{EventError, Result},
     schema::{AggregateSchema, SchemaUpdate},
     server::{AppState, extract_bearer_token, run_cli_command, run_cli_json},
-    token::TokenRecord,
+    token::{IssueTokenInput, TokenRecord},
 };
 
 const ADMIN_KEY_HEADER: &str = "x-admin-key";
@@ -86,14 +86,9 @@ fn extract_admin_key(headers: &HeaderMap) -> Option<String> {
     extract_bearer_token(headers)
 }
 
-async fn list_tokens(State(_state): State<AppState>) -> Result<Json<Vec<TokenRecord>>> {
-    let tokens: Vec<TokenRecord> = run_cli_json(vec![
-        "token".to_string(),
-        "list".to_string(),
-        "--json".to_string(),
-    ])
-    .await?;
-    Ok(Json(tokens))
+async fn list_tokens(State(state): State<AppState>) -> Result<Json<Vec<TokenRecord>>> {
+    let manager = state.tokens();
+    Ok(Json(manager.list()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,39 +104,26 @@ struct IssueTokenRequest {
 }
 
 async fn issue_token(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(request): Json<IssueTokenRequest>,
 ) -> Result<(StatusCode, Json<TokenRecord>)> {
-    let mut args = vec![
-        "token".to_string(),
-        "generate".to_string(),
-        "--group".to_string(),
-        request.group.clone(),
-        "--user".to_string(),
-        request.user.clone(),
-    ];
-    if let Some(expiration) = request.expiration_secs {
-        args.push("--expiration".to_string());
-        args.push(expiration.to_string());
-    }
-    if let Some(limit) = request.limit {
-        args.push("--limit".to_string());
-        args.push(limit.to_string());
-    }
-    if request.keep_alive {
-        args.push("--keep-alive".to_string());
-    }
-    args.push("--json".to_string());
-
-    let record: TokenRecord = run_cli_json(args).await?;
+    let manager = state.tokens();
+    let record = manager.issue(IssueTokenInput {
+        group: request.group,
+        user: request.user,
+        expiration_secs: request.expiration_secs,
+        limit: request.limit,
+        keep_alive: request.keep_alive,
+    })?;
     Ok((StatusCode::CREATED, Json(record)))
 }
 
 async fn revoke_token(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<StatusCode> {
-    run_cli_command(vec!["token".to_string(), "revoke".to_string(), token]).await?;
+    let manager = state.tokens();
+    manager.revoke(&token)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -154,26 +136,12 @@ struct RefreshTokenRequest {
 }
 
 async fn refresh_token(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(token): Path<String>,
     Json(request): Json<RefreshTokenRequest>,
 ) -> Result<Json<TokenRecord>> {
-    let mut args = vec![
-        "token".to_string(),
-        "refresh".to_string(),
-        "--token".to_string(),
-        token,
-    ];
-    if let Some(expiration) = request.expiration_secs {
-        args.push("--expiration".to_string());
-        args.push(expiration.to_string());
-    }
-    if let Some(limit) = request.limit {
-        args.push("--limit".to_string());
-        args.push(limit.to_string());
-    }
-    args.push("--json".to_string());
-    let record: TokenRecord = run_cli_json(args).await?;
+    let manager = state.tokens();
+    let record = manager.refresh(&token, request.expiration_secs, request.limit)?;
     Ok(Json(record))
 }
 
