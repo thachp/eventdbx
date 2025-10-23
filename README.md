@@ -99,6 +99,7 @@ You now have a working EventDBX instance with an initial aggregate. Explore the 
 - **Built-in Audit Trails**: EventDBX automatically maintains a comprehensive audit trail of all transactions, a feature invaluable for meeting compliance and regulatory requirements. It provides transparent and tamper-evident records. During audits, administrators can issue specific tokens to auditors to access and review specific aggregate instances and all relevant events associated with those instances.
 - **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes.
 - **Encrypted Payloads & Secrets at Rest**: Event payloads, aggregate snapshots, and `tokens.json` are encrypted transparently when a DEK is configured. Metadata such as aggregate identifiers, versions, and Merkle roots remain readable so plugins, replication, and integrity checks keep working without additional configuration.
+- **Dedicated Admin API**: Operate schemas, tokens, plugins, and remotes programmatically through the `/admin` surface. Every request is authenticated with an Argon2-hashed master key so automation can stay locked down without interactive shells.
 - **Powered by RocksDB and Rust**: At its core, EventDBX utilizes RocksDB for storage, taking advantage of its high performance and efficiency. The system is developed in Rust, known for its safety, efficiency, and concurrency capabilities, ensuring that it is both rapid and dependable.
 
 ## Restriction Modes
@@ -128,8 +129,8 @@ EventDBX ships a single `dbx` binary. Every command accepts an optional `--confi
 
 ### Configuration
 
-- `dbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>]`  
-  Persists configuration updates. Run without flags to print the current settings. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10).
+- `dbx config [--port <u16>] [--data-dir <path>] [--cache-threshold <usize>] [--dek <base64>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>] [--snapshot-threshold <u64>] [--clear-snapshot-threshold] [--admin-enabled <true|false>] [--admin-bind <addr>] [--admin-port <u16>] [--admin-master-key <secret>] [--clear-admin-master-key]`  
+  Persists configuration updates. Run without flags to print the current settings. The first invocation must include a data encryption key via `--dek` (32 bytes of base64). `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10). Supply `--admin-master-key` to enable the Admin API with an Argon2-hashed shared secret, or use `--clear-admin-master-key` to revoke automation access. `--admin-enabled=false` disables the HTTP surface entirely.
 
 ### Tokens
 
@@ -212,6 +213,35 @@ Clearing dead entries prompts for confirmation to avoid accidental removal. Manu
   Fast-forwards the local node from the remote, reporting changes in dry-run mode.
 
 Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. The Cap'n Proto listener that powers CLI automation and replication defaults to `[socket].bind_addr` (default `0.0.0.0:6363`); point remotes at that address with a `tcp://` endpoint or override the bind address in `config.toml` when you expose the replica on another interface. The `dbx push` and `dbx pull` commands connect over this socket—no gRPC listener is required—and every session is authenticated with the remote's pinned Ed25519 public key. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
+
+### Admin API
+
+The Admin API exposes token, schema, remote, and plugin management over HTTP so automation can operate EventDBX without shell access. It is disabled by default; enable it and seed a shared secret with:
+
+```bash
+dbx config \
+  --admin-enabled true \
+  --admin-bind 127.0.0.1 \
+  --admin-port 7171 \
+  --admin-master-key "rotate-me-please"
+```
+
+The master key is hashed with Argon2 and never written in plaintext. Include it on every request as either `X-Admin-Key: <secret>` or an `Authorization: Bearer <secret>` token:
+
+```bash
+curl -H "X-Admin-Key: rotate-me-please" http://127.0.0.1:7171/admin/remotes
+```
+
+Key routes:
+
+| Method & Path | Description |
+| --- | --- |
+| `GET /admin/tokens` | List issued tokens; `POST` issues a new token, `/revoke` and `/refresh` manage lifecycle. |
+| `GET /admin/schemas` | Fetch declared schemas or append new ones with `POST`. |
+| `GET /admin/remotes` | Show replication remotes; `PUT /admin/remotes/{name}` upserts a remote using the same validation as the CLI. |
+| `GET /admin/plugins` | Inspect plugin configuration and toggle instances with `/enable` or `/disable`. |
+
+Disable access any time with `dbx config --admin-enabled false` or rotate the credential with `--admin-master-key <new-secret>`. Use `--clear-admin-master-key` to immediately revoke all automation traffic while keeping the endpoints online.
 
 ### Upgrades
 

@@ -66,7 +66,11 @@
         </div>
     </header>
     <main class="flex-1">
-        {{ content }}
+        <div class="mx-auto w-full max-w-5xl px-6 py-16">
+            <article class="prose prose-invert prose-lg max-w-none prose-pre:bg-slate-900 prose-pre:text-slate-100 prose-pre:rounded-2xl prose-code:bg-slate-900/60 prose-code:text-slate-100 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded">
+                {{ content }}
+            </article>
+        </div>
     </main>
     <footer class="border-t border-white/10 bg-slate-950/80 py-16">
         <div class="mx-auto grid max-w-6xl gap-12 px-6 md:grid-cols-3">
