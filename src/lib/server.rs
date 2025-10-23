@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     future::Future,
     io,
     net::{IpAddr, SocketAddr},
@@ -39,6 +38,7 @@ use super::{
     restrict::RestrictMode,
     schema::SchemaManager,
     store::{ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore},
+    service::CoreContext,
     token::TokenManager,
 };
 
@@ -46,14 +46,9 @@ static CLI_PROXY_ADDR: OnceLock<Arc<AsyncRwLock<String>>> = OnceLock::new();
 
 #[derive(Clone)]
 pub(crate) struct AppState {
-    tokens: Arc<TokenManager>,
-    schemas: Arc<SchemaManager>,
+    core: CoreContext,
     config: Arc<RwLock<Config>>,
     _config_path: Arc<PathBuf>,
-    store: Arc<EventStore>,
-    restrict: RestrictMode,
-    list_page_size: usize,
-    page_limit: usize,
 }
 
 pub(crate) async fn run_cli_command(args: Vec<String>) -> Result<cli_proxy::CliCommandResult> {
@@ -114,11 +109,11 @@ where
 
 impl AppState {
     pub(crate) fn tokens(&self) -> Arc<TokenManager> {
-        Arc::clone(&self.tokens)
+        self.core.tokens()
     }
 
     pub(crate) fn schemas(&self) -> Arc<SchemaManager> {
-        Arc::clone(&self.schemas)
+        self.core.schemas()
     }
 
     pub(crate) fn config(&self) -> Arc<RwLock<Config>> {
@@ -126,44 +121,27 @@ impl AppState {
     }
 
     pub(crate) fn restrict(&self) -> RestrictMode {
-        self.restrict
+        self.core.restrict()
     }
 
     pub(crate) fn list_page_size(&self) -> usize {
-        self.list_page_size
+        self.core.list_page_size()
     }
 
     pub(crate) fn page_limit(&self) -> usize {
-        self.page_limit
+        self.core.page_limit()
     }
 
     pub(crate) fn is_hidden_aggregate(&self, aggregate_type: &str) -> bool {
-        self.schemas
-            .get(aggregate_type)
-            .map(|schema| schema.hidden)
-            .unwrap_or(false)
+        self.core.is_hidden_aggregate(aggregate_type)
     }
 
-    pub(crate) fn sanitize_aggregate(&self, mut aggregate: AggregateState) -> AggregateState {
-        aggregate.state = self.filter_state_map(&aggregate.aggregate_type, aggregate.state);
-        aggregate
+    pub(crate) fn sanitize_aggregate(&self, aggregate: AggregateState) -> AggregateState {
+        self.core.sanitize_aggregate(aggregate)
     }
 
     pub(crate) fn store(&self) -> Arc<EventStore> {
-        Arc::clone(&self.store)
-    }
-
-    fn filter_state_map(
-        &self,
-        aggregate_type: &str,
-        mut state: BTreeMap<String, String>,
-    ) -> BTreeMap<String, String> {
-        if let Ok(schema) = self.schemas.get(aggregate_type) {
-            if !schema.hidden_fields.is_empty() {
-                state.retain(|key, _| !schema.hidden_fields.contains(key));
-            }
-        }
-        state
+        self.core.store()
     }
 }
 
@@ -194,15 +172,19 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     );
     let schemas = Arc::new(SchemaManager::load(config_snapshot.schema_store_path())?);
 
+    let core = CoreContext::new(
+        Arc::clone(&tokens),
+        Arc::clone(&schemas),
+        Arc::clone(&store),
+        config_snapshot.restrict,
+        config_snapshot.list_page_size,
+        config_snapshot.page_limit,
+    );
+
     let state = AppState {
-        tokens: Arc::clone(&tokens),
-        schemas: Arc::clone(&schemas),
+        core: core.clone(),
         config: Arc::clone(&shared_config),
         _config_path: Arc::clone(&config_path),
-        store: Arc::clone(&store),
-        restrict: config_snapshot.restrict,
-        list_page_size: config_snapshot.list_page_size,
-        page_limit: config_snapshot.page_limit,
     };
 
     let api = config_snapshot.api.clone();
@@ -250,8 +232,8 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     let cli_proxy_handle = cli_proxy::start(
         &cli_bind_addr,
         Arc::clone(&config_path),
-        Arc::clone(&store),
-        Arc::clone(&schemas),
+        core.clone(),
+        Arc::clone(&shared_config),
         Arc::clone(&local_public_key),
     )
     .await
