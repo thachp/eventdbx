@@ -8,7 +8,7 @@ keywords = [
   "immutable",
   "events",
   "event-sourcing",
-  "event-store",
+  "database",
   "cqrs"
 ]
 categories = ["database"]
