@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 
 use eventdbx::{
     config::load_or_default,
-    schema::{CreateSchemaInput, SchemaManager, SchemaUpdate},
+    schema::{CreateSchemaInput, MAX_EVENT_NOTE_LENGTH, SchemaManager, SchemaUpdate},
 };
 use serde_json;
 
@@ -17,6 +17,8 @@ pub enum SchemaCommands {
     Add(SchemaAddEventArgs),
     /// Remove an event definition from an aggregate
     Remove(SchemaRemoveEventArgs),
+    /// Set or clear the default note for an event
+    Annotate(SchemaAnnotateArgs),
     /// List available schemas
     List(SchemaListArgs),
     /// Hide a field from aggregate detail responses
@@ -71,6 +73,23 @@ pub struct SchemaRemoveEventArgs {
 
     /// Event name to remove
     pub event: String,
+}
+
+#[derive(Args)]
+pub struct SchemaAnnotateArgs {
+    /// Aggregate name to modify
+    pub aggregate: String,
+
+    /// Event name to annotate
+    pub event: String,
+
+    /// Note text to set (omit to use --clear)
+    #[arg(long, value_name = "NOTE")]
+    pub note: Option<String>,
+
+    /// Clear the existing note for the event
+    #[arg(long, default_value_t = false)]
+    pub clear: bool,
 }
 
 #[derive(Args)]
@@ -151,6 +170,7 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
             );
             Ok(())
         }
+        SchemaCommands::Annotate(args) => annotate_event(config_path, args),
         SchemaCommands::List(args) => {
             let (config, _) = load_or_default(config_path)?;
             let manager = SchemaManager::load(config.schema_store_path())?;
@@ -204,6 +224,64 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
             }
         }
     }
+}
+
+fn annotate_event(config_path: Option<PathBuf>, args: SchemaAnnotateArgs) -> Result<()> {
+    let (config, _) = load_or_default(config_path)?;
+    let manager = SchemaManager::load(config.schema_store_path())?;
+
+    let aggregate = args.aggregate.trim();
+    if aggregate.is_empty() {
+        return Err(anyhow!("aggregate name cannot be empty"));
+    }
+
+    let event = args.event.trim();
+    if event.is_empty() {
+        return Err(anyhow!("event name cannot be empty"));
+    }
+
+    if args.clear && args.note.is_some() {
+        return Err(anyhow!("--note cannot be combined with --clear"));
+    }
+
+    let desired_note = if args.clear {
+        None
+    } else if let Some(note) = args.note {
+        if note.chars().count() > MAX_EVENT_NOTE_LENGTH {
+            return Err(anyhow!(
+                "note cannot exceed {} characters",
+                MAX_EVENT_NOTE_LENGTH
+            ));
+        }
+        Some(note)
+    } else {
+        return Err(anyhow!("either --note must be provided or use --clear"));
+    };
+
+    let schema = manager.get(aggregate)?;
+    if !schema.events.contains_key(event) {
+        return Err(anyhow!(
+            "event {} is not defined for aggregate {}",
+            event,
+            aggregate
+        ));
+    }
+
+    let mut update = SchemaUpdate::default();
+    update
+        .event_notes
+        .insert(event.to_string(), desired_note.clone());
+    manager.update(aggregate, update)?;
+
+    match desired_note {
+        Some(note) => println!(
+            "aggregate={} event={} note_set=\"{}\"",
+            aggregate, event, note
+        ),
+        None => println!("aggregate={} event={} note_cleared", aggregate, event),
+    }
+
+    Ok(())
 }
 
 fn hide_field(config_path: Option<PathBuf>, args: SchemaHideArgs) -> Result<()> {

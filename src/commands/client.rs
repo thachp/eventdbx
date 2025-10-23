@@ -26,14 +26,18 @@ impl ServerClient {
         aggregate_type: &str,
         aggregate_id: &str,
         event_type: &str,
-        payload: &Value,
+        payload: Option<&Value>,
+        patch: Option<&Value>,
+        note: Option<&str>,
     ) -> Result<EventRecord> {
         let base_url = self.base_url.clone();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
         let event_type = event_type.to_string();
-        let payload = payload.clone();
+        let payload = payload.cloned();
+        let patch = patch.cloned();
+        let note = note.map(|value| value.to_string());
 
         if tokio::runtime::Handle::try_current().is_ok() {
             return tokio::task::block_in_place(move || {
@@ -44,6 +48,8 @@ impl ServerClient {
                     aggregate_id,
                     event_type,
                     payload,
+                    patch.clone(),
+                    note.clone(),
                 )
             });
         }
@@ -55,6 +61,8 @@ impl ServerClient {
             aggregate_id,
             event_type,
             payload,
+            patch,
+            note,
         )
     }
 }
@@ -64,7 +72,12 @@ struct AppendEventRequest<'a> {
     aggregate_type: &'a str,
     aggregate_id: &'a str,
     event_type: &'a str,
-    payload: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -78,7 +91,9 @@ fn append_event_blocking(
     aggregate_type: String,
     aggregate_id: String,
     event_type: String,
-    payload: Value,
+    payload: Option<Value>,
+    patch: Option<Value>,
+    note: Option<String>,
 ) -> Result<EventRecord> {
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
@@ -93,6 +108,8 @@ fn append_event_blocking(
         aggregate_id,
         event_type,
         payload,
+        patch,
+        note,
     )
 }
 
@@ -103,13 +120,17 @@ fn append_event_impl(
     aggregate_type: String,
     aggregate_id: String,
     event_type: String,
-    payload: Value,
+    payload: Option<Value>,
+    patch: Option<Value>,
+    note: Option<String>,
 ) -> Result<EventRecord> {
     let request = AppendEventRequest {
         aggregate_type: &aggregate_type,
         aggregate_id: &aggregate_id,
         event_type: &event_type,
-        payload: &payload,
+        payload: payload.as_ref(),
+        patch: patch.as_ref(),
+        note: note.as_deref(),
     };
     let url = format!("{}/v1/events", base_url);
 

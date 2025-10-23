@@ -1,14 +1,14 @@
 [package]
 name = "eventdbx"
 description = "An event-sourced, key-value, write-side database system."
-version = "1.15.3"
+version = "2.0.3"
 edition = "2024"
 repository = "https://github.com/thachp/eventdbx"
 keywords = [
   "immutable",
   "events",
   "event-sourcing",
-  "event-store",
+  "database",
   "cqrs"
 ]
 categories = ["database"]
@@ -84,6 +84,8 @@ tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
 semver = "1.0"
 validator = { version = "0.16", features = ["card"] }
+json-patch = "1.2"
+jsonwebtoken = "9.3"
 
 [dev-dependencies]
 fake = "3"

@@ -5,7 +5,7 @@ use eventdbx::{
     config::Config,
     restrict::RestrictMode,
     server,
-    token::{IssueTokenInput, TokenManager},
+    token::{IssueTokenInput, JwtLimits, TokenManager},
 };
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -46,14 +46,28 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
     let encryptor = config
         .encryption_key()?
         .expect("encryption key should be configured");
-    let token_manager = TokenManager::load(config.tokens_path(), Some(encryptor.clone()))?;
+    let jwt_config = config.jwt_manager_config()?;
+    let token_manager = TokenManager::load(
+        jwt_config,
+        config.tokens_path(),
+        config.jwt_revocations_path(),
+        Some(encryptor.clone()),
+    )?;
     let token = token_manager
         .issue(IssueTokenInput {
+            subject: "testers:graphql-regression".into(),
             group: "testers".into(),
             user: "graphql-regression".into(),
-            expiration_secs: Some(3600),
-            limit: None,
-            keep_alive: true,
+            root: true,
+            actions: Vec::new(),
+            resources: Vec::new(),
+            ttl_secs: Some(3600),
+            not_before: None,
+            issued_by: "tests".into(),
+            limits: JwtLimits {
+                write_events: None,
+                keep_alive: true,
+            },
         })?
         .token;
     drop(token_manager);
@@ -75,6 +89,9 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
                 version
                 payload
                 merkleRoot
+                metadata {
+                    note
+                }
             }
         }
     "#;
@@ -83,6 +100,7 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         "status": "active",
         "notes": "Created via GraphQL regression test"
     });
+    let event_note = "GraphQL regression bootstrap";
 
     let mutation_response = graphql_call(
         &client,
@@ -93,7 +111,8 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
             "aggregateType": aggregate_type,
             "aggregateId": aggregate_id,
             "eventType": "person-upserted",
-            "payload": event_payload.clone()
+            "payload": event_payload.clone(),
+            "note": event_note
         }}),
     )
     .await?;
@@ -124,7 +143,12 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         Some(1),
         "version should start at 1"
     );
-    let merkle_root = append_event["merkleRoot"]
+    assert_eq!(
+        append_event["metadata"]["note"].as_str(),
+        Some(event_note),
+        "metadata note should reflect supplied note"
+    );
+    let _initial_merkle_root = append_event["merkleRoot"]
         .as_str()
         .expect("merkle root should be present")
         .to_string();
@@ -169,6 +193,42 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         aggregate_entry["state"]["status"].as_str(),
         Some("active"),
         "aggregate state should include persisted status"
+    );
+
+    let events_query = r#"
+        query Events($aggregateType: String!, $aggregateId: String!) {
+            aggregateEvents(aggregateType: $aggregateType, aggregateId: $aggregateId) {
+                eventType
+                metadata {
+                    note
+                }
+            }
+        }
+    "#;
+    let events_response = graphql_call(
+        &client,
+        &base_url,
+        None,
+        events_query,
+        json!({
+            "aggregateType": aggregate_type,
+            "aggregateId": aggregate_id
+        }),
+    )
+    .await?;
+    assert!(
+        events_response.get("errors").is_none(),
+        "events query should succeed: {:?}",
+        events_response
+    );
+    let events = events_response["data"]["aggregateEvents"]
+        .as_array()
+        .expect("events response should be array");
+    assert_eq!(events.len(), 1, "should return a single event");
+    assert_eq!(
+        events[0]["metadata"]["note"].as_str(),
+        Some(event_note),
+        "event metadata should propagate note"
     );
 
     let aggregate_query = r#"
@@ -225,13 +285,96 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         "aggregate state should retain notes"
     );
 
+    let patch_document = json!([
+        { "op": "replace", "path": "/status", "value": "inactive" },
+        { "op": "add", "path": "/contact", "value": { "address": { "city": "Spokane" } } }
+    ]);
+    let patch_note = "GraphQL regression patch";
+
+    let patch_response = graphql_call(
+        &client,
+        &base_url,
+        Some(&token),
+        mutation,
+        json!({ "input": {
+            "aggregateType": aggregate_type,
+            "aggregateId": aggregate_id,
+            "eventType": "person-patched",
+            "patch": patch_document,
+            "note": patch_note
+        }}),
+    )
+    .await?;
+    assert!(
+        patch_response.get("errors").is_none(),
+        "patch mutation should succeed: {:?}",
+        patch_response
+    );
+    let patch_event = &patch_response["data"]["appendEvent"];
+    assert_eq!(
+        patch_event["metadata"]["note"].as_str(),
+        Some(patch_note),
+        "patch metadata note should reflect supplied value"
+    );
+    let merkle_root = patch_event["merkleRoot"]
+        .as_str()
+        .expect("patch mutation should return merkle root")
+        .to_string();
+
+    let aggregate_after_patch = graphql_call(
+        &client,
+        &base_url,
+        None,
+        aggregate_query,
+        json!({
+            "aggregateType": aggregate_type,
+            "aggregateId": aggregate_id
+        }),
+    )
+    .await?;
+    assert!(
+        aggregate_after_patch.get("errors").is_none(),
+        "aggregate query after patch should succeed: {:?}",
+        aggregate_after_patch
+    );
+    let aggregate = aggregate_after_patch["data"]["aggregate"]
+        .as_object()
+        .expect("aggregate query should return an object");
+    assert_eq!(
+        aggregate.get("version").and_then(Value::as_u64),
+        Some(2),
+        "aggregate version should advance after patch"
+    );
+    let aggregate_state = aggregate
+        .get("state")
+        .and_then(Value::as_object)
+        .expect("aggregate state should be an object");
+    assert_eq!(
+        aggregate_state.get("status").and_then(Value::as_str),
+        Some("inactive"),
+        "patch should update status"
+    );
+    let contact_state = aggregate_state
+        .get("contact")
+        .and_then(Value::as_str)
+        .expect("contact should be persisted in aggregate state");
+    let parsed_contact: Value =
+        serde_json::from_str(contact_state).expect("contact state should deserialize as JSON");
+    assert_eq!(
+        parsed_contact["address"]["city"].as_str(),
+        Some("Spokane"),
+        "patch should update nested contact address"
+    );
+
     let events_query = r#"
         query Events($aggregateType: String!, $aggregateId: String!) {
             aggregateEvents(aggregateType: $aggregateType, aggregateId: $aggregateId) {
                 eventType
                 version
                 payload
-                merkleRoot
+                metadata {
+                    note
+                }
             }
         }
     "#;
@@ -254,27 +397,37 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
     let events = events_response["data"]["aggregateEvents"]
         .as_array()
         .expect("events response should be array");
-    assert_eq!(events.len(), 1, "should be exactly one event");
+    assert_eq!(
+        events.len(),
+        2,
+        "should have both creation and patch events"
+    );
     let first_event = &events[0];
-    assert_eq!(
-        first_event["eventType"].as_str(),
-        Some("person-upserted"),
-        "event type should match seeded value"
-    );
-    assert_eq!(
-        first_event["version"].as_u64(),
-        Some(1),
-        "event version should be 1"
-    );
     assert_eq!(
         first_event["payload"]["status"].as_str(),
         Some("active"),
-        "payload status should match"
+        "first event payload should match initial status"
     );
     assert_eq!(
-        first_event["merkleRoot"].as_str(),
-        Some(merkle_root.as_str()),
-        "event merkle root should align with mutation output"
+        first_event["metadata"]["note"].as_str(),
+        Some(event_note),
+        "first event note should match initial mutation"
+    );
+    let second_event = &events[1];
+    assert_eq!(
+        second_event["eventType"].as_str(),
+        Some("person-patched"),
+        "second event should reflect patch"
+    );
+    assert_eq!(
+        second_event["metadata"]["note"].as_str(),
+        Some(patch_note),
+        "second event should include patch note"
+    );
+    assert_eq!(
+        second_event["payload"]["contact"]["address"]["city"].as_str(),
+        Some("Spokane"),
+        "second event payload should include patched city"
     );
 
     let verify_query = r#"

@@ -10,7 +10,6 @@ use crate::error::EventError;
 use crate::restrict;
 use crate::server::{AppState, extract_bearer_token, run_cli_json};
 use crate::store::{AggregateState, EventMetadata, EventRecord};
-use crate::token::AccessKind;
 
 #[derive(Clone)]
 pub struct GraphqlState {
@@ -179,8 +178,10 @@ impl MutationRoot {
             .map_err(|_| async_graphql::Error::from(EventError::Unauthorized))?;
         let token = extract_bearer_token(headers)
             .ok_or_else(|| async_graphql::Error::from(EventError::Unauthorized))?;
-        app.tokens()
-            .authorize(&token, AccessKind::Write)
+        let resource = format!("aggregate:{}:{}", input.aggregate_type, input.aggregate_id);
+        let _claims = app
+            .tokens()
+            .authorize_action(&token, "aggregate.append", Some(resource.as_str()))
             .map_err(async_graphql::Error::from)?;
 
         let mode = app.restrict();
@@ -193,21 +194,48 @@ impl MutationRoot {
                     )));
                 }
             }
-            schemas.validate_event(&input.aggregate_type, &input.event_type, &input.payload)?;
+            if let Some(payload) = &input.payload {
+                schemas.validate_event(&input.aggregate_type, &input.event_type, payload)?;
+            }
         }
 
-        let payload_json = serde_json::to_string(&input.payload).map_err(|err| {
-            async_graphql::Error::from(EventError::Serialization(err.to_string()))
-        })?;
-        let args = vec![
+        let mut args = vec![
             "aggregate".to_string(),
             "apply".to_string(),
             input.aggregate_type.clone(),
             input.aggregate_id.clone(),
             input.event_type.clone(),
-            "--payload".to_string(),
-            payload_json,
         ];
+        match (&input.payload, &input.patch) {
+            (Some(payload), None) => {
+                let payload_json = serde_json::to_string(payload).map_err(|err| {
+                    async_graphql::Error::from(EventError::Serialization(err.to_string()))
+                })?;
+                args.push("--payload".to_string());
+                args.push(payload_json);
+            }
+            (None, Some(patch)) => {
+                let patch_json = serde_json::to_string(patch).map_err(|err| {
+                    async_graphql::Error::from(EventError::Serialization(err.to_string()))
+                })?;
+                args.push("--patch".to_string());
+                args.push(patch_json);
+            }
+            (Some(_), Some(_)) => {
+                return Err(async_graphql::Error::from(EventError::InvalidSchema(
+                    "payload and patch cannot both be provided".into(),
+                )));
+            }
+            (None, None) => {
+                return Err(async_graphql::Error::from(EventError::InvalidSchema(
+                    "either payload or patch must be provided".into(),
+                )));
+            }
+        }
+        if let Some(note) = input.note.as_ref() {
+            args.push("--note".to_string());
+            args.push(note.clone());
+        }
         let record: EventRecord = run_cli_json(args)
             .await
             .map_err(async_graphql::Error::from)?;
@@ -221,7 +249,9 @@ struct AppendEventInput {
     aggregate_type: String,
     aggregate_id: String,
     event_type: String,
-    payload: serde_json::Value,
+    payload: Option<serde_json::Value>,
+    patch: Option<serde_json::Value>,
+    note: Option<String>,
 }
 
 #[derive(async_graphql::SimpleObject)]
@@ -289,6 +319,7 @@ struct EventMetadataObject {
     event_id: String,
     created_at: String,
     issued_by: Option<ActorClaimsObject>,
+    note: Option<String>,
 }
 
 impl From<EventMetadata> for EventMetadataObject {
@@ -297,6 +328,7 @@ impl From<EventMetadata> for EventMetadataObject {
             event_id: value.event_id.to_string(),
             created_at: value.created_at.to_rfc3339(),
             issued_by: value.issued_by.map(Into::into),
+            note: value.note,
         }
     }
 }

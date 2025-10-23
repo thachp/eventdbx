@@ -6,6 +6,10 @@ document.addEventListener("DOMContentLoaded", () => {
     return;
   }
 
+  const isMobile = () => window.innerWidth < 768;
+
+  const isNavOpen = () => !nav.classList.contains("hidden");
+
   const openNav = () => {
     nav.classList.remove("hidden");
     nav.classList.add("flex");
@@ -38,12 +42,29 @@ document.addEventListener("DOMContentLoaded", () => {
 
   nav.querySelectorAll("a").forEach((link) => {
     link.addEventListener("click", () => {
-      if (window.innerWidth < 768) {
+      if (isMobile()) {
         closeNav();
       }
     });
   });
 
   window.addEventListener("resize", syncNavToViewport);
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && isMobile() && isNavOpen()) {
+      closeNav();
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!isMobile() || !isNavOpen()) {
+      return;
+    }
+    if (nav.contains(event.target) || toggle.contains(event.target)) {
+      return;
+    }
+    closeNav();
+  });
+
   syncNavToViewport();
 });

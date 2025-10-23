@@ -1231,6 +1231,7 @@ mod tests {
                         event.to_string(),
                         EventSchema {
                             fields: fields.iter().map(|value| value.to_string()).collect(),
+                            notes: None,
                         },
                     )
                 })

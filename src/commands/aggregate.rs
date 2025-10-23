@@ -20,9 +20,9 @@ use eventdbx::{
     merkle::compute_merkle_root,
     plugin::PluginManager,
     restrict::{self, RestrictMode},
-    schema::SchemaManager,
+    schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{self, ActorClaims, AppendEvent, EventRecord, EventStore, payload_to_map},
-    token::{IssueTokenInput, TokenManager},
+    token::{IssueTokenInput, JwtLimits, TokenManager},
 };
 
 use crate::commands::client::ServerClient;
@@ -79,6 +79,14 @@ pub struct AggregateApplyArgs {
     /// Raw JSON payload to use instead of key-value fields
     #[arg(long)]
     pub payload: Option<String>,
+
+    /// Optional note associated with the event (up to 128 characters)
+    #[arg(long, value_name = "NOTE")]
+    pub note: Option<String>,
+
+    /// JSON Patch (RFC 6902) document to apply server-side
+    #[arg(long)]
+    pub patch: Option<String>,
 }
 
 #[derive(Args)]
@@ -331,32 +339,65 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 stage,
                 token,
                 payload: payload_arg,
+                note,
+                patch,
             } = args;
             if payload_arg.is_some() && !fields.is_empty() {
                 bail!("--payload cannot be used together with --field");
+            }
+            if patch.is_some() && (payload_arg.is_some() || !fields.is_empty()) {
+                bail!("--patch cannot be combined with --payload or --field");
             }
             let payload = match payload_arg {
                 Some(raw) => serde_json::from_str(&raw)
                     .with_context(|| "failed to parse JSON payload provided via --payload")?,
                 None => collect_payload(fields),
             };
+            let patch_ops = match patch {
+                Some(raw) => Some(
+                    serde_json::from_str::<serde_json::Value>(&raw)
+                        .with_context(|| "failed to parse JSON patch provided via --patch")?,
+                ),
+                None => None,
+            };
+            if let Some(ref note_value) = note {
+                if note_value.chars().count() > MAX_EVENT_NOTE_LENGTH {
+                    bail!("note cannot exceed {} characters", MAX_EVENT_NOTE_LENGTH);
+                }
+            }
+
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
             if config.restrict.enforces_validation() {
                 ensure_schema_for_mode(config.restrict, &schema_manager, &aggregate)?;
-                schema_manager.validate_event(&aggregate, &event, &payload)?;
+                if patch_ops.is_none() {
+                    schema_manager.validate_event(&aggregate, &event, &payload)?;
+                }
             }
 
             if stage {
                 match EventStore::open(config.event_store_path(), config.encryption_key()?) {
                     Ok(store) => {
+                        let effective_payload = if let Some(ref ops) = patch_ops {
+                            store.prepare_payload_from_patch(&aggregate, &aggregate_id, ops)?
+                        } else {
+                            payload.clone()
+                        };
+                        if patch_ops.is_some() && config.restrict.enforces_validation() {
+                            schema_manager.validate_event(
+                                &aggregate,
+                                &event,
+                                &effective_payload,
+                            )?;
+                        }
                         {
                             let mut tx = store.transaction()?;
                             tx.append(AppendEvent {
                                 aggregate_type: aggregate.clone(),
                                 aggregate_id: aggregate_id.clone(),
                                 event_type: event.clone(),
-                                payload: payload.clone(),
+                                payload: effective_payload.clone(),
                                 issued_by: None,
+                                note: note.clone(),
                             })?;
                         }
 
@@ -364,8 +405,9 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                             aggregate,
                             aggregate_id,
                             event,
-                            payload,
+                            payload: effective_payload,
                             issued_by: None,
+                            note,
                         };
                         let staging_path = config.staging_path();
                         append_staged_event(staging_path.as_path(), staged_event)?;
@@ -385,12 +427,21 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             match EventStore::open(config.event_store_path(), encryption) {
                 Ok(store) => {
                     let plugins = PluginManager::from_config(&config)?;
+                    let effective_payload = if let Some(ref ops) = patch_ops {
+                        store.prepare_payload_from_patch(&aggregate, &aggregate_id, ops)?
+                    } else {
+                        payload.clone()
+                    };
+                    if patch_ops.is_some() && config.restrict.enforces_validation() {
+                        schema_manager.validate_event(&aggregate, &event, &effective_payload)?;
+                    }
                     let record = store.append(AppendEvent {
                         aggregate_type: aggregate.clone(),
                         aggregate_id: aggregate_id.clone(),
                         event_type: event.clone(),
-                        payload: payload.clone(),
+                        payload: effective_payload.clone(),
                         issued_by: None,
+                        note: note.clone(),
                     })?;
 
                     maybe_auto_snapshot(&store, &schema_manager, &record);
@@ -430,7 +481,13 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                         &aggregate,
                         &aggregate_id,
                         &event,
-                        &payload,
+                        if patch_ops.is_some() {
+                            None
+                        } else {
+                            Some(&payload)
+                        },
+                        patch_ops.as_ref(),
+                        note.as_deref(),
                     )?;
                     println!("{}", serde_json::to_string_pretty(&record)?);
                     return Ok(());
@@ -623,12 +680,14 @@ fn proxy_append_via_http(
     aggregate: &str,
     aggregate_id: &str,
     event: &str,
-    payload: &Value,
+    payload: Option<&Value>,
+    patch: Option<&Value>,
+    note: Option<&str>,
 ) -> Result<EventRecord> {
     let token = ensure_proxy_token(config, token)?;
     let client = ServerClient::new(config)?;
     client
-        .append_event(&token, aggregate, aggregate_id, event, payload)
+        .append_event(&token, aggregate, aggregate_id, event, payload, patch, note)
         .with_context(|| {
             format!(
                 "failed to append event via running server on port {}",
@@ -649,14 +708,29 @@ fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> 
 
 fn issue_ephemeral_token(config: &Config) -> Result<String> {
     let encryptor = config.encryption_key()?;
-    let manager = TokenManager::load(config.tokens_path(), encryptor)?;
+    let jwt_config = config.jwt_manager_config()?;
+    let manager = TokenManager::load(
+        jwt_config,
+        config.tokens_path(),
+        config.jwt_revocations_path(),
+        encryptor,
+    )?;
     let user = proxy_user_identity();
+    let subject = format!("cli:{}", user);
     let record = manager.issue(IssueTokenInput {
+        subject,
         group: "cli".to_string(),
         user,
-        expiration_secs: Some(60),
-        limit: Some(1),
-        keep_alive: false,
+        root: true,
+        actions: Vec::new(),
+        resources: Vec::new(),
+        ttl_secs: Some(120),
+        not_before: None,
+        issued_by: "cli".to_string(),
+        limits: JwtLimits {
+            write_events: None,
+            keep_alive: false,
+        },
     })?;
     Ok(record.token)
 }
@@ -674,10 +748,7 @@ fn proxy_user_identity() -> String {
             }
         });
 
-    match env_value {
-        Some(user) => format!("cli:{}", user),
-        None => "cli:local".to_string(),
-    }
+    env_value.unwrap_or_else(|| "local".to_string())
 }
 
 fn normalize_token(token: String) -> Option<String> {
@@ -1119,6 +1190,8 @@ struct StagedEvent {
     payload: Value,
     #[serde(default)]
     issued_by: Option<StagedIssuedBy>,
+    #[serde(default)]
+    note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1135,6 +1208,7 @@ impl StagedEvent {
             event_type: self.event.clone(),
             payload: self.payload.clone(),
             issued_by: self.issued_by.clone().map(Into::into),
+            note: self.note.clone(),
         }
     }
 }

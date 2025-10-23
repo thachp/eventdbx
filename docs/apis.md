@@ -1,0 +1,132 @@
+---
+title: API Reference
+description: Integrate EventDBX via REST, GraphQL, gRPC, replication, and the Admin API.
+nav_id: apis
+---
+
+# API Reference
+
+EventDBX exposes multiple surfaces so you can choose the right tool for each integration. Tokens issued by the CLI are accepted everywhere unless specifically noted.
+
+## REST
+
+Base URL defaults to `http://localhost:7070`.
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /health` | Liveness probe (no auth required). |
+| `GET /v1/aggregates` | List aggregates (`skip`/`take` query params). |
+| `GET /v1/aggregates/{type}/{id}` | Fetch the current aggregate state. |
+| `GET /v1/aggregates/{type}/{id}/events` | Stream events with pagination. |
+| `POST /v1/events` | Append an event. |
+| `GET /v1/aggregates/{type}/{id}/verify` | Return the aggregate's Merkle root. |
+
+Example request:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer ${EVENTDBX_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "aggregate_type": "patient",
+        "aggregate_id": "p-001",
+        "event_type": "patient-updated",
+        "payload": {
+          "status": "inactive",
+          "note": "Archived via REST"
+        }
+      }' \
+  http://localhost:7070/v1/events
+```
+
+## GraphQL
+
+GraphQL shares the REST listener (`/graphql`). Supply the same bearer token.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer ${EVENTDBX_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "query": "query Recent($take: Int!) { aggregates(take: $take) { aggregate_type aggregate_id version state } }",
+        "variables": { "take": 5 }
+      }' \
+  http://localhost:7070/graphql
+```
+
+Mutations follow a similar shape:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer ${EVENTDBX_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "query": "mutation Append($input: AppendEventInput!) { appendEvent(input: $input) { aggregate_type aggregate_id version payload } }",
+        "variables": {
+          "input": {
+            "aggregate_type": "patient",
+            "aggregate_id": "p-001",
+            "event_type": "patient-updated",
+            "payload": { "status": "active" }
+          }
+        }
+      }' \
+  http://localhost:7070/graphql
+```
+
+## gRPC
+
+Enable gRPC with `dbx start --api grpc` (or `--api all`). Use `grpcurl` for quick checks:
+
+```bash
+grpcurl \
+  -H "authorization: Bearer ${EVENTDBX_TOKEN}" \
+  -d '{
+        "aggregate_type": "patient",
+        "aggregate_id": "p-001",
+        "event_type": "patient-updated",
+        "payload_json": "{\"status\":\"inactive\"}"
+      }' \
+  -plaintext 127.0.0.1:7070 dbx.api.EventService/AppendEvent
+```
+
+The service mirrors REST operations: `AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, `VerifyAggregate`, and `Health`.
+
+## Replication socket
+
+`dbx push` and `dbx pull` connect over the Cap'n Proto socket defined in `[socket].bind_addr` (default `0.0.0.0:6363`). Remotes authenticate using pinned Ed25519 public keys:
+
+```bash
+dbx remote add standby1 10.10.0.5 \
+  --public-key $(dbx remote key) \
+  --port 7443
+```
+
+Dry-run pushes report pending changes without transferring events:
+
+```bash
+dbx push standby1 --dry-run --aggregate patient
+```
+
+## Admin API
+
+Enable it with:
+
+```bash
+dbx config \
+  --admin-enabled true \
+  --admin-master-key "rotate-me-please"
+```
+
+Requests must include the shared secret as `X-Admin-Key` or a bearer token. Example session:
+
+```bash
+curl -H "X-Admin-Key: rotate-me-please" http://127.0.0.1:7171/admin/tokens
+
+curl -X POST -H "X-Admin-Key: rotate-me-please" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"standby1","endpoint":"tcp://10.10.0.5:7443","public_key":"BASE64"}' \
+  http://127.0.0.1:7171/admin/remotes/standby1
+```
+
+Endpoints include `/admin/tokens`, `/admin/schemas`, `/admin/remotes`, and `/admin/plugins`, all mirroring the behavior of their CLI counterparts.

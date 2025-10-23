@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, path::PathBuf, str};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    str,
+};
 
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, MutexGuard};
@@ -7,11 +11,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use json_patch::Patch;
+
 use super::{
     encryption::{self, Encryptor},
     error::{EventError, Result},
     merkle::{compute_merkle_root, empty_root},
-    token::TokenGrant,
+    schema::MAX_EVENT_NOTE_LENGTH,
 };
 
 const SEP: u8 = 0x1F;
@@ -37,6 +43,8 @@ pub struct EventMetadata {
     pub event_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub issued_by: Option<ActorClaims>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,21 +53,20 @@ pub struct ActorClaims {
     pub user: String,
 }
 
-impl From<TokenGrant> for ActorClaims {
-    fn from(value: TokenGrant) -> Self {
-        Self {
-            group: value.group,
-            user: value.user,
-        }
-    }
-}
-
 impl<'a> Transaction<'a> {
     pub fn append(&mut self, input: AppendEvent) -> Result<EventRecord> {
         let key = AggregateKey::new(input.aggregate_type.clone(), input.aggregate_id.clone());
         let (meta, state) = self.ensure_cache(&key)?;
         if meta.archived {
             return Err(EventError::AggregateArchived);
+        }
+        if let Some(note) = input.note.as_ref() {
+            if note.chars().count() > MAX_EVENT_NOTE_LENGTH {
+                return Err(EventError::InvalidSchema(format!(
+                    "event note cannot exceed {} characters",
+                    MAX_EVENT_NOTE_LENGTH
+                )));
+            }
         }
         let record = apply_event(meta, state, input);
         let stored_record = self.store.encode_record(&record)?;
@@ -155,6 +162,7 @@ fn apply_event(
         event_type,
         payload,
         issued_by,
+        note,
     } = input;
 
     debug_assert_eq!(&meta.aggregate_type, &aggregate_type);
@@ -189,6 +197,7 @@ fn apply_event(
             event_id,
             created_at,
             issued_by,
+            note,
         },
         version,
         hash,
@@ -201,6 +210,83 @@ fn batch_put(batch: &mut WriteBatch, key: Vec<u8>, value: Vec<u8>) -> Result<()>
     Ok(())
 }
 
+fn decode_pointer_segment(segment: &str) -> String {
+    let mut result = String::with_capacity(segment.len());
+    let mut chars = segment.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '~' {
+            if let Some(next) = chars.next() {
+                match next {
+                    '0' => result.push('~'),
+                    '1' => result.push('/'),
+                    other => {
+                        result.push('~');
+                        result.push(other);
+                    }
+                }
+            } else {
+                result.push('~');
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn top_level_key_from_path(path: &str) -> std::result::Result<String, String> {
+    if !path.starts_with('/') {
+        return Err(format!("patch path '{}' must start with '/'", path));
+    }
+    let trimmed = &path[1..];
+    if trimmed.is_empty() {
+        return Err("patch operations targeting the document root are not supported".into());
+    }
+    let segment = trimmed
+        .split('/')
+        .next()
+        .expect("split returns at least one segment");
+    Ok(decode_pointer_segment(segment))
+}
+
+fn collect_top_level_keys(patch: &Value) -> std::result::Result<BTreeSet<String>, String> {
+    let array = patch
+        .as_array()
+        .ok_or_else(|| "patch must be an array".to_string())?;
+    let mut keys = BTreeSet::new();
+    for entry in array {
+        let op = entry
+            .get("op")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "patch entry is missing 'op'".to_string())?;
+        if op != "add" && op != "replace" {
+            return Err(format!("unsupported patch operation '{}'", op));
+        }
+        let path = entry
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "patch entry is missing 'path'".to_string())?;
+        let key = top_level_key_from_path(path)?;
+        keys.insert(key);
+    }
+    Ok(keys)
+}
+
+fn parse_state_value(raw: &str) -> Value {
+    if let Ok(parsed) = serde_json::from_str(raw) {
+        return parsed;
+    }
+    Value::String(raw.to_string())
+}
+
+fn state_map_to_value(map: &BTreeMap<String, String>) -> Value {
+    let mut object = serde_json::Map::new();
+    for (key, value) in map {
+        object.insert(key.clone(), parse_state_value(value));
+    }
+    Value::Object(object)
+}
+
 #[derive(Debug, Clone)]
 pub struct AppendEvent {
     pub aggregate_type: String,
@@ -208,6 +294,7 @@ pub struct AppendEvent {
     pub event_type: String,
     pub payload: Value,
     pub issued_by: Option<ActorClaims>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,9 +424,68 @@ impl EventStore {
         })
     }
 
+    pub fn prepare_payload_from_patch(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        patch_value: &Value,
+    ) -> Result<Value> {
+        if !patch_value.is_array() {
+            return Err(EventError::InvalidSchema(
+                "patch must be provided as a JSON array".into(),
+            ));
+        }
+
+        let top_level_keys =
+            collect_top_level_keys(patch_value).map_err(EventError::InvalidSchema)?;
+        if top_level_keys.is_empty() {
+            return Err(EventError::InvalidSchema(
+                "patch must modify at least one path".into(),
+            ));
+        }
+
+        let patch: Patch = serde_json::from_value(patch_value.clone())
+            .map_err(|err| EventError::InvalidSchema(format!("failed to parse patch: {}", err)))?;
+
+        let state_map = self.load_state_map(aggregate_type, aggregate_id)?;
+        let mut document = state_map_to_value(&state_map);
+        if !document.is_object() {
+            document = Value::Object(serde_json::Map::new());
+        }
+
+        json_patch::patch(&mut document, &patch)
+            .map_err(|err| EventError::InvalidSchema(format!("failed to apply patch: {}", err)))?;
+
+        let document_object = document.as_object().ok_or_else(|| {
+            EventError::InvalidSchema("patched document must be a JSON object".into())
+        })?;
+
+        let mut payload = serde_json::Map::new();
+        for key in top_level_keys {
+            let value = document_object.get(&key).ok_or_else(|| {
+                EventError::InvalidSchema(format!(
+                    "patch removed key '{}' and removals are not supported",
+                    key
+                ))
+            })?;
+            payload.insert(key, value.clone());
+        }
+
+        Ok(Value::Object(payload))
+    }
+
     pub fn append(&self, input: AppendEvent) -> Result<EventRecord> {
         self.ensure_writable()?;
         let _guard = self.write_lock.lock();
+
+        if let Some(note) = input.note.as_ref() {
+            if note.chars().count() > MAX_EVENT_NOTE_LENGTH {
+                return Err(EventError::InvalidSchema(format!(
+                    "event note cannot exceed {} characters",
+                    MAX_EVENT_NOTE_LENGTH
+                )));
+            }
+        }
 
         let aggregate_type = input.aggregate_type.clone();
         let aggregate_id = input.aggregate_id.clone();
@@ -1021,6 +1167,7 @@ mod tests {
                     event_type: "patient-created".into(),
                     payload: payload.clone(),
                     issued_by: None,
+                    note: None,
                 })
                 .unwrap();
 
@@ -1051,6 +1198,7 @@ mod tests {
                 event_type: "order-created".into(),
                 payload: serde_json::json!({ "status": "processing" }),
                 issued_by: None,
+                note: None,
             })
             .unwrap();
         assert_eq!(first.version, 1);
@@ -1065,6 +1213,7 @@ mod tests {
                     "tracking": "abc123"
                 }),
                 issued_by: None,
+                note: None,
             })
             .unwrap();
         assert_eq!(second.version, 2);
@@ -1097,6 +1246,7 @@ mod tests {
                 event_type: "invoice-created".into(),
                 payload: serde_json::json!({ "total": "100.00" }),
                 issued_by: None,
+                note: None,
             })
             .unwrap();
         }
@@ -1120,6 +1270,7 @@ mod tests {
                 event_type: "order-created".into(),
                 payload,
                 issued_by: None,
+                note: None,
             })
             .unwrap();
 
@@ -1141,11 +1292,133 @@ mod tests {
                 event_type: "order-updated".into(),
                 payload: serde_json::json!({}),
                 issued_by: None,
+                note: None,
             })
             .unwrap_err();
         assert!(matches!(err, crate::error::EventError::AggregateArchived));
 
         let state = store.set_archive("order", "order-1", false, None).unwrap();
         assert!(!state.archived);
+    }
+
+    #[test]
+    fn append_event_with_note_persists_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None).unwrap();
+
+        let note_text = "initial import".to_string();
+        let record = store
+            .append(AppendEvent {
+                aggregate_type: "account".into(),
+                aggregate_id: "acct-1".into(),
+                event_type: "account-created".into(),
+                payload: serde_json::json!({ "status": "active" }),
+                issued_by: None,
+                note: Some(note_text.clone()),
+            })
+            .unwrap();
+
+        assert_eq!(record.metadata.note.as_deref(), Some(note_text.as_str()));
+    }
+
+    #[test]
+    fn reject_event_note_exceeding_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None).unwrap();
+
+        let long_note = "x".repeat(MAX_EVENT_NOTE_LENGTH + 1);
+        let err = store
+            .append(AppendEvent {
+                aggregate_type: "account".into(),
+                aggregate_id: "acct-2".into(),
+                event_type: "account-created".into(),
+                payload: serde_json::json!({ "status": "pending" }),
+                issued_by: None,
+                note: Some(long_note),
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, crate::error::EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn prepare_payload_from_patch_updates_nested_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path.clone(), None).unwrap();
+
+        store
+            .append(AppendEvent {
+                aggregate_type: "patient".into(),
+                aggregate_id: "p-1".into(),
+                event_type: "patient-created".into(),
+                payload: serde_json::json!({
+                    "status": "active",
+                    "contact": {
+                        "address": { "city": "Portland" }
+                    }
+                }),
+                issued_by: None,
+                note: None,
+            })
+            .unwrap();
+
+        let patch = serde_json::json!([
+            { "op": "replace", "path": "/status", "value": "inactive" },
+            { "op": "replace", "path": "/contact/address/city", "value": "Spokane" }
+        ]);
+
+        let payload = store
+            .prepare_payload_from_patch("patient", "p-1", &patch)
+            .unwrap();
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "contact": { "address": { "city": "Spokane" } },
+                "status": "inactive"
+            })
+        );
+    }
+
+    #[test]
+    fn prepare_payload_from_patch_rejects_unsupported_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None).unwrap();
+
+        let patch = serde_json::json!([
+            { "op": "remove", "path": "/status" }
+        ]);
+
+        let err = store
+            .prepare_payload_from_patch("patient", "p-unknown", &patch)
+            .unwrap_err();
+
+        assert!(matches!(err, crate::error::EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn prepare_payload_from_patch_supports_add_on_new_aggregate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None).unwrap();
+
+        let patch = serde_json::json!([
+            { "op": "add", "path": "/status", "value": "inactive" }
+        ]);
+
+        let payload = store
+            .prepare_payload_from_patch("patient", "p-new", &patch)
+            .unwrap();
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "status": "inactive"
+            })
+        );
     }
 }
