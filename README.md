@@ -183,9 +183,9 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `dbx plugin remove <label>`
 - `dbx plugin test`
 - `dbx plugin list`
-- `dbx plugin queue`
-- `dbx plugin queue clear`
-- `dbx plugin queue retry [--event-id <uuid>]`
+- `dbx queue`
+- `dbx queue clear`
+- `dbx queue retry [--event-id <uuid>]`
 - `dbx plugin replay <plugin-name> <aggregate> [<aggregate_id>]`
 
 Clearing dead entries prompts for confirmation to avoid accidental removal. Manual retries run the failed events immediately; use `--event-id` to target a specific entry.
@@ -246,7 +246,7 @@ dbx plugin enable search
 
 EventDBX supervises the subprocess, restarts it on failure, and delivers every `EventRecord`/aggregate snapshot over the stream. Plugins that run as independent services can continue to use the TCP/HTTP/GRPC emitters instead.
 
-Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications. Use `dbx plugin queue` to inspect pending/dead event IDs.
+Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications. Use `dbx queue` to inspect pending/dead event IDs.
 
 Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instance requires a unique `--name` so you can update, enable, disable, remove, or replay it later. `plugin enable` validates connectivity (creating directories, touching files, or checking network access) before marking the plugin active. Remove a plugin only after disabling it with `plugin disable <name>`. `plugin replay` resends stored events for a single aggregate instance—or every instance of a type—through the selected plugin.
 
