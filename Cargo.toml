@@ -84,6 +84,7 @@ tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
 semver = "1.0"
 validator = { version = "0.16", features = ["card"] }
+json-patch = "1.2"
 
 [dev-dependencies]
 fake = "3"

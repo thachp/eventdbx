@@ -83,6 +83,10 @@ pub struct AggregateApplyArgs {
     /// Optional note associated with the event (up to 128 characters)
     #[arg(long, value_name = "NOTE")]
     pub note: Option<String>,
+
+    /// JSON Patch (RFC 6902) document to apply server-side
+    #[arg(long)]
+    pub patch: Option<String>,
 }
 
 #[derive(Args)]
@@ -336,14 +340,25 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 token,
                 payload: payload_arg,
                 note,
+                patch,
             } = args;
             if payload_arg.is_some() && !fields.is_empty() {
                 bail!("--payload cannot be used together with --field");
+            }
+            if patch.is_some() && (payload_arg.is_some() || !fields.is_empty()) {
+                bail!("--patch cannot be combined with --payload or --field");
             }
             let payload = match payload_arg {
                 Some(raw) => serde_json::from_str(&raw)
                     .with_context(|| "failed to parse JSON payload provided via --payload")?,
                 None => collect_payload(fields),
+            };
+            let patch_ops = match patch {
+                Some(raw) => Some(
+                    serde_json::from_str::<serde_json::Value>(&raw)
+                        .with_context(|| "failed to parse JSON patch provided via --patch")?,
+                ),
+                None => None,
             };
             if let Some(ref note_value) = note {
                 if note_value.chars().count() > MAX_EVENT_NOTE_LENGTH {
@@ -354,19 +369,33 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
             if config.restrict.enforces_validation() {
                 ensure_schema_for_mode(config.restrict, &schema_manager, &aggregate)?;
-                schema_manager.validate_event(&aggregate, &event, &payload)?;
+                if patch_ops.is_none() {
+                    schema_manager.validate_event(&aggregate, &event, &payload)?;
+                }
             }
 
             if stage {
                 match EventStore::open(config.event_store_path(), config.encryption_key()?) {
                     Ok(store) => {
+                        let effective_payload = if let Some(ref ops) = patch_ops {
+                            store.prepare_payload_from_patch(&aggregate, &aggregate_id, ops)?
+                        } else {
+                            payload.clone()
+                        };
+                        if patch_ops.is_some() && config.restrict.enforces_validation() {
+                            schema_manager.validate_event(
+                                &aggregate,
+                                &event,
+                                &effective_payload,
+                            )?;
+                        }
                         {
                             let mut tx = store.transaction()?;
                             tx.append(AppendEvent {
                                 aggregate_type: aggregate.clone(),
                                 aggregate_id: aggregate_id.clone(),
                                 event_type: event.clone(),
-                                payload: payload.clone(),
+                                payload: effective_payload.clone(),
                                 issued_by: None,
                                 note: note.clone(),
                             })?;
@@ -376,7 +405,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                             aggregate,
                             aggregate_id,
                             event,
-                            payload,
+                            payload: effective_payload,
                             issued_by: None,
                             note,
                         };
@@ -398,11 +427,19 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             match EventStore::open(config.event_store_path(), encryption) {
                 Ok(store) => {
                     let plugins = PluginManager::from_config(&config)?;
+                    let effective_payload = if let Some(ref ops) = patch_ops {
+                        store.prepare_payload_from_patch(&aggregate, &aggregate_id, ops)?
+                    } else {
+                        payload.clone()
+                    };
+                    if patch_ops.is_some() && config.restrict.enforces_validation() {
+                        schema_manager.validate_event(&aggregate, &event, &effective_payload)?;
+                    }
                     let record = store.append(AppendEvent {
                         aggregate_type: aggregate.clone(),
                         aggregate_id: aggregate_id.clone(),
                         event_type: event.clone(),
-                        payload: payload.clone(),
+                        payload: effective_payload.clone(),
                         issued_by: None,
                         note: note.clone(),
                     })?;
@@ -444,7 +481,12 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                         &aggregate,
                         &aggregate_id,
                         &event,
-                        &payload,
+                        if patch_ops.is_some() {
+                            None
+                        } else {
+                            Some(&payload)
+                        },
+                        patch_ops.as_ref(),
                         note.as_deref(),
                     )?;
                     println!("{}", serde_json::to_string_pretty(&record)?);
@@ -638,13 +680,14 @@ fn proxy_append_via_http(
     aggregate: &str,
     aggregate_id: &str,
     event: &str,
-    payload: &Value,
+    payload: Option<&Value>,
+    patch: Option<&Value>,
     note: Option<&str>,
 ) -> Result<EventRecord> {
     let token = ensure_proxy_token(config, token)?;
     let client = ServerClient::new(config)?;
     client
-        .append_event(&token, aggregate, aggregate_id, event, payload, note)
+        .append_event(&token, aggregate, aggregate_id, event, payload, patch, note)
         .with_context(|| {
             format!(
                 "failed to append event via running server on port {}",

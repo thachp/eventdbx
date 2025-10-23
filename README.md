@@ -154,7 +154,7 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 
 ### Aggregates
 
-- `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--stage] [--token <value>] [--note <text>]`  
+- `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--payload <json>] [--patch <json>] [--stage] [--token <value>] [--note <text>]`  
   Appends an event immediately—use `--stage` to queue it for a later commit.
 - `dbx aggregate list [--skip <n>] [--take <n>] [--stage]`  
   Lists aggregates with version, Merkle root, and archive status; pass `--stage` to display queued events instead.
@@ -169,6 +169,8 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
   Flushes all staged events in a single atomic transaction.
 - `dbx aggregate export [<type>] [--all] --output <path> [--format csv|json] [--zip] [--pretty]`  
   Writes the current aggregate state (no metadata) as CSV or JSON. Exports default to one file per aggregate type; pass `--zip` to bundle the output into an archive.
+
+`--payload` and `--patch` are mutually exclusive. Use `--payload` when you want to supply the full document explicitly; use `--patch` for an RFC 6902 JSON Patch that the server applies before validation and persistence.
 
 Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply --stage` to add entries to this queue, inspect them with `aggregate list --stage`, and persist the entire batch with `aggregate commit`. Events are validated against the active schema whenever restriction is `default` or `strict`; the strict mode also insists that a schema exists before anything can be staged. The commit operation writes every pending event in one RocksDB batch, guaranteeing all-or-nothing persistence.
 

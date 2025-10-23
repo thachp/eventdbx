@@ -193,21 +193,44 @@ impl MutationRoot {
                     )));
                 }
             }
-            schemas.validate_event(&input.aggregate_type, &input.event_type, &input.payload)?;
+            if let Some(payload) = &input.payload {
+                schemas.validate_event(&input.aggregate_type, &input.event_type, payload)?;
+            }
         }
 
-        let payload_json = serde_json::to_string(&input.payload).map_err(|err| {
-            async_graphql::Error::from(EventError::Serialization(err.to_string()))
-        })?;
         let mut args = vec![
             "aggregate".to_string(),
             "apply".to_string(),
             input.aggregate_type.clone(),
             input.aggregate_id.clone(),
             input.event_type.clone(),
-            "--payload".to_string(),
-            payload_json,
         ];
+        match (&input.payload, &input.patch) {
+            (Some(payload), None) => {
+                let payload_json = serde_json::to_string(payload).map_err(|err| {
+                    async_graphql::Error::from(EventError::Serialization(err.to_string()))
+                })?;
+                args.push("--payload".to_string());
+                args.push(payload_json);
+            }
+            (None, Some(patch)) => {
+                let patch_json = serde_json::to_string(patch).map_err(|err| {
+                    async_graphql::Error::from(EventError::Serialization(err.to_string()))
+                })?;
+                args.push("--patch".to_string());
+                args.push(patch_json);
+            }
+            (Some(_), Some(_)) => {
+                return Err(async_graphql::Error::from(EventError::InvalidSchema(
+                    "payload and patch cannot both be provided".into(),
+                )));
+            }
+            (None, None) => {
+                return Err(async_graphql::Error::from(EventError::InvalidSchema(
+                    "either payload or patch must be provided".into(),
+                )));
+            }
+        }
         if let Some(note) = input.note.as_ref() {
             args.push("--note".to_string());
             args.push(note.clone());
@@ -225,7 +248,8 @@ struct AppendEventInput {
     aggregate_type: String,
     aggregate_id: String,
     event_type: String,
-    payload: serde_json::Value,
+    payload: Option<serde_json::Value>,
+    patch: Option<serde_json::Value>,
     note: Option<String>,
 }
 

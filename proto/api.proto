@@ -14,6 +14,7 @@ message AppendEventRequest {
   string event_type = 3;
   string payload_json = 4;
   optional string note = 5;
+  optional string patch_json = 6;
 }
 
 message AppendEventResponse {

@@ -141,8 +141,39 @@ impl EventService for GrpcApi {
         let token = Self::extract_token(metadata)?;
         let payload = request.into_inner();
 
-        let payload_value: Value = serde_json::from_str(&payload.payload_json)
-            .map_err(|err| Status::invalid_argument(format!("invalid payload_json: {}", err)))?;
+        let patch_ops = match payload.patch_json.as_ref() {
+            Some(patch_json) => {
+                Some(serde_json::from_str::<Value>(patch_json).map_err(|err| {
+                    Status::invalid_argument(format!("invalid patch_json: {}", err))
+                })?)
+            }
+            None => None,
+        };
+
+        if patch_ops.is_some() && !payload.payload_json.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "payload_json must be empty when patch_json is provided",
+            ));
+        }
+        if patch_ops.is_none() && payload.payload_json.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "payload_json must be provided when patch_json is absent",
+            ));
+        }
+
+        let store = self.state.store();
+        let payload_value = if let Some(ref patch_value) = patch_ops {
+            store
+                .prepare_payload_from_patch(
+                    &payload.aggregate_type,
+                    &payload.aggregate_id,
+                    patch_value,
+                )
+                .map_err(Self::map_error)?
+        } else {
+            serde_json::from_str(&payload.payload_json)
+                .map_err(|err| Status::invalid_argument(format!("invalid payload_json: {}", err)))?
+        };
 
         self.state
             .tokens()
@@ -166,17 +197,27 @@ impl EventService for GrpcApi {
             }
         }
 
-        let payload_json = serde_json::to_string(&payload_value)
-            .map_err(|err| Status::internal(err.to_string()))?;
         let mut args = vec![
             "aggregate".to_string(),
             "apply".to_string(),
             payload.aggregate_type.clone(),
             payload.aggregate_id.clone(),
             payload.event_type.clone(),
-            "--payload".to_string(),
-            payload_json,
         ];
+        match patch_ops {
+            Some(patch_value) => {
+                let patch_json = serde_json::to_string(&patch_value)
+                    .map_err(|err| Status::internal(err.to_string()))?;
+                args.push("--patch".to_string());
+                args.push(patch_json);
+            }
+            None => {
+                let payload_json = serde_json::to_string(&payload_value)
+                    .map_err(|err| Status::internal(err.to_string()))?;
+                args.push("--payload".to_string());
+                args.push(payload_json);
+            }
+        }
         if let Some(note) = payload.note.as_ref() {
             args.push("--note".to_string());
             args.push(note.clone());

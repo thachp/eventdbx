@@ -86,6 +86,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
         event_type: "person-upserted".to_string(),
         payload_json: payload_json.clone(),
         note: Some(event_note.to_string()),
+        patch_json: None,
     });
     set_bearer(&mut append_request, &token)?;
     let append_response = client.append_event(append_request).await?;
@@ -105,7 +106,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
     assert_eq!(metadata.note.as_deref(), Some(event_note));
     let event_payload: serde_json::Value = serde_json::from_str(&event.payload_json)?;
     assert_eq!(event_payload["notes"], "Created via gRPC regression test");
-    let merkle_root = event.merkle_root.clone();
+    let first_merkle_root = event.merkle_root.clone();
 
     let aggregates_response = client
         .list_aggregates(ListAggregatesRequest { skip: 0, take: 10 })
@@ -137,6 +138,34 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
         Some("Created via gRPC regression test")
     );
 
+    let patch_document = json!([
+        { "op": "replace", "path": "/status", "value": "inactive" },
+        { "op": "replace", "path": "/contact/address/city", "value": "Spokane" }
+    ])
+    .to_string();
+    let patch_note = "gRPC regression patch";
+
+    let mut patch_request = Request::new(AppendEventRequest {
+        aggregate_type: aggregate_type.to_string(),
+        aggregate_id: aggregate_id.to_string(),
+        event_type: "person-patched".to_string(),
+        payload_json: String::new(),
+        note: Some(patch_note.to_string()),
+        patch_json: Some(patch_document.clone()),
+    });
+    set_bearer(&mut patch_request, &token)?;
+    let patch_response = client.append_event(patch_request).await?;
+    let patch_event = patch_response
+        .into_inner()
+        .event
+        .expect("patch append should return an event");
+    let merkle_root = patch_event.merkle_root.clone();
+    let patch_metadata = patch_event
+        .metadata
+        .as_ref()
+        .expect("patch metadata should be present");
+    assert_eq!(patch_metadata.note.as_deref(), Some(patch_note));
+
     let events_response = client
         .list_events(ListEventsRequest {
             aggregate_type: aggregate_type.to_string(),
@@ -146,11 +175,11 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
         })
         .await?
         .into_inner();
-    assert_eq!(events_response.events.len(), 1);
+    assert_eq!(events_response.events.len(), 2);
     let first_event = &events_response.events[0];
     assert_eq!(first_event.event_type, "person-upserted");
     assert_eq!(first_event.version, 1);
-    assert_eq!(first_event.merkle_root, merkle_root);
+    assert_eq!(first_event.merkle_root, first_merkle_root);
     assert_eq!(
         first_event
             .metadata
@@ -162,6 +191,40 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
     assert_eq!(
         first_payload["status"], "active",
         "payload status should match"
+    );
+    let second_event = &events_response.events[1];
+    assert_eq!(second_event.event_type, "person-patched");
+    assert_eq!(second_event.version, 2);
+    assert_eq!(
+        second_event
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.note.as_deref()),
+        Some(patch_note)
+    );
+    let second_payload: serde_json::Value = serde_json::from_str(&second_event.payload_json)?;
+    assert_eq!(second_payload["status"], "inactive");
+    assert_eq!(
+        second_payload["contact"]["address"]["city"], "Spokane",
+        "patch should update nested contact address"
+    );
+
+    let aggregate_after_patch = client
+        .get_aggregate(GetAggregateRequest {
+            aggregate_type: aggregate_type.to_string(),
+            aggregate_id: aggregate_id.to_string(),
+        })
+        .await?
+        .into_inner()
+        .aggregate
+        .expect("aggregate query after patch should return a record");
+    assert_eq!(aggregate_after_patch.version, 2);
+    assert_eq!(
+        aggregate_after_patch
+            .state
+            .get("status")
+            .map(String::as_str),
+        Some("inactive")
     );
 
     let verify_response = client
@@ -180,6 +243,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
             event_type: "person-upserted".to_string(),
             payload_json,
             note: Some(event_note.to_string()),
+            patch_json: None,
         }))
         .await;
     match unauthorized_result {

@@ -601,7 +601,10 @@ struct AppendEventGlobalRequest {
     aggregate_type: String,
     aggregate_id: String,
     event_type: String,
-    payload: Value,
+    #[serde(default)]
+    payload: Option<Value>,
+    #[serde(default)]
+    patch: Option<Value>,
     #[serde(default)]
     note: Option<String>,
 }
@@ -619,12 +622,31 @@ async fn append_event_global(
         aggregate_id,
         event_type,
         payload,
+        patch,
         note,
     } = request;
 
+    if patch.is_some() && payload.is_some() {
+        return Err(EventError::InvalidSchema(
+            "payload and patch cannot be provided together".into(),
+        ));
+    }
+
+    let store = state.store();
+    let schemas = state.schemas();
+
+    let effective_payload = if let Some(patch_ops) = patch.as_ref() {
+        store.prepare_payload_from_patch(&aggregate_type, &aggregate_id, patch_ops)?
+    } else if let Some(payload) = payload {
+        payload
+    } else {
+        return Err(EventError::InvalidSchema(
+            "either payload or patch must be provided".into(),
+        ));
+    };
+
     let mode = state.restrict();
     if mode.enforces_validation() {
-        let schemas = state.schemas();
         if mode.requires_declared_schema() {
             if let Err(_) = schemas.get(&aggregate_type) {
                 return Err(EventError::SchemaViolation(
@@ -632,18 +654,15 @@ async fn append_event_global(
                 ));
             }
         }
-        schemas.validate_event(&aggregate_type, &event_type, &payload)?;
+        schemas.validate_event(&aggregate_type, &event_type, &effective_payload)?;
     }
 
     let issued_by: Option<ActorClaims> = Some(grant.into());
-    let store = state.store();
-    let schemas = state.schemas();
-
     let append_input = AppendEvent {
         aggregate_type: aggregate_type.clone(),
         aggregate_id: aggregate_id.clone(),
         event_type: event_type.clone(),
-        payload: payload.clone(),
+        payload: effective_payload.clone(),
         issued_by,
         note,
     };
