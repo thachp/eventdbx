@@ -602,6 +602,8 @@ struct AppendEventGlobalRequest {
     aggregate_id: String,
     event_type: String,
     payload: Value,
+    #[serde(default)]
+    note: Option<String>,
 }
 
 async fn append_event_global(
@@ -617,6 +619,7 @@ async fn append_event_global(
         aggregate_id,
         event_type,
         payload,
+        note,
     } = request;
 
     let mode = state.restrict();
@@ -642,6 +645,7 @@ async fn append_event_global(
         event_type: event_type.clone(),
         payload: payload.clone(),
         issued_by,
+        note,
     };
 
     let record = tokio::task::spawn_blocking({

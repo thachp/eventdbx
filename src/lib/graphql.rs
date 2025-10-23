@@ -199,7 +199,7 @@ impl MutationRoot {
         let payload_json = serde_json::to_string(&input.payload).map_err(|err| {
             async_graphql::Error::from(EventError::Serialization(err.to_string()))
         })?;
-        let args = vec![
+        let mut args = vec![
             "aggregate".to_string(),
             "apply".to_string(),
             input.aggregate_type.clone(),
@@ -208,6 +208,10 @@ impl MutationRoot {
             "--payload".to_string(),
             payload_json,
         ];
+        if let Some(note) = input.note.as_ref() {
+            args.push("--note".to_string());
+            args.push(note.clone());
+        }
         let record: EventRecord = run_cli_json(args)
             .await
             .map_err(async_graphql::Error::from)?;
@@ -222,6 +226,7 @@ struct AppendEventInput {
     aggregate_id: String,
     event_type: String,
     payload: serde_json::Value,
+    note: Option<String>,
 }
 
 #[derive(async_graphql::SimpleObject)]
@@ -289,6 +294,7 @@ struct EventMetadataObject {
     event_id: String,
     created_at: String,
     issued_by: Option<ActorClaimsObject>,
+    note: Option<String>,
 }
 
 impl From<EventMetadata> for EventMetadataObject {
@@ -297,6 +303,7 @@ impl From<EventMetadata> for EventMetadataObject {
             event_id: value.event_id.to_string(),
             created_at: value.created_at.to_rfc3339(),
             issued_by: value.issued_by.map(Into::into),
+            note: value.note,
         }
     }
 }

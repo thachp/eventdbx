@@ -634,6 +634,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                         group: "admin".to_string(),
                         user: "jane".to_string(),
                     }),
+                    note: None,
                 },
                 version: 5,
                 hash: "cafe…".to_string(),

@@ -96,6 +96,7 @@ impl GrpcApi {
                 event_id: metadata.event_id.to_string(),
                 created_at: metadata.created_at.to_rfc3339(),
                 issued_by,
+                note: metadata.note.clone(),
             }),
             hash: record.hash,
             merkle_root: record.merkle_root,
@@ -167,7 +168,7 @@ impl EventService for GrpcApi {
 
         let payload_json = serde_json::to_string(&payload_value)
             .map_err(|err| Status::internal(err.to_string()))?;
-        let args = vec![
+        let mut args = vec![
             "aggregate".to_string(),
             "apply".to_string(),
             payload.aggregate_type.clone(),
@@ -176,6 +177,10 @@ impl EventService for GrpcApi {
             "--payload".to_string(),
             payload_json,
         ];
+        if let Some(note) = payload.note.as_ref() {
+            args.push("--note".to_string());
+            args.push(note.clone());
+        }
 
         let record: EventRecord = run_cli_json(args).await.map_err(Self::map_error)?;
 

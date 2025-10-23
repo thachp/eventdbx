@@ -73,6 +73,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
 
     let aggregate_type = "grpc-person";
     let aggregate_id = "gp-001";
+    let event_note = "gRPC regression bootstrap";
     let payload_json = json!({
         "status": "active",
         "notes": "Created via gRPC regression test"
@@ -84,6 +85,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
         aggregate_id: aggregate_id.to_string(),
         event_type: "person-upserted".to_string(),
         payload_json: payload_json.clone(),
+        note: Some(event_note.to_string()),
     });
     set_bearer(&mut append_request, &token)?;
     let append_response = client.append_event(append_request).await?;
@@ -96,6 +98,11 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
     assert_eq!(event.aggregate_id, aggregate_id);
     assert_eq!(event.event_type, "person-upserted");
     assert_eq!(event.version, 1);
+    let metadata = event
+        .metadata
+        .as_ref()
+        .expect("event metadata should be present");
+    assert_eq!(metadata.note.as_deref(), Some(event_note));
     let event_payload: serde_json::Value = serde_json::from_str(&event.payload_json)?;
     assert_eq!(event_payload["notes"], "Created via gRPC regression test");
     let merkle_root = event.merkle_root.clone();
@@ -144,6 +151,13 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
     assert_eq!(first_event.event_type, "person-upserted");
     assert_eq!(first_event.version, 1);
     assert_eq!(first_event.merkle_root, merkle_root);
+    assert_eq!(
+        first_event
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta.note.as_deref()),
+        Some(event_note)
+    );
     let first_payload: serde_json::Value = serde_json::from_str(&first_event.payload_json)?;
     assert_eq!(
         first_payload["status"], "active",
@@ -165,6 +179,7 @@ async fn grpc_append_and_query_flow() -> TestResult<()> {
             aggregate_id: "gp-unauthorized".to_string(),
             event_type: "person-upserted".to_string(),
             payload_json,
+            note: Some(event_note.to_string()),
         }))
         .await;
     match unauthorized_result {

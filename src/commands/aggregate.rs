@@ -20,7 +20,7 @@ use eventdbx::{
     merkle::compute_merkle_root,
     plugin::PluginManager,
     restrict::{self, RestrictMode},
-    schema::SchemaManager,
+    schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{self, ActorClaims, AppendEvent, EventRecord, EventStore, payload_to_map},
     token::{IssueTokenInput, TokenManager},
 };
@@ -79,6 +79,10 @@ pub struct AggregateApplyArgs {
     /// Raw JSON payload to use instead of key-value fields
     #[arg(long)]
     pub payload: Option<String>,
+
+    /// Optional note associated with the event (up to 128 characters)
+    #[arg(long, value_name = "NOTE")]
+    pub note: Option<String>,
 }
 
 #[derive(Args)]
@@ -331,6 +335,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 stage,
                 token,
                 payload: payload_arg,
+                note,
             } = args;
             if payload_arg.is_some() && !fields.is_empty() {
                 bail!("--payload cannot be used together with --field");
@@ -340,6 +345,12 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     .with_context(|| "failed to parse JSON payload provided via --payload")?,
                 None => collect_payload(fields),
             };
+            if let Some(ref note_value) = note {
+                if note_value.chars().count() > MAX_EVENT_NOTE_LENGTH {
+                    bail!("note cannot exceed {} characters", MAX_EVENT_NOTE_LENGTH);
+                }
+            }
+
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
             if config.restrict.enforces_validation() {
                 ensure_schema_for_mode(config.restrict, &schema_manager, &aggregate)?;
@@ -357,6 +368,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                                 event_type: event.clone(),
                                 payload: payload.clone(),
                                 issued_by: None,
+                                note: note.clone(),
                             })?;
                         }
 
@@ -366,6 +378,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                             event,
                             payload,
                             issued_by: None,
+                            note,
                         };
                         let staging_path = config.staging_path();
                         append_staged_event(staging_path.as_path(), staged_event)?;
@@ -391,6 +404,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                         event_type: event.clone(),
                         payload: payload.clone(),
                         issued_by: None,
+                        note: note.clone(),
                     })?;
 
                     maybe_auto_snapshot(&store, &schema_manager, &record);
@@ -431,6 +445,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                         &aggregate_id,
                         &event,
                         &payload,
+                        note.as_deref(),
                     )?;
                     println!("{}", serde_json::to_string_pretty(&record)?);
                     return Ok(());
@@ -624,11 +639,12 @@ fn proxy_append_via_http(
     aggregate_id: &str,
     event: &str,
     payload: &Value,
+    note: Option<&str>,
 ) -> Result<EventRecord> {
     let token = ensure_proxy_token(config, token)?;
     let client = ServerClient::new(config)?;
     client
-        .append_event(&token, aggregate, aggregate_id, event, payload)
+        .append_event(&token, aggregate, aggregate_id, event, payload, note)
         .with_context(|| {
             format!(
                 "failed to append event via running server on port {}",
@@ -1119,6 +1135,8 @@ struct StagedEvent {
     payload: Value,
     #[serde(default)]
     issued_by: Option<StagedIssuedBy>,
+    #[serde(default)]
+    note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1135,6 +1153,7 @@ impl StagedEvent {
             event_type: self.event.clone(),
             payload: self.payload.clone(),
             issued_by: self.issued_by.clone().map(Into::into),
+            note: self.note.clone(),
         }
     }
 }

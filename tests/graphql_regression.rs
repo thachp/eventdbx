@@ -75,6 +75,9 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
                 version
                 payload
                 merkleRoot
+                metadata {
+                    note
+                }
             }
         }
     "#;
@@ -83,6 +86,7 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         "status": "active",
         "notes": "Created via GraphQL regression test"
     });
+    let event_note = "GraphQL regression bootstrap";
 
     let mutation_response = graphql_call(
         &client,
@@ -93,7 +97,8 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
             "aggregateType": aggregate_type,
             "aggregateId": aggregate_id,
             "eventType": "person-upserted",
-            "payload": event_payload.clone()
+            "payload": event_payload.clone(),
+            "note": event_note
         }}),
     )
     .await?;
@@ -123,6 +128,11 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         append_event["version"].as_u64(),
         Some(1),
         "version should start at 1"
+    );
+    assert_eq!(
+        append_event["metadata"]["note"].as_str(),
+        Some(event_note),
+        "metadata note should reflect supplied note"
     );
     let merkle_root = append_event["merkleRoot"]
         .as_str()
@@ -169,6 +179,42 @@ async fn graphql_append_and_query_flow() -> TestResult<()> {
         aggregate_entry["state"]["status"].as_str(),
         Some("active"),
         "aggregate state should include persisted status"
+    );
+
+    let events_query = r#"
+        query Events($aggregateType: String!, $aggregateId: String!) {
+            aggregateEvents(aggregateType: $aggregateType, aggregateId: $aggregateId) {
+                eventType
+                metadata {
+                    note
+                }
+            }
+        }
+    "#;
+    let events_response = graphql_call(
+        &client,
+        &base_url,
+        None,
+        events_query,
+        json!({
+            "aggregateType": aggregate_type,
+            "aggregateId": aggregate_id
+        }),
+    )
+    .await?;
+    assert!(
+        events_response.get("errors").is_none(),
+        "events query should succeed: {:?}",
+        events_response
+    );
+    let events = events_response["data"]["aggregateEvents"]
+        .as_array()
+        .expect("events response should be array");
+    assert_eq!(events.len(), 1, "should return a single event");
+    assert_eq!(
+        events[0]["metadata"]["note"].as_str(),
+        Some(event_note),
+        "event metadata should propagate note"
     );
 
     let aggregate_query = r#"

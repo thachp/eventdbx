@@ -523,9 +523,22 @@ impl ComparableValue {
 use super::error::{EventError, Result};
 use crate::store::payload_to_map;
 
+pub const MAX_EVENT_NOTE_LENGTH: usize = 128;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventSchema {
     pub fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+impl Default for EventSchema {
+    fn default() -> Self {
+        Self {
+            fields: Vec::new(),
+            notes: None,
+        }
+    }
 }
 
 impl EventSchema {
@@ -584,6 +597,7 @@ pub struct SchemaUpdate {
     pub field_lock: Option<(String, bool)>,
     pub event_add_fields: BTreeMap<String, Vec<String>>,
     pub event_remove_fields: BTreeMap<String, Vec<String>>,
+    pub event_notes: BTreeMap<String, Option<String>>,
     pub hidden: Option<bool>,
     pub hidden_field: Option<(String, bool)>,
     pub column_type: Option<(String, Option<ColumnType>)>,
@@ -638,7 +652,7 @@ impl SchemaManager {
                     "event names cannot be empty".into(),
                 ));
             }
-            events.insert(event, EventSchema { fields: Vec::new() });
+            events.insert(event, EventSchema::default());
         }
 
         let mut schema = AggregateSchema {
@@ -756,7 +770,7 @@ impl SchemaManager {
                 let schema_event = schema
                     .events
                     .entry(event.clone())
-                    .or_insert(EventSchema { fields: Vec::new() });
+                    .or_insert_with(EventSchema::default);
                 for field in fields {
                     if field.trim().is_empty() {
                         return Err(EventError::InvalidSchema(
@@ -773,6 +787,24 @@ impl SchemaManager {
                         .fields
                         .retain(|existing| !fields.contains(existing));
                 }
+            }
+
+            for (event, note) in update.event_notes {
+                let schema_event = schema.events.get_mut(&event).ok_or_else(|| {
+                    EventError::InvalidSchema(format!(
+                        "event {} is not defined for aggregate {}",
+                        event, aggregate
+                    ))
+                })?;
+                if let Some(ref value) = note {
+                    if value.chars().count() > MAX_EVENT_NOTE_LENGTH {
+                        return Err(EventError::InvalidSchema(format!(
+                            "default note for event {} cannot exceed {} characters",
+                            event, MAX_EVENT_NOTE_LENGTH
+                        )));
+                    }
+                }
+                schema_event.notes = note;
             }
 
             schema.ensure_sorted();

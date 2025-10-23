@@ -147,13 +147,14 @@ EventDBX ships a single `dbx` binary. Every command accepts an optional `--confi
 - `dbx schema create <name> --events <event1,event2,...> [--snapshot-threshold <u64>]`
 - `dbx schema add <name> --events <event1,event2,...>`
 - `dbx schema remove <name> <event>`
+- `dbx schema annotate <name> <event> [--note <text>] [--clear]`
 - `dbx schema list`
 
 Schemas are stored on disk; when restriction is `default` or `strict`, incoming events must satisfy the recorded schema (and `strict` additionally requires every aggregate to declare one).
 
 ### Aggregates
 
-- `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--stage] [--token <value>]`  
+- `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--stage] [--token <value>] [--note <text>]`  
   Appends an event immediately—use `--stage` to queue it for a later commit.
 - `dbx aggregate list [--skip <n>] [--take <n>] [--stage]`  
   Lists aggregates with version, Merkle root, and archive status; pass `--stage` to display queued events instead.

@@ -11,6 +11,7 @@ use super::{
     encryption::{self, Encryptor},
     error::{EventError, Result},
     merkle::{compute_merkle_root, empty_root},
+    schema::MAX_EVENT_NOTE_LENGTH,
     token::TokenGrant,
 };
 
@@ -37,6 +38,8 @@ pub struct EventMetadata {
     pub event_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub issued_by: Option<ActorClaims>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +63,14 @@ impl<'a> Transaction<'a> {
         let (meta, state) = self.ensure_cache(&key)?;
         if meta.archived {
             return Err(EventError::AggregateArchived);
+        }
+        if let Some(note) = input.note.as_ref() {
+            if note.chars().count() > MAX_EVENT_NOTE_LENGTH {
+                return Err(EventError::InvalidSchema(format!(
+                    "event note cannot exceed {} characters",
+                    MAX_EVENT_NOTE_LENGTH
+                )));
+            }
         }
         let record = apply_event(meta, state, input);
         let stored_record = self.store.encode_record(&record)?;
@@ -155,6 +166,7 @@ fn apply_event(
         event_type,
         payload,
         issued_by,
+        note,
     } = input;
 
     debug_assert_eq!(&meta.aggregate_type, &aggregate_type);
@@ -189,6 +201,7 @@ fn apply_event(
             event_id,
             created_at,
             issued_by,
+            note,
         },
         version,
         hash,
@@ -208,6 +221,7 @@ pub struct AppendEvent {
     pub event_type: String,
     pub payload: Value,
     pub issued_by: Option<ActorClaims>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +354,15 @@ impl EventStore {
     pub fn append(&self, input: AppendEvent) -> Result<EventRecord> {
         self.ensure_writable()?;
         let _guard = self.write_lock.lock();
+
+        if let Some(note) = input.note.as_ref() {
+            if note.chars().count() > MAX_EVENT_NOTE_LENGTH {
+                return Err(EventError::InvalidSchema(format!(
+                    "event note cannot exceed {} characters",
+                    MAX_EVENT_NOTE_LENGTH
+                )));
+            }
+        }
 
         let aggregate_type = input.aggregate_type.clone();
         let aggregate_id = input.aggregate_id.clone();
@@ -1021,6 +1044,7 @@ mod tests {
                     event_type: "patient-created".into(),
                     payload: payload.clone(),
                     issued_by: None,
+                    note: None,
                 })
                 .unwrap();
 
@@ -1051,6 +1075,7 @@ mod tests {
                 event_type: "order-created".into(),
                 payload: serde_json::json!({ "status": "processing" }),
                 issued_by: None,
+                note: None,
             })
             .unwrap();
         assert_eq!(first.version, 1);
@@ -1065,6 +1090,7 @@ mod tests {
                     "tracking": "abc123"
                 }),
                 issued_by: None,
+                note: None,
             })
             .unwrap();
         assert_eq!(second.version, 2);
@@ -1097,6 +1123,7 @@ mod tests {
                 event_type: "invoice-created".into(),
                 payload: serde_json::json!({ "total": "100.00" }),
                 issued_by: None,
+                note: None,
             })
             .unwrap();
         }
@@ -1120,6 +1147,7 @@ mod tests {
                 event_type: "order-created".into(),
                 payload,
                 issued_by: None,
+                note: None,
             })
             .unwrap();
 
@@ -1141,11 +1169,54 @@ mod tests {
                 event_type: "order-updated".into(),
                 payload: serde_json::json!({}),
                 issued_by: None,
+                note: None,
             })
             .unwrap_err();
         assert!(matches!(err, crate::error::EventError::AggregateArchived));
 
         let state = store.set_archive("order", "order-1", false, None).unwrap();
         assert!(!state.archived);
+    }
+
+    #[test]
+    fn append_event_with_note_persists_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None).unwrap();
+
+        let note_text = "initial import".to_string();
+        let record = store
+            .append(AppendEvent {
+                aggregate_type: "account".into(),
+                aggregate_id: "acct-1".into(),
+                event_type: "account-created".into(),
+                payload: serde_json::json!({ "status": "active" }),
+                issued_by: None,
+                note: Some(note_text.clone()),
+            })
+            .unwrap();
+
+        assert_eq!(record.metadata.note.as_deref(), Some(note_text.as_str()));
+    }
+
+    #[test]
+    fn reject_event_note_exceeding_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None).unwrap();
+
+        let long_note = "x".repeat(MAX_EVENT_NOTE_LENGTH + 1);
+        let err = store
+            .append(AppendEvent {
+                aggregate_type: "account".into(),
+                aggregate_id: "acct-2".into(),
+                event_type: "account-created".into(),
+                payload: serde_json::json!({ "status": "pending" }),
+                issued_by: None,
+                note: Some(long_note),
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, crate::error::EventError::InvalidSchema(_)));
     }
 }
