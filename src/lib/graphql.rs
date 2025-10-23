@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::EventError;
+use crate::restrict;
 use crate::server::{AppState, extract_bearer_token, run_cli_json};
 use crate::store::{AggregateState, EventMetadata, EventRecord};
 use crate::token::AccessKind;
@@ -182,12 +183,17 @@ impl MutationRoot {
             .authorize(&token, AccessKind::Write)
             .map_err(async_graphql::Error::from)?;
 
-        if app.restrict() {
-            app.schemas().validate_event(
-                &input.aggregate_type,
-                &input.event_type,
-                &input.payload,
-            )?;
+        let mode = app.restrict();
+        if mode.enforces_validation() {
+            let schemas = app.schemas();
+            if mode.requires_declared_schema() {
+                if let Err(_) = schemas.get(&input.aggregate_type) {
+                    return Err(async_graphql::Error::from(EventError::SchemaViolation(
+                        restrict::strict_mode_missing_schema_message(&input.aggregate_type),
+                    )));
+                }
+            }
+            schemas.validate_event(&input.aggregate_type, &input.event_type, &input.payload)?;
         }
 
         let payload_json = serde_json::to_string(&input.payload).map_err(|err| {

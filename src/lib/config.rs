@@ -25,6 +25,7 @@ use tracing::warn;
 use super::{
     encryption::Encryptor,
     error::{EventError, Result},
+    restrict::{self, RestrictMode},
 };
 
 pub const DEFAULT_PORT: u16 = 7070;
@@ -134,9 +135,9 @@ pub struct Config {
     pub updated_at: DateTime<Utc>,
     #[serde(
         default = "default_restrict",
-        deserialize_with = "deserialize_restrict"
+        deserialize_with = "deserialize_restrict_mode"
     )]
-    pub restrict: bool,
+    pub restrict: RestrictMode,
     #[serde(default, skip_serializing)]
     pub plugins: Vec<PluginDefinition>,
     #[serde(default = "default_list_page_size")]
@@ -192,7 +193,7 @@ pub struct ConfigUpdate {
     pub cache_threshold: Option<usize>,
     pub snapshot_threshold: Option<Option<u64>>,
     pub data_encryption_key: Option<String>,
-    pub restrict: Option<bool>,
+    pub restrict: Option<RestrictMode>,
     pub list_page_size: Option<usize>,
     pub page_limit: Option<usize>,
     pub plugin_max_attempts: Option<u32>,
@@ -687,8 +688,8 @@ fn default_data_dir() -> PathBuf {
     default_config_root().unwrap_or_else(|_| PathBuf::from(".eventdbx"))
 }
 
-fn default_restrict() -> bool {
-    true
+fn default_restrict() -> RestrictMode {
+    RestrictMode::default()
 }
 
 fn default_list_page_size() -> usize {
@@ -739,7 +740,7 @@ fn default_admin_port() -> Option<u16> {
     Some(7171)
 }
 
-fn deserialize_restrict<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+fn deserialize_restrict_mode<'de, D>(deserializer: D) -> std::result::Result<RestrictMode, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -752,12 +753,10 @@ where
 
     let value = Option::<RestrictInput>::deserialize(deserializer)?;
     Ok(match value {
-        Some(RestrictInput::Bool(value)) => value,
-        Some(RestrictInput::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
-            "prod" | "restricted" | "true" | "1" | "yes" | "on" => true,
-            "dev" | "unrestricted" | "false" | "0" | "no" | "off" => false,
-            _ => default_restrict(),
-        },
+        Some(RestrictInput::Bool(value)) => restrict::legacy_bool(value),
+        Some(RestrictInput::String(value)) => {
+            restrict::parse_mode(&value).unwrap_or_else(default_restrict)
+        }
         None => default_restrict(),
     })
 }
@@ -928,5 +927,44 @@ grpc = true
         assert!(api.rest_enabled());
         assert!(!api.graphql_enabled());
         assert!(api.grpc_enabled());
+    }
+
+    #[derive(Deserialize)]
+    struct RestrictWrapper {
+        #[serde(
+            default = "default_restrict",
+            deserialize_with = "deserialize_restrict_mode"
+        )]
+        restrict: RestrictMode,
+    }
+
+    #[test]
+    fn restrict_mode_deserializes_from_bool() {
+        let wrapper: RestrictWrapper =
+            toml::from_str("restrict = false").expect("bool value should parse");
+        assert_eq!(wrapper.restrict, RestrictMode::Off);
+
+        let wrapper: RestrictWrapper =
+            toml::from_str("restrict = true").expect("bool value should parse");
+        assert_eq!(wrapper.restrict, RestrictMode::Default);
+    }
+
+    #[test]
+    fn restrict_mode_deserializes_from_string() {
+        let wrapper: RestrictWrapper =
+            toml::from_str("restrict = \"strict\"").expect("string value should parse");
+        assert_eq!(wrapper.restrict, RestrictMode::Strict);
+
+        let wrapper: RestrictWrapper = toml::from_str("restrict = \"unknown\"")
+            .expect("unknown value should fall back to default");
+        assert_eq!(wrapper.restrict, RestrictMode::Default);
+    }
+
+    #[test]
+    fn restrict_mode_serializes_as_lowercase_string() {
+        let mut config = Config::default();
+        config.restrict = RestrictMode::Strict;
+        let payload = toml::to_string(&config).expect("config should serialize");
+        assert!(payload.contains("restrict = \"strict\""));
     }
 }

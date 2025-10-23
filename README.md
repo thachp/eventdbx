@@ -32,7 +32,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 
    - Omit `--foreground` to daemonise the process.
    - Use `--data-dir <path>` to override the default `$HOME/.eventdbx` directory.
-   - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
+  - Restriction (schema enforcement) defaults to `default`; switch to `--restrict=off` for permissive prototyping or `--restrict=strict` to require declared schemas on every write.
    - The server owns the RocksDB lock while it is running; the CLI detects this and automatically proxies write commands through the HTTP API. Stop the daemon only when you need offline tasks like staging or manual maintenance.
 
 - Choose the API surfaces with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). Persist the selection by editing the `[api]` table in `config.toml`, for example:
@@ -105,8 +105,9 @@ You now have a working EventDBX instance with an initial aggregate. Explore the 
 
 EventDBX can run in two validation modes, tuned for different phases of development:
 
-- **Unrestricted mode** (`--restrict=false`): Ideal for prototyping and rapid application development. Event payloads are accepted as-is with no schema definition or data-type friction, letting you iterate quickly without pre-registering aggregates, tables, or column types.
-- **Restricted mode** (default): Enables schema enforcement. Once your application matures, define required fields, data types, and validation rules via `dbx schema …` commands. Incoming events must match the declared schema, and violations are rejected before they reach storage. You can toggle restriction per server start, so development and production can adopt different policies.
+- **Off** (`--restrict=off` or `--restrict=false`): Ideal for prototyping and rapid application development. Event payloads bypass schema validation entirely, letting you iterate quickly without pre-registering aggregates, tables, or column types.
+- **Default** (`--restrict=default` or `--restrict=true`): Validates events whenever a schema exists but allows aggregates without a declared schema. This matches prior behaviour and suits teams rolling out schema enforcement incrementally.
+- **Strict** (`--restrict=strict`): Requires every aggregate to have a schema before events can be appended. Missing schemas fail fast with a clear error so production environments stay aligned with their contracts.
 
 ## Command-Line Reference
 
@@ -114,8 +115,8 @@ EventDBX ships a single `dbx` binary. Every command accepts an optional `--confi
 
 ### Server lifecycle
 
-- `dbx start [--port <u16>] [--data-dir <path>] [--foreground] [--restrict | --restrict=false]`  
-  Launches the server. Schema validation is enforced by default; pass `--restrict=false` to run in permissive mode.
+- `dbx start [--port <u16>] [--data-dir <path>] [--foreground] [--restrict[=<off|default|strict>]]`  
+  Launches the server. The default mode validates when schemas exist; set `--restrict=off` to bypass validation or `--restrict=strict` to require schemas up front.
 - `dbx stop`  
   Stops the running daemon referenced by the PID file.
 - `dbx status`  
@@ -148,7 +149,7 @@ EventDBX ships a single `dbx` binary. Every command accepts an optional `--confi
 - `dbx schema remove <name> <event>`
 - `dbx schema list`
 
-Schemas are stored on disk; when the server runs with restriction enabled, incoming events must satisfy the recorded schema.
+Schemas are stored on disk; when restriction is `default` or `strict`, incoming events must satisfy the recorded schema (and `strict` additionally requires every aggregate to declare one).
 
 ### Aggregates
 
@@ -168,7 +169,7 @@ Schemas are stored on disk; when the server runs with restriction enabled, incom
 - `dbx aggregate export [<type>] [--all] --output <path> [--format csv|json] [--zip] [--pretty]`  
   Writes the current aggregate state (no metadata) as CSV or JSON. Exports default to one file per aggregate type; pass `--zip` to bundle the output into an archive.
 
-Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply --stage` to add entries to this queue, inspect them with `aggregate list --stage`, and persist the entire batch with `aggregate commit`. Events are validated against the active schema (when restriction is enabled) during both staging and commit. The commit operation writes every pending event in one RocksDB batch, guaranteeing all-or-nothing persistence.
+Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply --stage` to add entries to this queue, inspect them with `aggregate list --stage`, and persist the entire batch with `aggregate commit`. Events are validated against the active schema whenever restriction is `default` or `strict`; the strict mode also insists that a schema exists before anything can be staged. The commit operation writes every pending event in one RocksDB batch, guaranteeing all-or-nothing persistence.
 
 ### Plugins
 

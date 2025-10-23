@@ -3,6 +3,7 @@ use std::{io, net::TcpListener, path::PathBuf, time::Duration};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use eventdbx::{
     config::Config,
+    restrict::RestrictMode,
     schema::{CreateSchemaInput, SchemaManager},
     server,
 };
@@ -45,7 +46,7 @@ async fn adminapi_regression() -> TestResult<()> {
     };
 
     config.port = http_port;
-    config.restrict = false;
+    config.restrict = RestrictMode::Off;
     config.data_encryption_key = Some(STANDARD.encode([2u8; 32]));
     config.socket.bind_addr = format!("127.0.0.1:{socket_port}");
     config.admin.enabled = true;

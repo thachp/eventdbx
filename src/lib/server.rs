@@ -36,6 +36,7 @@ use super::{
     graphql::{EventSchema, GraphqlState, build_schema},
     plugin::PluginManager,
     replication_capnp_client::decode_public_key_bytes,
+    restrict::RestrictMode,
     schema::SchemaManager,
     store::{ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore},
     token::{AccessKind, TokenManager},
@@ -50,7 +51,7 @@ pub(crate) struct AppState {
     config: Arc<RwLock<Config>>,
     _config_path: Arc<PathBuf>,
     store: Arc<EventStore>,
-    restrict: bool,
+    restrict: RestrictMode,
     list_page_size: usize,
     page_limit: usize,
 }
@@ -124,7 +125,7 @@ impl AppState {
         Arc::clone(&self.config)
     }
 
-    pub(crate) fn restrict(&self) -> bool {
+    pub(crate) fn restrict(&self) -> RestrictMode {
         self.restrict
     }
 
@@ -618,10 +619,17 @@ async fn append_event_global(
         payload,
     } = request;
 
-    if state.restrict() {
-        state
-            .schemas()
-            .validate_event(&aggregate_type, &event_type, &payload)?;
+    let mode = state.restrict();
+    if mode.enforces_validation() {
+        let schemas = state.schemas();
+        if mode.requires_declared_schema() {
+            if let Err(_) = schemas.get(&aggregate_type) {
+                return Err(EventError::SchemaViolation(
+                    crate::restrict::strict_mode_missing_schema_message(&aggregate_type),
+                ));
+            }
+        }
+        schemas.validate_event(&aggregate_type, &event_type, &payload)?;
     }
 
     let issued_by: Option<ActorClaims> = Some(grant.into());

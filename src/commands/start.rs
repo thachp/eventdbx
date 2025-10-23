@@ -31,9 +31,15 @@ pub struct StartArgs {
     #[arg(long)]
     pub foreground: bool,
 
-    /// Require schema enforcement (use `--restrict=false` to disable)
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    pub restrict: bool,
+    /// Choose schema enforcement mode (`off`, `default`, or `strict`)
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = RestrictModeArg::Default,
+        num_args = 0..=1,
+        default_missing_value = "default"
+    )]
+    pub restrict: RestrictModeArg,
     /// Select which API surfaces to expose
     #[arg(long = "api", value_enum)]
     pub api: Option<ApiModeArg>,
@@ -63,7 +69,7 @@ impl Default for StartArgs {
             port: None,
             data_dir: None,
             foreground: false,
-            restrict: restrict::from_env(),
+            restrict: RestrictModeArg::from(restrict::from_env()),
             api: None,
             rest: false,
             no_rest: false,
@@ -71,6 +77,50 @@ impl Default for StartArgs {
             no_graphql: false,
             grpc: false,
             no_grpc: false,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum RestrictModeArg {
+    #[value(
+        alias = "false",
+        alias = "0",
+        alias = "no",
+        alias = "none",
+        alias = "unrestricted"
+    )]
+    Off,
+    #[value(
+        alias = "true",
+        alias = "1",
+        alias = "yes",
+        alias = "on",
+        alias = "prod",
+        alias = "restricted",
+        alias = "hybrid"
+    )]
+    Default,
+    #[value(alias = "strict", alias = "all", alias = "enforced")]
+    Strict,
+}
+
+impl From<RestrictModeArg> for restrict::RestrictMode {
+    fn from(value: RestrictModeArg) -> Self {
+        match value {
+            RestrictModeArg::Off => restrict::RestrictMode::Off,
+            RestrictModeArg::Default => restrict::RestrictMode::Default,
+            RestrictModeArg::Strict => restrict::RestrictMode::Strict,
+        }
+    }
+}
+
+impl From<restrict::RestrictMode> for RestrictModeArg {
+    fn from(value: restrict::RestrictMode) -> Self {
+        match value {
+            restrict::RestrictMode::Off => RestrictModeArg::Off,
+            restrict::RestrictMode::Default => RestrictModeArg::Default,
+            restrict::RestrictMode::Strict => RestrictModeArg::Strict,
         }
     }
 }
@@ -102,7 +152,7 @@ pub struct DestroyArgs {
 }
 
 pub async fn execute(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
-    restrict::set_env(args.restrict);
+    restrict::set_env(args.restrict.into());
     if args.foreground {
         start_foreground(config_path, args).await
     } else {
@@ -113,7 +163,7 @@ pub async fn execute(config_path: Option<PathBuf>, args: StartArgs) -> Result<()
 
 pub async fn run_internal(config_path: Option<PathBuf>) -> Result<()> {
     let args = StartArgs::default();
-    restrict::set_env(args.restrict);
+    restrict::set_env(args.restrict.into());
     start_foreground(config_path, args).await
 }
 
@@ -250,6 +300,7 @@ async fn start_foreground(config_path: Option<PathBuf>, args: StartArgs) -> Resu
 fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     let (config, path) = load_and_update_config(config_path, &args)?;
     let pid_path = config.pid_file_path();
+    let restrict_mode: restrict::RestrictMode = args.restrict.into();
 
     if let Some(existing) = read_pid_record(&pid_path)? {
         if process_is_running(existing.pid) {
@@ -267,7 +318,7 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());
-    command.env(RESTRICT_ENV, restrict::as_str(args.restrict));
+    command.env(RESTRICT_ENV, restrict_mode.as_str());
 
     let mut child = command.spawn()?;
     let pid = child.id();
@@ -309,7 +360,7 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
         config.port,
         pid,
         started_at.to_rfc3339(),
-        args.restrict
+        restrict_mode
     );
     Ok(())
 }
@@ -374,7 +425,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         cache_threshold: None,
         snapshot_threshold: None,
         data_encryption_key: None,
-        restrict: Some(args.restrict),
+        restrict: Some(args.restrict.into()),
         list_page_size: None,
         page_limit: None,
         plugin_max_attempts: None,

@@ -6,6 +6,7 @@ use tonic::{Request, Response, Status, metadata::MetadataMap};
 
 use crate::{
     error::EventError,
+    restrict,
     server::{AppState, run_cli_json},
     store::{AggregateState, EventRecord},
     token::AccessKind,
@@ -147,12 +148,19 @@ impl EventService for GrpcApi {
             .authorize(&token, AccessKind::Write)
             .map_err(Self::map_error)?;
 
-        if self.state.restrict() {
-            if let Err(err) = self.state.schemas().validate_event(
-                &payload.aggregate_type,
-                &payload.event_type,
-                &payload_value,
-            ) {
+        let mode = self.state.restrict();
+        if mode.enforces_validation() {
+            let schemas = self.state.schemas();
+            if mode.requires_declared_schema() {
+                if let Err(_) = schemas.get(&payload.aggregate_type) {
+                    return Err(Self::map_error(EventError::SchemaViolation(
+                        restrict::strict_mode_missing_schema_message(&payload.aggregate_type),
+                    )));
+                }
+            }
+            if let Err(err) =
+                schemas.validate_event(&payload.aggregate_type, &payload.event_type, &payload_value)
+            {
                 return Err(Self::map_error(err));
             }
         }
