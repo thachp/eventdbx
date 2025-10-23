@@ -566,6 +566,9 @@ fn resolve_cli_executable() -> Result<PathBuf> {
     if let Ok(path) = env::var("CARGO_BIN_EXE_eventdbx") {
         return Ok(PathBuf::from(path));
     }
+    if let Ok(path) = env::var("CARGO_BIN_EXE_dbx") {
+        return Ok(PathBuf::from(path));
+    }
     let current = std::env::current_exe().context("failed to resolve current executable")?;
     if let Some(dir) = current.parent() {
         if let Some(candidate) = probe_dir_for_cli(dir) {
@@ -581,15 +584,21 @@ fn resolve_cli_executable() -> Result<PathBuf> {
 }
 
 fn probe_dir_for_cli(dir: &Path) -> Option<PathBuf> {
-    let unix_path = dir.join("eventdbx");
-    if unix_path.exists() {
-        return Some(unix_path);
+    let candidates = ["eventdbx", "dbx"];
+    for candidate in candidates {
+        let unix_path = dir.join(candidate);
+        if unix_path.exists() {
+            return Some(unix_path);
+        }
     }
     #[cfg(windows)]
     {
-        let windows_path = dir.join("eventdbx.exe");
-        if windows_path.exists() {
-            return Some(windows_path);
+        let candidates = ["eventdbx.exe", "dbx.exe"];
+        for candidate in candidates {
+            let windows_path = dir.join(candidate);
+            if windows_path.exists() {
+                return Some(windows_path);
+            }
         }
     }
     None
@@ -663,4 +672,32 @@ pub async fn invoke(args: &[String], addr: &str) -> Result<CliCommandResult> {
         stdout,
         stderr,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn probe_dir_prefers_eventdbx() {
+        let dir = TempDir::new().unwrap();
+        let eventdbx = dir.path().join("eventdbx");
+        let dbx = dir.path().join("dbx");
+        std::fs::write(&eventdbx, b"").unwrap();
+        std::fs::write(&dbx, b"").unwrap();
+
+        let resolved = probe_dir_for_cli(dir.path()).expect("expected CLI path");
+        assert_eq!(resolved, eventdbx);
+    }
+
+    #[test]
+    fn probe_dir_falls_back_to_dbx() {
+        let dir = TempDir::new().unwrap();
+        let dbx = dir.path().join("dbx");
+        std::fs::write(&dbx, b"").unwrap();
+
+        let resolved = probe_dir_for_cli(dir.path()).expect("expected CLI path");
+        assert_eq!(resolved, dbx);
+    }
 }

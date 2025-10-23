@@ -210,7 +210,6 @@ async fn create_schema(
     let mut args = vec![
         "schema".to_string(),
         "create".to_string(),
-        "--aggregate".to_string(),
         request.aggregate.clone(),
         "--events".to_string(),
         request.events.join(","),
@@ -316,6 +315,8 @@ async fn upsert_remote(
         ));
     }
 
+    let (ip, port) = parse_remote_endpoint(endpoint)?;
+
     let existing: BTreeMap<String, RemoteConfig> = run_cli_json(vec![
         "remote".to_string(),
         "ls".to_string(),
@@ -324,15 +325,19 @@ async fn upsert_remote(
     .await?;
     let existed = existing.contains_key(normalized_name);
 
-    let args = vec![
+    let mut args = vec![
         "remote".to_string(),
         "add".to_string(),
         normalized_name.to_string(),
-        endpoint.to_string(),
+        ip,
         "--public-key".to_string(),
         public_key.to_string(),
-        "--replace".to_string(),
     ];
+    if let Some(port) = port {
+        args.push("--port".to_string());
+        args.push(port.to_string());
+    }
+    args.push("--replace".to_string());
     run_cli_command(args).await?;
 
     let remotes: BTreeMap<String, RemoteConfig> = run_cli_json(vec![
@@ -352,6 +357,87 @@ async fn upsert_remote(
     };
 
     Ok((status, Json(remote)))
+}
+
+fn parse_remote_endpoint(endpoint: &str) -> Result<(String, Option<u16>)> {
+    let trimmed = endpoint.trim();
+    if trimmed.is_empty() {
+        return Err(EventError::Config(
+            "remote endpoint cannot be empty".to_string(),
+        ));
+    }
+
+    let without_scheme = if let Some((scheme, rest)) = trimmed.split_once("://") {
+        if !scheme.eq_ignore_ascii_case("tcp") {
+            return Err(EventError::Config(format!(
+                "remote endpoint scheme must be 'tcp', found '{}'",
+                scheme
+            )));
+        }
+        rest
+    } else {
+        trimmed
+    };
+
+    let without_scheme = without_scheme.trim();
+    if without_scheme.is_empty() {
+        return Err(EventError::Config(
+            "remote endpoint host cannot be empty".to_string(),
+        ));
+    }
+
+    if without_scheme.starts_with('[') {
+        let end = without_scheme
+            .find(']')
+            .ok_or_else(|| EventError::Config("remote endpoint has invalid IPv6 host".into()))?;
+        let host = &without_scheme[1..end];
+        if host.trim().is_empty() {
+            return Err(EventError::Config(
+                "remote endpoint host cannot be empty".to_string(),
+            ));
+        }
+
+        let remainder = without_scheme[end + 1..].trim();
+        if remainder.is_empty() {
+            return Ok((host.to_string(), None));
+        }
+        if !remainder.starts_with(':') {
+            return Err(EventError::Config(
+                "remote endpoint IPv6 port must follow ']'".to_string(),
+            ));
+        }
+        let port = parse_endpoint_port(remainder[1..].trim())?;
+        return Ok((host.to_string(), Some(port)));
+    }
+
+    if let Some((host, port_str)) = without_scheme.rsplit_once(':') {
+        if host.trim().is_empty() {
+            return Err(EventError::Config(
+                "remote endpoint host cannot be empty".to_string(),
+            ));
+        }
+        if port_str.trim().is_empty() {
+            return Err(EventError::Config(
+                "remote endpoint port cannot be empty".to_string(),
+            ));
+        }
+        let port = parse_endpoint_port(port_str.trim())?;
+        return Ok((host.trim().to_string(), Some(port)));
+    }
+
+    Ok((without_scheme.to_string(), None))
+}
+
+fn parse_endpoint_port(port: &str) -> Result<u16> {
+    let parsed: u16 = port
+        .parse()
+        .map_err(|err| EventError::Config(format!("remote endpoint port is invalid: {err}")))?;
+    if parsed == 0 {
+        return Err(EventError::Config(
+            "remote endpoint port must be greater than zero".to_string(),
+        ));
+    }
+    Ok(parsed)
 }
 
 async fn delete_remote(
@@ -555,4 +641,43 @@ fn build_plugin_config_args(name: &str, request: &PluginUpsertRequest) -> Result
     }
 
     Ok(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_remote_endpoint_supports_tcp_scheme() {
+        let (host, port) = parse_remote_endpoint("tcp://0.0.0.0:7443").unwrap();
+        assert_eq!(host, "0.0.0.0");
+        assert_eq!(port, Some(7443));
+    }
+
+    #[test]
+    fn parse_remote_endpoint_allows_no_port() {
+        let (host, port) = parse_remote_endpoint("tcp://example.com").unwrap();
+        assert_eq!(host, "example.com");
+        assert!(port.is_none());
+    }
+
+    #[test]
+    fn parse_remote_endpoint_handles_ipv6() {
+        let (host, port) = parse_remote_endpoint("tcp://[2001:db8::1]:7443").unwrap();
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, Some(7443));
+    }
+
+    #[test]
+    fn parse_remote_endpoint_rejects_non_tcp_scheme() {
+        let err = parse_remote_endpoint("udp://10.0.0.1:6363").unwrap_err();
+        if let EventError::Config(message) = err {
+            assert!(
+                message.contains("scheme"),
+                "expected scheme error, got {message}"
+            );
+        } else {
+            panic!("expected EventError::Config, got {err:?}");
+        }
+    }
 }

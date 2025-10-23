@@ -30,13 +30,16 @@ pub enum SchemaCommands {
 
 #[derive(Args)]
 pub struct SchemaCreateArgs {
-    #[arg(long)]
+    /// Aggregate name to initialize
+    #[arg(value_name = "AGGREGATE")]
     pub aggregate: String,
 
-    #[arg(long, value_delimiter = ',')]
+    /// Comma-delimited list of events to seed the schema
+    #[arg(short, long, required = true, value_delimiter = ',')]
     pub events: Vec<String>,
 
-    #[arg(long)]
+    /// Optional override for the snapshot threshold
+    #[arg(short, long)]
     pub snapshot_threshold: Option<u64>,
 
     /// Emit JSON output

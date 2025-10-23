@@ -50,8 +50,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 3. **Define a schema (recommended when running in restricted mode)**
 
    ```bash
-   dbx schema create \
-     --aggregate patient \
+   dbx schema create patient \
      --events patient-added,patient-updated \
      --snapshot-threshold 100
    ```
@@ -144,9 +143,9 @@ EventDBX ships a single `dbx` binary. Every command accepts an optional `--confi
 
 ### Schemas
 
-- `dbx schema create --aggregate <name> --events <event1,event2,...> [--snapshot-threshold <u64>]`
-- `dbx schema add --aggregate <name> --events <event1,event2,...>`
-- `dbx schema remove --aggregate <name> --event <name>`
+- `dbx schema create <name> --events <event1,event2,...> [--snapshot-threshold <u64>]`
+- `dbx schema add <name> --events <event1,event2,...>`
+- `dbx schema remove <name> <event>`
 - `dbx schema list`
 
 Schemas are stored on disk; when the server runs with restriction enabled, incoming events must satisfy the recorded schema.

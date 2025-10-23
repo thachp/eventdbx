@@ -21,7 +21,7 @@ use crate::commands::{
 #[derive(Parser)]
 #[command(author, version, about = "EventDBX server CLI")]
 struct Cli {
-    /// Path to the configuration file. Defaults to <cwd>/.eventdbx/config.toml
+    /// Path to the configuration file. Defaults to ~/.eventdbx/config.toml
     #[arg(long)]
     config: Option<PathBuf>,
 
