@@ -64,6 +64,8 @@ struct AppendEventRequest {
   patchJson @5 :Text;
   note @6 :Text;
   hasNote @7 :Bool;
+  metadataJson @8 :Text;
+  hasMetadata @9 :Bool;
 }
 
 struct AppendEventResponse {

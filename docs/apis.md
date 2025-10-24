@@ -34,10 +34,19 @@ curl -X POST \
         "payload": {
           "status": "inactive",
           "note": "Archived via REST"
+        },
+        "metadata": {
+          "@audit": { "source": "rest" }
         }
       }' \
   http://localhost:7070/v1/events
 ```
+
+Event writes enforce a few key rules:
+- `aggregate_type` and `event_type` must be lowercase `snake_case`.
+- Declare a schema for the aggregate before the first write; the initial event must end with `_created`.
+- `aggregate_id` accepts letters, numbers, underscores, and hyphens (max 128 characters) with no surrounding whitespace.
+- Payload JSON is limited to 256 KiB, and optional `metadata` objects (keys prefixed with `@`) are capped at 64 KiB so plugins can react without overwhelming the bus.
 
 ## GraphQL
 

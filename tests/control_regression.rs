@@ -7,7 +7,7 @@ use eventdbx::{
     cli_proxy::test_support::spawn_control_session,
     config::Config,
     control_capnp::{control_request, control_response},
-    schema::SchemaManager,
+    schema::{CreateSchemaInput, SchemaManager},
     service::CoreContext,
     store::EventStore,
     token::{IssueTokenInput, JwtLimits, TokenManager},
@@ -30,6 +30,11 @@ async fn control_capnp_regression_flows() -> Result<()> {
         None,
     )?);
     let schemas = Arc::new(SchemaManager::load(config.schema_store_path())?);
+    schemas.create(CreateSchemaInput {
+        aggregate: "order".into(),
+        events: vec!["order_created".into()],
+        snapshot_threshold: None,
+    })?;
     let store = Arc::new(EventStore::open(config.event_store_path(), None)?);
 
     let core = CoreContext::new(
@@ -106,11 +111,13 @@ async fn control_capnp_regression_flows() -> Result<()> {
             append.set_token(&token_record.token);
             append.set_aggregate_type("order");
             append.set_aggregate_id("order-1");
-            append.set_event_type("OrderCreated");
+            append.set_event_type("order_created");
             append.set_payload_json(r#"{"status":"created"}"#);
             append.set_patch_json("");
+            append.set_metadata_json("");
             append.set_note("");
             append.set_has_note(false);
+            append.set_has_metadata(false);
         },
         |response| match response
             .get_payload()
@@ -257,7 +264,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
     )
     .await?;
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["event_type"], "OrderCreated");
+    assert_eq!(events[0]["event_type"], "order_created");
     next_request_id += 1;
 
     let merkle = send_control_request(
@@ -334,11 +341,13 @@ async fn control_capnp_regression_flows() -> Result<()> {
             append.set_token("invalid-token");
             append.set_aggregate_type("order");
             append.set_aggregate_id("order-1");
-            append.set_event_type("OrderCreated");
+            append.set_event_type("order_created");
             append.set_payload_json(r#"{"status":"ignored"}"#);
             append.set_patch_json("");
+            append.set_metadata_json("");
             append.set_note("");
             append.set_has_note(false);
+            append.set_has_metadata(false);
         },
         |response| match response
             .get_payload()

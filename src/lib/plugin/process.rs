@@ -213,6 +213,10 @@ impl ProcessConnection {
             Some(schema) => Some(serde_json::to_string(schema)?),
             None => None,
         };
+        let extensions_json = match &record.extensions {
+            Some(value) => Some(serde_json::to_string(value)?),
+            None => None,
+        };
 
         let mut message = Builder::new_default();
         {
@@ -228,6 +232,10 @@ impl ProcessConnection {
             event.set_created_at_epoch_micros(record.metadata.created_at.timestamp_micros());
             event.set_payload_json(&payload_json);
             event.set_metadata_json(&metadata_json);
+            match extensions_json {
+                Some(ref json) => event.set_extensions_json(json),
+                None => event.set_extensions_json(""),
+            }
             event.set_hash(&record.hash);
             event.set_merkle_root(&record.merkle_root);
 

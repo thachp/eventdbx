@@ -32,6 +32,8 @@ pub struct EventRecord {
     pub aggregate_id: String,
     pub event_type: String,
     pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Value>,
     pub metadata: EventMetadata,
     pub version: u64,
     pub hash: String,
@@ -161,6 +163,7 @@ fn apply_event(
         aggregate_id,
         event_type,
         payload,
+        metadata,
         issued_by,
         note,
     } = input;
@@ -193,6 +196,7 @@ fn apply_event(
         aggregate_id,
         event_type,
         payload,
+        extensions: metadata,
         metadata: EventMetadata {
             event_id,
             created_at,
@@ -293,6 +297,7 @@ pub struct AppendEvent {
     pub aggregate_id: String,
     pub event_type: String,
     pub payload: Value,
+    pub metadata: Option<Value>,
     pub issued_by: Option<ActorClaims>,
     pub note: Option<String>,
 }
@@ -696,6 +701,15 @@ impl EventStore {
         }
 
         Ok(events)
+    }
+
+    pub fn aggregate_version(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Option<u64>> {
+        let meta = self.load_meta(aggregate_type, aggregate_id)?;
+        Ok(meta.map(|meta| meta.version))
     }
 
     pub fn list_aggregate_ids(&self, aggregate_type: &str) -> Result<Vec<String>> {
@@ -1166,6 +1180,7 @@ mod tests {
                     aggregate_id: "patient-1".into(),
                     event_type: "patient-created".into(),
                     payload: payload.clone(),
+                    metadata: None,
                     issued_by: None,
                     note: None,
                 })
@@ -1197,6 +1212,7 @@ mod tests {
                 aggregate_id: "order-42".into(),
                 event_type: "order-created".into(),
                 payload: serde_json::json!({ "status": "processing" }),
+                metadata: None,
                 issued_by: None,
                 note: None,
             })
@@ -1212,6 +1228,7 @@ mod tests {
                     "status": "shipped",
                     "tracking": "abc123"
                 }),
+                metadata: None,
                 issued_by: None,
                 note: None,
             })
@@ -1245,6 +1262,7 @@ mod tests {
                 aggregate_id: "inv-1".into(),
                 event_type: "invoice-created".into(),
                 payload: serde_json::json!({ "total": "100.00" }),
+                metadata: None,
                 issued_by: None,
                 note: None,
             })
@@ -1269,6 +1287,7 @@ mod tests {
                 aggregate_id: "order-1".into(),
                 event_type: "order-created".into(),
                 payload,
+                metadata: None,
                 issued_by: None,
                 note: None,
             })
@@ -1291,6 +1310,7 @@ mod tests {
                 aggregate_id: "order-1".into(),
                 event_type: "order-updated".into(),
                 payload: serde_json::json!({}),
+                metadata: None,
                 issued_by: None,
                 note: None,
             })
@@ -1314,6 +1334,7 @@ mod tests {
                 aggregate_id: "acct-1".into(),
                 event_type: "account-created".into(),
                 payload: serde_json::json!({ "status": "active" }),
+                metadata: None,
                 issued_by: None,
                 note: Some(note_text.clone()),
             })
@@ -1335,12 +1356,41 @@ mod tests {
                 aggregate_id: "acct-2".into(),
                 event_type: "account-created".into(),
                 payload: serde_json::json!({ "status": "pending" }),
+                metadata: None,
                 issued_by: None,
                 note: Some(long_note),
             })
             .unwrap_err();
 
         assert!(matches!(err, crate::error::EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn append_event_with_extensions_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path.clone(), None).unwrap();
+
+        let metadata = serde_json::json!({"@plugin": {"mode": "debug"}});
+        let record = store
+            .append(AppendEvent {
+                aggregate_type: "account".into(),
+                aggregate_id: "acct-3".into(),
+                event_type: "account-created".into(),
+                payload: serde_json::json!({ "status": "active" }),
+                metadata: Some(metadata.clone()),
+                issued_by: None,
+                note: None,
+            })
+            .unwrap();
+
+        assert_eq!(record.extensions, Some(metadata.clone()));
+
+        drop(store);
+        let reopened = EventStore::open(path, None).unwrap();
+        let events = reopened.list_events("account", "acct-3").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].extensions, Some(metadata));
     }
 
     #[test]
@@ -1360,6 +1410,7 @@ mod tests {
                         "address": { "city": "Portland" }
                     }
                 }),
+                metadata: None,
                 issued_by: None,
                 note: None,
             })

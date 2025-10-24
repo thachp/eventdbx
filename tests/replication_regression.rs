@@ -58,6 +58,7 @@ async fn capnp_regression_list_positions_and_pull_events() -> Result<()> {
         aggregate_id: "order-1".to_string(),
         event_type: "OrderCreated".to_string(),
         payload: json!({"status": "created"}),
+        extensions: None,
         metadata: EventMetadata {
             event_id,
             created_at,
@@ -273,6 +274,13 @@ async fn run_mock_replication_server(
                 .context("failed to encode metadata for pull_events response")?;
             builder.set_payload(&payload);
             builder.set_metadata(&metadata);
+            if let Some(extensions) = &record.extensions {
+                let bytes = serde_json::to_vec(extensions)
+                    .context("failed to encode extensions for pull_events response")?;
+                builder.set_extensions(&bytes);
+            } else {
+                builder.set_extensions(&[]);
+            }
         }
     }
     let bytes = write_message_to_words(&response);

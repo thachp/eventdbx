@@ -32,6 +32,7 @@ struct PluginEvent {
   stateMerkleRoot @13 :Text;
   stateEntries @14 :List(StateEntry);
   schemaJson @15 :Text;
+  extensionsJson @16 :Text;
 }
 
 struct StateEntry {
@@ -47,4 +48,3 @@ struct PluginError {
   sequence @0 :UInt64;
   message @1 :Text;
 }
-

@@ -51,6 +51,7 @@ struct SerializedEvent {
     hash: String,
     payload: Vec<u8>,
     metadata: Vec<u8>,
+    extensions: Vec<u8>,
 }
 
 enum ReplicationReply {
@@ -94,6 +95,7 @@ enum ControlCommand {
         event_type: String,
         payload: Option<Value>,
         patch: Option<Value>,
+        metadata: Option<Value>,
         note: Option<String>,
     },
     VerifyAggregate {
@@ -533,6 +535,22 @@ fn parse_control_command(
                 })?)
             };
 
+            let metadata = if req.get_has_metadata() {
+                let metadata_raw = read_control_text(req.get_metadata_json(), "metadata_json")?;
+                let metadata_trimmed = metadata_raw.trim();
+                if metadata_trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        serde_json::from_str::<Value>(metadata_trimmed).map_err(|err| {
+                            EventError::InvalidSchema(format!("invalid metadata_json: {err}"))
+                        })?,
+                    )
+                }
+            } else {
+                None
+            };
+
             let note = if req.get_has_note() {
                 Some(read_control_text(req.get_note(), "note")?)
             } else {
@@ -546,6 +564,7 @@ fn parse_control_command(
                 event_type,
                 payload,
                 patch,
+                metadata,
                 note,
             })
         }
@@ -626,6 +645,7 @@ async fn execute_control_command(
             event_type,
             payload,
             patch,
+            metadata,
             note,
         } => {
             let record = spawn_blocking({
@@ -637,6 +657,7 @@ async fn execute_control_command(
                     event_type: event_type.clone(),
                     payload,
                     patch,
+                    metadata,
                     note,
                 };
                 move || core.append_event(input)
@@ -881,6 +902,12 @@ fn process_replication_request(
                     .map_err(|err| anyhow!("failed to encode event payload: {err}"))?;
                 let metadata = serde_json::to_vec(&event.metadata)
                     .map_err(|err| anyhow!("failed to encode event metadata: {err}"))?;
+                let extensions = if let Some(ext) = &event.extensions {
+                    serde_json::to_vec(ext)
+                        .map_err(|err| anyhow!("failed to encode event extensions: {err}"))?
+                } else {
+                    Vec::new()
+                };
                 serialized.push(SerializedEvent {
                     aggregate_type: event.aggregate_type,
                     aggregate_id: event.aggregate_id,
@@ -890,6 +917,7 @@ fn process_replication_request(
                     hash: event.hash,
                     payload,
                     metadata,
+                    extensions,
                 });
             }
 
@@ -969,6 +997,7 @@ fn populate_replication_response(
                 record.set_hash(&event.hash);
                 record.set_payload(&event.payload);
                 record.set_metadata(&event.metadata);
+                record.set_extensions(&event.extensions);
             }
         }
         ReplicationReply::ApplyEvents { applied_sequence } => {
@@ -1002,17 +1031,29 @@ fn decode_capnp_event(
     let metadata_bytes = reader
         .get_metadata()
         .map_err(|err| anyhow!("failed to read event metadata: {err}"))?;
+    let extensions_bytes = reader
+        .get_extensions()
+        .map_err(|err| anyhow!("failed to read event extensions: {err}"))?;
 
     let payload: Value = serde_json::from_slice(payload_bytes)
         .map_err(|err| anyhow!("failed to decode event payload: {err}"))?;
     let metadata: EventMetadata = serde_json::from_slice(metadata_bytes)
         .map_err(|err| anyhow!("failed to decode event metadata: {err}"))?;
+    let extensions = if extensions_bytes.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::from_slice(extensions_bytes)
+                .map_err(|err| anyhow!("failed to decode event extensions: {err}"))?,
+        )
+    };
 
     Ok(EventRecord {
         aggregate_type,
         aggregate_id,
         event_type,
         payload,
+        extensions,
         metadata,
         version,
         hash,

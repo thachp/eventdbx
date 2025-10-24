@@ -298,6 +298,14 @@ fn encode_event(
         .map_err(|err| anyhow!("failed to encode event metadata: {err}"))?;
     builder.set_metadata(&metadata);
 
+    if let Some(extensions) = &event.extensions {
+        let bytes = serde_json::to_vec(extensions)
+            .map_err(|err| anyhow!("failed to encode event extensions: {err}"))?;
+        builder.set_extensions(&bytes);
+    } else {
+        builder.set_extensions(&[]);
+    }
+
     Ok(())
 }
 
@@ -315,17 +323,29 @@ fn decode_event(reader: crate::replication_capnp::event_record::Reader<'_>) -> R
     let metadata_bytes = reader
         .get_metadata()
         .map_err(|err| anyhow!("failed to read event metadata: {err}"))?;
+    let extensions_bytes = reader
+        .get_extensions()
+        .map_err(|err| anyhow!("failed to read event extensions: {err}"))?;
 
     let payload: Value = serde_json::from_slice(payload_bytes)
         .map_err(|err| anyhow!("failed to decode event payload: {err}"))?;
     let metadata: EventMetadata = serde_json::from_slice(metadata_bytes)
         .map_err(|err| anyhow!("failed to decode event metadata: {err}"))?;
+    let extensions = if extensions_bytes.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::from_slice(extensions_bytes)
+                .map_err(|err| anyhow!("failed to decode event extensions: {err}"))?,
+        )
+    };
 
     Ok(EventRecord {
         aggregate_type,
         aggregate_id,
         event_type,
         payload,
+        extensions,
         metadata,
         version,
         hash,

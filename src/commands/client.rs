@@ -28,6 +28,7 @@ impl ServerClient {
         event_type: &str,
         payload: Option<&Value>,
         patch: Option<&Value>,
+        metadata: Option<&Value>,
         note: Option<&str>,
     ) -> Result<EventRecord> {
         let base_url = self.base_url.clone();
@@ -37,6 +38,7 @@ impl ServerClient {
         let event_type = event_type.to_string();
         let payload = payload.cloned();
         let patch = patch.cloned();
+        let metadata = metadata.cloned();
         let note = note.map(|value| value.to_string());
 
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -49,6 +51,7 @@ impl ServerClient {
                     event_type,
                     payload,
                     patch.clone(),
+                    metadata.clone(),
                     note.clone(),
                 )
             });
@@ -62,6 +65,7 @@ impl ServerClient {
             event_type,
             payload,
             patch,
+            metadata,
             note,
         )
     }
@@ -76,6 +80,8 @@ struct AppendEventRequest<'a> {
     payload: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     patch: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<&'a str>,
 }
@@ -93,6 +99,7 @@ fn append_event_blocking(
     event_type: String,
     payload: Option<Value>,
     patch: Option<Value>,
+    metadata: Option<Value>,
     note: Option<String>,
 ) -> Result<EventRecord> {
     let client = Client::builder()
@@ -109,6 +116,7 @@ fn append_event_blocking(
         event_type,
         payload,
         patch,
+        metadata,
         note,
     )
 }
@@ -122,6 +130,7 @@ fn append_event_impl(
     event_type: String,
     payload: Option<Value>,
     patch: Option<Value>,
+    metadata: Option<Value>,
     note: Option<String>,
 ) -> Result<EventRecord> {
     let request = AppendEventRequest {
@@ -130,6 +139,7 @@ fn append_event_impl(
         event_type: &event_type,
         payload: payload.as_ref(),
         patch: patch.as_ref(),
+        metadata: metadata.as_ref(),
         note: note.as_deref(),
     };
     let url = format!("{}/v1/events", base_url);

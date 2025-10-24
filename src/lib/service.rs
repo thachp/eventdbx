@@ -2,13 +2,16 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     error::{EventError, Result},
-    restrict::{self, RestrictMode},
+    restrict::RestrictMode,
     schema::SchemaManager,
     store::{ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore},
     token::TokenManager,
+    validation::{
+        ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
+        ensure_payload_size, ensure_schema_declared, ensure_snake_case,
+    },
 };
 use serde_json::Value;
-
 /// Shared context exposing the core store, schema, and token managers so
 /// higher-level surfaces (REST, GraphQL, gRPC, plugins) can be layered on
 /// top of a consistent API.
@@ -153,8 +156,25 @@ impl CoreContext {
             event_type,
             payload,
             patch,
+            metadata,
             note,
         } = input;
+
+        ensure_snake_case("aggregate_type", &aggregate_type)?;
+        ensure_snake_case("event_type", &event_type)?;
+        ensure_aggregate_id(&aggregate_id)?;
+        if let Some(ref metadata) = metadata {
+            ensure_metadata_extensions(metadata)?;
+        }
+
+        let is_new_aggregate = match self
+            .store
+            .aggregate_version(&aggregate_type, &aggregate_id)?
+        {
+            Some(version) if version > 0 => false,
+            Some(_) | None => true,
+        };
+        ensure_first_event_rule(is_new_aggregate, &event_type)?;
 
         if payload.is_some() && patch.is_some() {
             return Err(EventError::InvalidSchema(
@@ -182,18 +202,11 @@ impl CoreContext {
             (None, None) => unreachable!(),
         };
 
-        let mode = self.restrict();
-        if mode.enforces_validation() {
-            let schemas = self.schemas();
-            if mode.requires_declared_schema() {
-                if let Err(_) = schemas.get(&aggregate_type) {
-                    return Err(EventError::SchemaViolation(
-                        restrict::strict_mode_missing_schema_message(&aggregate_type),
-                    ));
-                }
-            }
-            schemas.validate_event(&aggregate_type, &event_type, &effective_payload)?;
-        }
+        ensure_payload_size(&effective_payload)?;
+
+        let schemas = self.schemas();
+        ensure_schema_declared(schemas.as_ref(), &aggregate_type)?;
+        schemas.validate_event(&aggregate_type, &event_type, &effective_payload)?;
 
         let issued_by: Option<ActorClaims> = claims.actor_claims();
         if issued_by.is_none() {
@@ -205,6 +218,7 @@ impl CoreContext {
             aggregate_id,
             event_type,
             payload: effective_payload,
+            metadata,
             issued_by,
             note,
         })?;
@@ -233,5 +247,6 @@ pub struct AppendEventInput {
     pub event_type: String,
     pub payload: Option<Value>,
     pub patch: Option<Value>,
+    pub metadata: Option<Value>,
     pub note: Option<String>,
 }

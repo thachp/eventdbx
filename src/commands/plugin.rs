@@ -569,6 +569,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                     "status": "inactive",
                     "comment": "Archived via API"
                 }),
+                extensions: None,
                 metadata: EventMetadata {
                     event_id: Uuid::parse_str("45c3013e-9b95-4ed0-9af9-1a465f81d3cf")
                         .unwrap_or_else(|_| Uuid::new_v4()),
