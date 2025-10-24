@@ -34,17 +34,16 @@ dbx config --dek "$(cat dek.txt)"
 
 ### Optional: enable the Admin API
 
-Enable the `/admin` surface and seed a shared secret for automation:
+Enable the `/admin` surface for automation:
 
 ```bash
 dbx config \
   --admin-enabled true \
   --admin-bind 127.0.0.1 \
-  --admin-port 7171 \
-  --admin-master-key "rotate-me-please"
+  --admin-port 7171
 ```
 
-All Admin API calls must send `X-Admin-Key: rotate-me-please` (or the same value as a bearer token). Rotate the secret with the same flag or revoke it using `--clear-admin-master-key`.
+All Admin API calls must send a bearer token with full privileges. The CLI writes one to `~/.eventdbx/cli.token` on first start—share it with automation or issue a dedicated root token with `dbx token generate --root` and revoke it when you rotate credentials.
 
 ## 3. Start the server
 

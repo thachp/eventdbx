@@ -99,7 +99,7 @@ The service mirrors REST operations: `AppendEvent`, `ListAggregates`, `GetAggreg
 ```bash
 dbx remote add standby1 10.10.0.5 \
   --public-key $(dbx remote key) \
-  --port 7443
+  --port 6363
 ```
 
 Dry-run pushes report pending changes without transferring events:
@@ -115,17 +115,19 @@ Enable it with:
 ```bash
 dbx config \
   --admin-enabled true \
-  --admin-master-key "rotate-me-please"
+  --admin-bind 127.0.0.1 \
+  --admin-port 7171
 ```
 
-Requests must include the shared secret as `X-Admin-Key` or a bearer token. Example session:
+Requests must include a bearer token with `*.*` privileges. Example session using the bootstrap token written to `~/.eventdbx/cli.token`:
 
 ```bash
-curl -H "X-Admin-Key: rotate-me-please" http://127.0.0.1:7171/admin/tokens
+curl -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
+  http://127.0.0.1:7171/admin/tokens
 
-curl -X POST -H "X-Admin-Key: rotate-me-please" \
+curl -X POST -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
   -H "Content-Type: application/json" \
-  -d '{"name":"standby1","endpoint":"tcp://10.10.0.5:7443","public_key":"BASE64"}' \
+  -d '{"name":"standby1","endpoint":"tcp://10.10.0.5:6363","public_key":"BASE64"}' \
   http://127.0.0.1:7171/admin/remotes/standby1
 ```
 

@@ -16,7 +16,9 @@ use crate::{
     error::{EventError, Result},
     schema::{AggregateSchema, SchemaUpdate},
     server::{AppState, extract_bearer_token, run_cli_command, run_cli_json},
-    token::{IssueTokenInput, JwtLimits, RevokeTokenInput, TokenRecord},
+    token::{
+        IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, RevokeTokenInput, TokenRecord,
+    },
 };
 
 const ADMIN_KEY_HEADER: &str = "x-admin-key";
@@ -61,23 +63,24 @@ async fn authorize_admin(state: AppState, request: Request<Body>, next: Next) ->
 }
 
 fn check_admin_auth(state: &AppState, headers: &HeaderMap) -> Result<bool> {
-    let Some(candidate) = extract_admin_key(headers) else {
+    let Some(token) = extract_admin_token(headers) else {
         return Ok(false);
     };
 
-    let config = state.config();
-    let guard = config.read().expect("admin config lock poisoned");
-    if !guard.admin_master_key_configured() {
-        return Ok(false);
+    let manager = state.tokens();
+    match manager.authorize_action(&token, ROOT_ACTION, Some(ROOT_RESOURCE)) {
+        Ok(_) => Ok(true),
+        Err(EventError::Unauthorized)
+        | Err(EventError::InvalidToken)
+        | Err(EventError::TokenExpired) => Ok(false),
+        Err(err) => Err(err),
     }
-
-    guard.verify_admin_master_key(&candidate)
 }
 
-fn extract_admin_key(headers: &HeaderMap) -> Option<String> {
+fn extract_admin_token(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers.get(ADMIN_KEY_HEADER) {
-        if let Ok(key) = value.to_str() {
-            let trimmed = key.trim();
+        if let Ok(token) = value.to_str() {
+            let trimmed = token.trim();
             if !trimmed.is_empty() {
                 return Some(trimmed.to_string());
             }
@@ -653,9 +656,9 @@ mod tests {
 
     #[test]
     fn parse_remote_endpoint_supports_tcp_scheme() {
-        let (host, port) = parse_remote_endpoint("tcp://0.0.0.0:7443").unwrap();
+        let (host, port) = parse_remote_endpoint("tcp://0.0.0.0:6363").unwrap();
         assert_eq!(host, "0.0.0.0");
-        assert_eq!(port, Some(7443));
+        assert_eq!(port, Some(6363));
     }
 
     #[test]
@@ -667,9 +670,9 @@ mod tests {
 
     #[test]
     fn parse_remote_endpoint_handles_ipv6() {
-        let (host, port) = parse_remote_endpoint("tcp://[2001:db8::1]:7443").unwrap();
+        let (host, port) = parse_remote_endpoint("tcp://[2001:db8::1]:6363").unwrap();
         assert_eq!(host, "2001:db8::1");
-        assert_eq!(port, Some(7443));
+        assert_eq!(port, Some(6363));
     }
 
     #[test]

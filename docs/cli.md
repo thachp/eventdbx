@@ -31,9 +31,9 @@ Key flags:
 
 ## Configuration
 
-- `dbx config [--port <u16>] [--data-dir <path>] [--cache-threshold <usize>] [--dek <base64>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>] [--snapshot-threshold <u64>] [--clear-snapshot-threshold] [--admin-enabled <true|false>] [--admin-bind <addr>] [--admin-port <u16>] [--admin-master-key <secret>] [--clear-admin-master-key]`
+- `dbx config [--port <u16>] [--data-dir <path>] [--cache-threshold <usize>] [--dek <base64>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>] [--snapshot-threshold <u64>] [--clear-snapshot-threshold] [--admin-enabled <true|false>] [--admin-bind <addr>] [--admin-port <u16>]`
 
-Run without flags to print the current configuration. The first invocation must supply `--dek` (32 bytes of base64). Setting `--admin-master-key` writes an Argon2 hash of the secret and flips the Admin API online if `--admin-enabled true` is also present.
+Run without flags to print the current configuration. The first invocation must supply `--dek` (32 bytes of base64). Admin endpoints reuse JWT bearer tokens; enable them with `--admin-enabled true` and call them with a root token from `~/.eventdbx/cli.token` or `dbx token generate --root`.
 
 ## Tokens
 
@@ -100,11 +100,12 @@ Remotes authenticate through pinned Ed25519 keys and reuse the CLI socket (`tcp:
 
 ## Shortcuts for the Admin API
 
-Once you enable the Admin API with a master key, you can script administrative changes with tools like `curl`:
+Once you enable the Admin API, authenticate with a root bearer token (for example, the bootstrap token at `~/.eventdbx/cli.token`) and script administrative changes with tools like `curl`:
 
 ```bash
-curl -H "X-Admin-Key: rotate-me-please" http://127.0.0.1:7171/admin/tokens
-curl -X POST -H "X-Admin-Key: rotate-me-please" \
+curl -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
+  http://127.0.0.1:7171/admin/tokens
+curl -X POST -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
   -H "Content-Type: application/json" \
   -d '{"aggregate":"patient","events":["patient-added","patient-updated"]}' \
   http://127.0.0.1:7171/admin/schemas

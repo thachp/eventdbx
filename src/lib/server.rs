@@ -26,7 +26,6 @@ static CLI_PROXY_ADDR: OnceLock<Arc<AsyncRwLock<String>>> = OnceLock::new();
 #[derive(Clone)]
 pub(crate) struct AppState {
     core: CoreContext,
-    config: Arc<RwLock<Config>>,
     _config_path: Arc<PathBuf>,
 }
 
@@ -94,10 +93,6 @@ impl AppState {
     pub(crate) fn schemas(&self) -> Arc<SchemaManager> {
         self.core.schemas()
     }
-
-    pub(crate) fn config(&self) -> Arc<RwLock<Config>> {
-        Arc::clone(&self.config)
-    }
 }
 
 pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
@@ -138,7 +133,6 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
 
     let state = AppState {
         core: core.clone(),
-        config: Arc::clone(&shared_config),
         _config_path: Arc::clone(&config_path),
     };
 
@@ -170,13 +164,6 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     let mut app = Router::new().route("/health", get(health));
 
     let admin_config = config_snapshot.admin.clone();
-    if admin_config.enabled && !config_snapshot.admin_master_key_configured() {
-        return Err(EventError::Config(
-            "admin API requires a configured master key (`eventdbx config --admin-master-key`)"
-                .to_string(),
-        ));
-    }
-
     let mut admin_handle = None;
     if admin_config.enabled {
         let admin_router = admin::build_router(state.clone(), admin_config.clone());

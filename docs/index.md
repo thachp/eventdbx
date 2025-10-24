@@ -37,15 +37,14 @@ EventDBX keeps every change as an immutable event so you can replay history, aud
 
 3. **Configure the Admin API (optional but recommended)**
 
-   ```bash
-   dbx config \
-     --admin-enabled true \
-     --admin-bind 127.0.0.1 \
-     --admin-port 7171 \
-     --admin-master-key "rotate-me-please"
-   ```
+```bash
+dbx config \
+  --admin-enabled true \
+  --admin-bind 127.0.0.1 \
+  --admin-port 7171
+```
 
-   Requests to `/admin/...` must include `X-Admin-Key: rotate-me-please` (or the same value as a bearer token). Rotate the secret with the same flag or revoke access via `--clear-admin-master-key`.
+Requests to `/admin/...` must include an `Authorization: Bearer <token>` header with a root token (see `~/.eventdbx/cli.token` or mint one via `dbx token generate --root`). Rotate credentials by issuing a replacement token and revoking the old one.
 
 4. **Append your first event**
 

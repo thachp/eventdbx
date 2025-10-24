@@ -25,7 +25,8 @@ use eventdbx::{
     token::{IssueTokenInput, JwtLimits, TokenManager},
 };
 
-use crate::commands::client::ServerClient;
+use crate::commands::{cli_token, client::ServerClient};
+use tracing::warn;
 
 #[derive(Subcommand)]
 pub enum AggregateCommands {
@@ -702,6 +703,15 @@ fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> 
     }
     if let Some(token) = env::var("EVENTDBX_TOKEN").ok().and_then(normalize_token) {
         return Ok(token);
+    }
+    match cli_token::ensure_bootstrap_token(config) {
+        Ok(token) => return Ok(token),
+        Err(err) => {
+            warn!(
+                "failed to load CLI bootstrap token ({}); falling back to ephemeral token",
+                err
+            );
+        }
     }
     issue_ephemeral_token(config)
 }

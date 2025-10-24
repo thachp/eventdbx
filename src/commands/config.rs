@@ -42,10 +42,6 @@ pub struct ConfigArgs {
     pub admin_bind: Option<String>,
     #[arg(long = "admin-port")]
     pub admin_port: Option<u16>,
-    #[arg(long = "admin-master-key")]
-    pub admin_master_key: Option<String>,
-    #[arg(long = "clear-admin-master-key", conflicts_with = "admin_master_key")]
-    pub clear_admin_master_key: bool,
 }
 
 pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
@@ -70,8 +66,6 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         admin_enabled,
         admin_bind,
         admin_port,
-        admin_master_key,
-        clear_admin_master_key,
     } = args;
 
     let data_encryption_key = normalize_secret(data_encryption_key);
@@ -92,7 +86,6 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         } else {
             None
         };
-    let admin_master_key = normalize_secret(admin_master_key);
 
     config.apply_update(ConfigUpdate {
         port,
@@ -109,12 +102,6 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         socket: None,
         admin: admin_update,
     });
-
-    if let Some(master_key) = admin_master_key {
-        config.set_admin_master_key(&master_key)?;
-    } else if clear_admin_master_key {
-        config.clear_admin_master_key();
-    }
 
     if !was_initialized && !config.is_initialized() {
         return Err(anyhow!(
@@ -171,10 +158,4 @@ fn has_updates(args: &ConfigArgs) -> bool {
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
         || args.admin_port.is_some()
-        || args
-            .admin_master_key
-            .as_ref()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-        || args.clear_admin_master_key
 }
