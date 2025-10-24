@@ -4,29 +4,20 @@ use std::{
     sync::{Arc, OnceLock, RwLock},
 };
 
-use axum::{
-    Json, Router,
-    http::HeaderMap,
-    response::IntoResponse,
-    routing::get,
-};
+use axum::{Json, Router, http::HeaderMap, response::IntoResponse, routing::get};
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::{
-    net::TcpListener,
-    sync::RwLock as AsyncRwLock,
-};
+use tokio::{net::TcpListener, sync::RwLock as AsyncRwLock};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 use super::{
-    admin,
-    cli_proxy,
+    admin, cli_proxy,
     config::Config,
     error::{EventError, Result},
     replication_capnp_client::decode_public_key_bytes,
     schema::SchemaManager,
-    store::EventStore,
     service::CoreContext,
+    store::EventStore,
     token::TokenManager,
 };
 
@@ -153,7 +144,9 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
 
     let api = config_snapshot.api.clone();
     if api.rest_enabled() || api.graphql_enabled() || api.grpc_enabled() {
-        warn!("Built-in REST/GraphQL/gRPC surfaces are deprecated; deploy plugin surfaces instead.");
+        warn!(
+            "Built-in REST/GraphQL/gRPC surfaces are deprecated; deploy plugin surfaces instead."
+        );
     }
 
     let cli_bind_addr = config_snapshot.socket.bind_addr.clone();

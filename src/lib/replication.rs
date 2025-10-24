@@ -7,7 +7,7 @@ use crate::{
     config::{Config, RemoteConfig},
     error::{EventError, Result},
     replication_capnp_client::{
-        decode_public_key_bytes, normalize_capnp_endpoint, CapnpReplicationClient,
+        CapnpReplicationClient, decode_public_key_bytes, normalize_capnp_endpoint,
     },
     store::EventRecord,
 };

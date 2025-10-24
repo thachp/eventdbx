@@ -73,8 +73,7 @@ impl CoreContext {
     }
 
     pub fn sanitize_aggregate(&self, mut aggregate: AggregateState) -> AggregateState {
-        aggregate.state =
-            self.filter_state_map(&aggregate.aggregate_type, aggregate.state);
+        aggregate.state = self.filter_state_map(&aggregate.aggregate_type, aggregate.state);
         aggregate
     }
 
@@ -103,10 +102,7 @@ impl CoreContext {
         if self.is_hidden_aggregate(aggregate_type) {
             return Ok(None);
         }
-        match self
-            .store
-            .get_aggregate_state(aggregate_type, aggregate_id)
-        {
+        match self.store.get_aggregate_state(aggregate_type, aggregate_id) {
             Ok(aggregate) => Ok(Some(self.sanitize_aggregate(aggregate))),
             Err(EventError::AggregateNotFound) => Ok(None),
             Err(err) => Err(err),
@@ -142,11 +138,7 @@ impl CoreContext {
         Ok(events)
     }
 
-    pub fn verify_aggregate(
-        &self,
-        aggregate_type: &str,
-        aggregate_id: &str,
-    ) -> Result<String> {
+    pub fn verify_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<String> {
         if self.is_hidden_aggregate(aggregate_type) {
             return Err(EventError::AggregateNotFound);
         }
@@ -176,15 +168,16 @@ impl CoreContext {
         }
 
         let resource = format!("aggregate:{}:{}", aggregate_type, aggregate_id);
-        let claims = self
-            .tokens()
-            .authorize_action(&token, "aggregate.append", Some(resource.as_str()))?;
+        let claims =
+            self.tokens()
+                .authorize_action(&token, "aggregate.append", Some(resource.as_str()))?;
 
         let effective_payload = match (payload, patch) {
             (Some(payload), None) => payload,
-            (None, Some(patch_ops)) => self
-                .store
-                .prepare_payload_from_patch(&aggregate_type, &aggregate_id, &patch_ops)?,
+            (None, Some(patch_ops)) => {
+                self.store
+                    .prepare_payload_from_patch(&aggregate_type, &aggregate_id, &patch_ops)?
+            }
             (Some(_), Some(_)) => unreachable!(),
             (None, None) => unreachable!(),
         };

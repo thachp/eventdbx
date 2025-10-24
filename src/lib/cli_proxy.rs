@@ -15,7 +15,7 @@ use serde_json::{self, Value};
 use tokio::{
     net::{TcpListener, TcpStream},
     process::Command,
-    task::{spawn_blocking, JoinHandle},
+    task::{JoinHandle, spawn_blocking},
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, error, info, warn};
@@ -63,15 +63,24 @@ enum ReplicationReply {
 
 enum ControlReply {
     ListAggregates(String),
-    GetAggregate { found: bool, aggregate_json: Option<String> },
+    GetAggregate {
+        found: bool,
+        aggregate_json: Option<String>,
+    },
     ListEvents(String),
     AppendEvent(String),
     VerifyAggregate(String),
 }
 
 enum ControlCommand {
-    ListAggregates { skip: usize, take: Option<usize> },
-    GetAggregate { aggregate_type: String, aggregate_id: String },
+    ListAggregates {
+        skip: usize,
+        take: Option<usize>,
+    },
+    GetAggregate {
+        aggregate_type: String,
+        aggregate_id: String,
+    },
     ListEvents {
         aggregate_type: String,
         aggregate_id: String,
@@ -116,11 +125,48 @@ fn read_control_text(
     field: capnp::Result<capnp::text::Reader<'_>>,
     label: &str,
 ) -> std::result::Result<String, EventError> {
-    let reader = field
-        .map_err(|err| EventError::Serialization(format!("failed to read {label}: {err}")))?;
+    let reader =
+        field.map_err(|err| EventError::Serialization(format!("failed to read {label}: {err}")))?;
     reader
         .to_string()
         .map_err(|err| EventError::Serialization(format!("invalid utf-8 in {label}: {err}")))
+}
+
+#[cfg_attr(not(test), doc(hidden))]
+pub mod test_support {
+    use super::*;
+    use tokio::io::{DuplexStream, ReadHalf, WriteHalf, duplex, split};
+    use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+    pub fn spawn_control_session(
+        core: CoreContext,
+        shared_config: Arc<RwLock<Config>>,
+    ) -> (
+        Compat<WriteHalf<DuplexStream>>,
+        Compat<ReadHalf<DuplexStream>>,
+        tokio::task::JoinHandle<Result<()>>,
+    ) {
+        let (client, server) = duplex(4096);
+        let (server_reader_raw, server_writer_raw) = split(server);
+        let mut server_reader = server_reader_raw.compat();
+        let mut server_writer = server_writer_raw.compat_write();
+        let task = tokio::spawn(async move {
+            handle_control_session(
+                None,
+                &mut server_reader,
+                &mut server_writer,
+                core,
+                shared_config,
+            )
+            .await
+        });
+
+        let (client_reader_raw, client_writer_raw) = split(client);
+        let client_writer = client_writer_raw.compat_write();
+        let client_reader = client_reader_raw.compat();
+
+        (client_writer, client_reader, task)
+    }
 }
 
 pub async fn start(
@@ -351,7 +397,10 @@ where
                                 let mut builder = payload.init_list_aggregates();
                                 builder.set_aggregates_json(&json);
                             }
-                            ControlReply::GetAggregate { found, aggregate_json } => {
+                            ControlReply::GetAggregate {
+                                found,
+                                aggregate_json,
+                            } => {
                                 let mut builder = payload.init_get_aggregate();
                                 builder.set_found(found);
                                 if let Some(json) = aggregate_json {
@@ -413,11 +462,9 @@ fn parse_control_command(
             let skip = usize::try_from(req.get_skip())
                 .map_err(|_| EventError::InvalidSchema("skip exceeds platform limits".into()))?;
             let take = if req.get_has_take() {
-                Some(
-                    usize::try_from(req.get_take()).map_err(|_| {
-                        EventError::InvalidSchema("take exceeds platform limits".into())
-                    })?,
-                )
+                Some(usize::try_from(req.get_take()).map_err(|_| {
+                    EventError::InvalidSchema("take exceeds platform limits".into())
+                })?)
             } else {
                 None
             };
@@ -441,11 +488,9 @@ fn parse_control_command(
             let skip = usize::try_from(req.get_skip())
                 .map_err(|_| EventError::InvalidSchema("skip exceeds platform limits".into()))?;
             let take = if req.get_has_take() {
-                Some(
-                    usize::try_from(req.get_take()).map_err(|_| {
-                        EventError::InvalidSchema("take exceeds platform limits".into())
-                    })?,
-                )
+                Some(usize::try_from(req.get_take()).map_err(|_| {
+                    EventError::InvalidSchema("take exceeds platform limits".into())
+                })?)
             } else {
                 None
             };
@@ -483,11 +528,9 @@ fn parse_control_command(
             let patch = if patch_trimmed.is_empty() {
                 None
             } else {
-                Some(
-                    serde_json::from_str::<Value>(patch_trimmed).map_err(|err| {
-                        EventError::InvalidSchema(format!("invalid patch_json: {err}"))
-                    })?,
-                )
+                Some(serde_json::from_str::<Value>(patch_trimmed).map_err(|err| {
+                    EventError::InvalidSchema(format!("invalid patch_json: {err}"))
+                })?)
             };
 
             let note = if req.get_has_note() {
@@ -543,7 +586,7 @@ async fn execute_control_command(
                 let core = core.clone();
                 let aggregate_type = aggregate_type.clone();
                 let aggregate_id = aggregate_id.clone();
-              move || core.get_aggregate(&aggregate_type, &aggregate_id)
+                move || core.get_aggregate(&aggregate_type, &aggregate_id)
             })
             .await
             .map_err(|err| EventError::Storage(format!("get aggregate task failed: {err}")))??;
