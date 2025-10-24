@@ -33,19 +33,9 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    - Omit `--foreground` to daemonise the process.
    - Use `--data-dir <path>` to override the default `$HOME/.eventdbx` directory.
   - Restriction (schema enforcement) defaults to `default`; switch to `--restrict=off` for permissive prototyping or `--restrict=strict` to require declared schemas on every write.
-   - The server owns the RocksDB lock while it is running; the CLI detects this and automatically proxies write commands through the HTTP API. Stop the daemon only when you need offline tasks like staging or manual maintenance.
+  - The server owns the RocksDB lock while it is running; the CLI detects this and automatically proxies write commands through the control socket. Stop the daemon only when you need offline tasks like staging or manual maintenance.
 
-- Choose the API surfaces with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). Persist the selection by editing the `[api]` table in `config.toml`, for example:
-  ```
-  [api]
-  rest = true
-  graphql = true
-  grpc = true
-  ```
-- Default ports can be overridden in `config.toml`:
-  - REST and GraphQL share the HTTP listener defined by `port` (default `7070`).
-  - gRPC uses `[grpc].bind_addr` (default `0.0.0.0:7070`, sharing the HTTP listener).
-  - The CLI socket listens on `[socket].bind_addr` (default `0.0.0.0:6363`).
+- Public REST/GraphQL/gRPC surfaces now live in the [dbx_plugins workspace](https://github.com/thachp/dbx_plugins). Deploy the `rest_api`, `graphql_api`, or `grpc_api` binaries alongside the daemon to expose those endpoints. The built-in server only retains the admin API and control socket.
 
 3. **Define a schema (recommended when running in restricted mode)**
 
@@ -64,27 +54,11 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    ```
 
 5. **Append an event**
-   - When the server is running the CLI proxies writes through the REST API automatically. Pass a token with `--token` or set `EVENTDBX_TOKEN` to reuse your own credentials; otherwise the CLI mints a short-lived token for the call.
+   - When the server is running the CLI proxies writes through the control socket automatically. Pass a token with `--token` or set `EVENTDBX_TOKEN` to reuse your own credentials; otherwise the CLI mints a short-lived token for the call.
      ```bash
      dbx aggregate apply person p-002 patient-added \
        --field name="Jane Doe" \
        --field status=active
-     ```
-   - You can also call the REST endpoint directly:
-     ```bash
-     export EVENTDBX_TOKEN=<token from step 4>
-     curl -X POST http://127.0.0.1:7070/v1/events \
-       -H "Authorization: Bearer ${EVENTDBX_TOKEN}" \
-       -H "Content-Type: application/json" \
-       -d '{
-         "aggregate_type": "person",
-         "aggregate_id": "p-002",
-         "event_type": "patient-added",
-         "payload": {
-           "name": "Jane Doe",
-           "status": "active"
-         }
-       }'
      ```
    - If the server is stopped, the same CLI command writes to the local RocksDB store directly.
 
@@ -332,7 +306,7 @@ Example HTTP/TCP payload (`EventRecord`):
 
 ## REST API
 
-The server exposes a small HTTP API (served on port `7070` by default). All endpoints require a bearer token unless otherwise noted.
+Run the `rest_api` plugin (`cargo run -p rest_api -- --bind 0.0.0.0:7070 --control 127.0.0.1:6363`) to expose the HTTP surface. All endpoints require a bearer token unless otherwise noted.
 
 | Method & Path                                               | Description                                                       |
 | ----------------------------------------------------------- | ----------------------------------------------------------------- |
@@ -400,7 +374,7 @@ curl \
 
 ## gRPC API
 
-Enable the gRPC surface by setting `[api] grpc = true` in `config.toml`. The `[grpc]` table configures the bind address (default `0.0.0.0:7070`, reusing the HTTP listener). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
+Run the `grpc_api` plugin (`cargo run -p grpc_api -- --bind 0.0.0.0:7072 --control 127.0.0.1:6363`) to expose the EventService defined in `proto/api.proto`. The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
 
 Example `grpcurl` invocation:
 
@@ -412,12 +386,12 @@ grpcurl -H "authorization: Bearer TOKEN" \
         "event_type": "patient-updated",
         "payload_json": "{\"status\":\"inactive\"}"
       }' \
-  -plaintext 127.0.0.1:7070 dbx.api.EventService/AppendEvent
+  -plaintext 127.0.0.1:7072 dbx.api.EventService/AppendEvent
 ```
 
 ## GraphQL API
 
-GraphQL is served on `/graphql`, and an interactive Playground is available via `GET /graphql` or `/graphql/playground`. Supply the same bearer token header used for REST requests.
+GraphQL is served by the `graphql_api` plugin (`/graphql`). Supply the same bearer token header used elsewhere.
 
 ### Query example
 
@@ -429,7 +403,7 @@ curl -X POST \
         "query": "query RecentAggregates($take: Int!) { aggregates(take: $take) { aggregate_type aggregate_id version merkle_root state } }",
         "variables": { "take": 5 }
       }' \
-  http://localhost:7070/graphql
+  http://localhost:7071/graphql
 ```
 
 Sample response:
@@ -470,7 +444,7 @@ curl -X POST \
           }
         }
       }' \
-  http://localhost:7070/graphql
+  http://localhost:7071/graphql
 ```
 
 The mutation triggers the same validation, replication, and plugin notifications as the REST endpoint.

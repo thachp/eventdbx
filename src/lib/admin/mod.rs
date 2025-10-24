@@ -624,13 +624,6 @@ fn build_plugin_config_args(name: &str, request: &PluginUpsertRequest) -> Result
                 args.push(format!("{}={}", key, value));
             }
         }
-        PluginConfig::Grpc(cfg) => {
-            args.push("grpc".to_string());
-            args.push("--name".to_string());
-            args.push(name.to_string());
-            args.push("--endpoint".to_string());
-            args.push(cfg.endpoint.clone());
-        }
         PluginConfig::Tcp(cfg) => {
             args.push("tcp".to_string());
             args.push("--name".to_string());

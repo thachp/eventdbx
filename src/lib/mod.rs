@@ -1,5 +1,4 @@
 pub mod admin;
-pub mod api_grpc;
 pub mod cache;
 pub mod cli_capnp;
 pub mod cli_proxy;
@@ -7,7 +6,6 @@ pub mod config;
 pub mod encryption;
 pub mod error;
 pub mod control_capnp;
-pub mod graphql;
 pub mod merkle;
 pub mod plugin;
 pub mod plugin_capnp;

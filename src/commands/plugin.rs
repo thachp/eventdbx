@@ -15,8 +15,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use eventdbx::config::{
-    Config, GrpcPluginConfig, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition,
-    PluginKind, ProcessPluginConfig, TcpPluginConfig, load_or_default,
+    Config, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition, PluginKind,
+    ProcessPluginConfig, TcpPluginConfig, load_or_default,
 };
 use eventdbx::plugin::{
     Plugin, establish_connection, instantiate_plugin,
@@ -110,9 +110,6 @@ pub enum PluginConfigureCommands {
     /// Configure the HTTP plugin
     #[command(name = "http")]
     Http(PluginHttpConfigureArgs),
-    /// Configure the gRPC plugin
-    #[command(name = "grpc")]
-    Grpc(PluginGrpcConfigureArgs),
     /// Configure the logging plugin
     #[command(name = "log")]
     Log(PluginLogConfigureArgs),
@@ -159,21 +156,6 @@ pub struct PluginHttpConfigureArgs {
     pub https: bool,
 
     /// Name for this HTTP plugin instance
-    #[arg(long)]
-    pub name: String,
-}
-
-#[derive(Args)]
-pub struct PluginGrpcConfigureArgs {
-    /// gRPC endpoint to send replication batches to
-    #[arg(long)]
-    pub endpoint: String,
-
-    /// Disable the plugin after configuring
-    #[arg(long, default_value_t = false)]
-    pub disable: bool,
-
-    /// Name for this gRPC plugin instance
     #[arg(long)]
     pub name: String,
 }
@@ -362,43 +344,6 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 config.save_plugins(&plugins)?;
                 println!(
                     "HTTP plugin '{}' {}",
-                    label,
-                    if args.disable {
-                        "disabled"
-                    } else {
-                        "configured"
-                    }
-                );
-            }
-            PluginConfigureCommands::Grpc(args) => {
-                let name = args.name.trim();
-                if name.is_empty() {
-                    bail!("plugin name cannot be empty");
-                }
-                let name_owned = name.to_string();
-                let label = display_label(name);
-                match find_plugin_mut(&mut plugins, PluginKind::Grpc, Some(name))? {
-                    Some(plugin) => {
-                        plugin.enabled = !args.disable;
-                        plugin.name = Some(name_owned.clone());
-                        plugin.config = PluginConfig::Grpc(GrpcPluginConfig {
-                            endpoint: args.endpoint.clone(),
-                        });
-                    }
-                    None => {
-                        ensure_unique_plugin_name(&plugins, name)?;
-                        plugins.push(PluginDefinition {
-                            enabled: !args.disable,
-                            name: Some(name_owned.clone()),
-                            config: PluginConfig::Grpc(GrpcPluginConfig {
-                                endpoint: args.endpoint.clone(),
-                            }),
-                        });
-                    }
-                }
-                config.save_plugins(&plugins)?;
-                println!(
-                    "gRPC plugin '{}' {}",
                     label,
                     if args.disable {
                         "disabled"
@@ -1258,7 +1203,6 @@ pub(crate) fn plugin_kind_name(kind: PluginKind) -> &'static str {
     match kind {
         PluginKind::Tcp => "tcp",
         PluginKind::Http => "http",
-        PluginKind::Grpc => "grpc",
         PluginKind::Log => "log",
         PluginKind::Process => "process",
     }

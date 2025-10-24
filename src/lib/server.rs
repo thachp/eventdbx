@@ -1,43 +1,31 @@
 use std::{
-    future::Future,
-    io,
     net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{Arc, OnceLock, RwLock},
 };
 
-use async_graphql::http::GraphQLPlaygroundConfig;
-use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::{
-    Extension, Json, Router,
-    extract::{Path, Query, State},
+    Json, Router,
     http::HeaderMap,
-    response::{Html, IntoResponse},
-    routing::{get, post},
+    response::IntoResponse,
+    routing::get,
 };
-use futures::StreamExt;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::Value;
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::{RwLock as AsyncRwLock, mpsc},
+    net::TcpListener,
+    sync::RwLock as AsyncRwLock,
 };
-use tokio_stream::wrappers::ReceiverStream;
 use tower_http::trace::TraceLayer;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use super::{
     admin,
-    api_grpc::GrpcApi,
     cli_proxy,
     config::Config,
     error::{EventError, Result},
-    graphql::{EventSchema, GraphqlState, build_schema},
-    plugin::PluginManager,
     replication_capnp_client::decode_public_key_bytes,
-    restrict::RestrictMode,
     schema::SchemaManager,
-    store::{ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore},
+    store::EventStore,
     service::CoreContext,
     token::TokenManager,
 };
@@ -119,30 +107,6 @@ impl AppState {
     pub(crate) fn config(&self) -> Arc<RwLock<Config>> {
         Arc::clone(&self.config)
     }
-
-    pub(crate) fn restrict(&self) -> RestrictMode {
-        self.core.restrict()
-    }
-
-    pub(crate) fn list_page_size(&self) -> usize {
-        self.core.list_page_size()
-    }
-
-    pub(crate) fn page_limit(&self) -> usize {
-        self.core.page_limit()
-    }
-
-    pub(crate) fn is_hidden_aggregate(&self, aggregate_type: &str) -> bool {
-        self.core.is_hidden_aggregate(aggregate_type)
-    }
-
-    pub(crate) fn sanitize_aggregate(&self, aggregate: AggregateState) -> AggregateState {
-        self.core.sanitize_aggregate(aggregate)
-    }
-
-    pub(crate) fn store(&self) -> Arc<EventStore> {
-        self.core.store()
-    }
 }
 
 pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
@@ -188,37 +152,8 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     };
 
     let api = config_snapshot.api.clone();
-    let grpc_enabled = api.grpc_enabled();
-    let mut grpc_handle = None;
-    let mut shared_grpc = false;
-
-    if grpc_enabled {
-        let parsed: SocketAddr = config_snapshot.grpc.bind_addr.parse().map_err(|err| {
-            EventError::Config(format!(
-                "invalid gRPC bind address {}: {}",
-                config_snapshot.grpc.bind_addr, err
-            ))
-        })?;
-        shared_grpc = parsed.port() == config_snapshot.port;
-
-        if !shared_grpc {
-            let grpc_state = state.clone();
-            let addr = parsed;
-            grpc_handle = Some(tokio::spawn(async move {
-                info!("Starting gRPC API server on {}", addr);
-                if let Err(err) = tonic::transport::Server::builder()
-                    .add_service(GrpcApi::new(grpc_state).into_server())
-                    .serve_with_shutdown(addr, async {
-                        shutdown_signal().await;
-                    })
-                    .await
-                {
-                    warn!("gRPC API server failed: {}", err);
-                } else {
-                    info!("gRPC API server stopped");
-                }
-            }));
-        }
+    if api.rest_enabled() || api.graphql_enabled() || api.grpc_enabled() {
+        warn!("Built-in REST/GraphQL/gRPC surfaces are deprecated; deploy plugin surfaces instead.");
     }
 
     let cli_bind_addr = config_snapshot.socket.bind_addr.clone();
@@ -239,44 +174,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     .await
     .map_err(|err| EventError::Config(format!("failed to start CLI proxy: {err}")))?;
 
-    if !api.rest_enabled() && !api.graphql_enabled() && !grpc_enabled {
-        return Err(EventError::Config(
-            "at least one API surface (REST, GraphQL, or gRPC) must be enabled".to_string(),
-        ));
-    }
-
-    let mut app = Router::new();
-
-    if api.rest_enabled() {
-        let rest_router = Router::new()
-            .route("/health", get(health))
-            .route("/v1/aggregates", get(list_aggregates))
-            .route(
-                "/v1/aggregates/{aggregate_type}/{aggregate_id}",
-                get(get_aggregate),
-            )
-            .route(
-                "/v1/aggregates/{aggregate_type}/{aggregate_id}/events",
-                get(list_events),
-            )
-            .route("/v1/events", post(append_event_global))
-            .route(
-                "/v1/aggregates/{aggregate_type}/{aggregate_id}/verify",
-                get(verify_aggregate),
-            )
-            .with_state(state.clone());
-        app = app.merge(rest_router);
-    }
-
-    if api.graphql_enabled() {
-        let graphql_state = GraphqlState::new(state.clone());
-        let graphql_schema = build_schema(graphql_state);
-        let graphql_router = Router::new()
-            .route("/graphql", get(graphql_playground).post(graphql_handler))
-            .route("/graphql/playground", get(graphql_playground))
-            .layer(Extension(graphql_schema));
-        app = app.merge(graphql_router);
-    }
+    let mut app = Router::new().route("/health", get(health));
 
     let admin_config = config_snapshot.admin.clone();
     if admin_config.enabled && !config_snapshot.admin_master_key_configured() {
@@ -327,26 +225,13 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         "Starting EventDBX server on {addr} (restrict={})",
         config_snapshot.restrict
     );
-    if shared_grpc {
-        info!(
-            "Starting gRPC API server on shared HTTP listener (port {})",
-            config_snapshot.port
-        );
-    }
 
     let listener = TcpListener::bind(addr).await?;
-    let result = if shared_grpc {
-        serve_shared(listener, app, state.clone()).await
-    } else {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-            .map_err(|err| EventError::Storage(err.to_string()))
-    };
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(|err| EventError::Storage(err.to_string()));
 
-    if let Some(handle) = grpc_handle {
-        handle.abort();
-    }
     if let Some(handle) = admin_handle {
         handle.abort();
     }
@@ -357,107 +242,6 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn serve_shared(listener: TcpListener, app: Router, grpc_state: AppState) -> Result<()> {
-    let (grpc_tx, grpc_rx) = mpsc::channel::<TcpStream>(64);
-
-    let http_listener = SharedHttpListener::new(listener, grpc_tx);
-
-    let grpc_future = async {
-        let incoming = ReceiverStream::new(grpc_rx).map(|stream| Ok::<_, io::Error>(stream));
-        tonic::transport::Server::builder()
-            .add_service(GrpcApi::new(grpc_state).into_server())
-            .serve_with_incoming_shutdown(incoming, async {
-                shutdown_signal().await;
-            })
-            .await
-    };
-
-    let http_future = axum::serve(http_listener, app).with_graceful_shutdown(shutdown_signal());
-
-    let (grpc_result, http_result) = tokio::join!(grpc_future, http_future);
-
-    match grpc_result {
-        Ok(_) => info!("gRPC API server stopped"),
-        Err(err) => {
-            warn!("gRPC API server failed: {}", err);
-            return Err(EventError::Storage(err.to_string()));
-        }
-    }
-
-    http_result.map_err(|err| EventError::Storage(err.to_string()))
-}
-
-struct SharedHttpListener {
-    inner: TcpListener,
-    grpc_tx: mpsc::Sender<TcpStream>,
-}
-
-impl SharedHttpListener {
-    fn new(inner: TcpListener, grpc_tx: mpsc::Sender<TcpStream>) -> Self {
-        Self { inner, grpc_tx }
-    }
-}
-
-impl axum::serve::Listener for SharedHttpListener {
-    type Io = TcpStream;
-    type Addr = SocketAddr;
-
-    fn accept(&mut self) -> impl Future<Output = (Self::Io, Self::Addr)> + Send {
-        let listener = &self.inner;
-        let grpc_sender = self.grpc_tx.clone();
-
-        async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, addr)) => {
-                        if let Err(err) = stream.set_nodelay(true) {
-                            warn!("failed to set TCP_NODELAY on incoming connection: {err}");
-                        }
-
-                        if is_grpc_connection(&stream).await {
-                            if let Err(err) = grpc_sender.send(stream).await {
-                                warn!("dropping gRPC connection: {}", err);
-                            }
-                            continue;
-                        }
-
-                        return (stream, addr);
-                    }
-                    Err(err) => {
-                        warn!("failed to accept connection: {}", err);
-                        continue;
-                    }
-                }
-            }
-        }
-    }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.inner.local_addr()
-    }
-}
-
-async fn is_grpc_connection(stream: &TcpStream) -> bool {
-    const PREFACE: &[u8] = b"PRI";
-    let mut buf = [0u8; 3];
-    match stream.peek(&mut buf).await {
-        Ok(n) if n >= PREFACE.len() => &buf[..PREFACE.len()] == PREFACE,
-        Ok(_) => false,
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ) =>
-        {
-            false
-        }
-        Err(err) => {
-            warn!("failed to peek connection bytes: {}", err);
-            false
-        }
-    }
-}
-
 async fn health() -> impl IntoResponse {
     Json(HealthResponse { status: "ok" })
 }
@@ -465,289 +249,6 @@ async fn health() -> impl IntoResponse {
 #[derive(Serialize)]
 struct HealthResponse<'a> {
     status: &'a str,
-}
-
-#[derive(Deserialize, Default)]
-struct AggregatesQuery {
-    #[serde(default)]
-    skip: Option<usize>,
-    #[serde(default)]
-    take: Option<usize>,
-}
-
-async fn list_aggregates(
-    State(state): State<AppState>,
-    Query(params): Query<AggregatesQuery>,
-) -> Result<Json<Vec<AggregateState>>> {
-    let skip = params.skip.unwrap_or(0);
-    let mut take = params.take.unwrap_or(state.list_page_size());
-    if take == 0 {
-        return Ok(Json(Vec::new()));
-    }
-    if take > state.page_limit() {
-        take = state.page_limit();
-    }
-    let args = vec![
-        "aggregate".to_string(),
-        "list".to_string(),
-        "--skip".to_string(),
-        skip.to_string(),
-        "--take".to_string(),
-        take.to_string(),
-        "--json".to_string(),
-    ];
-
-    let aggregates: Vec<AggregateState> = run_cli_json(args).await?;
-    let page = aggregates
-        .into_iter()
-        .filter(|aggregate| !state.is_hidden_aggregate(&aggregate.aggregate_type))
-        .map(|aggregate| state.sanitize_aggregate(aggregate))
-        .collect();
-    Ok(Json(page))
-}
-
-async fn get_aggregate(
-    State(state): State<AppState>,
-    Path((aggregate_type, aggregate_id)): Path<(String, String)>,
-) -> Result<Json<AggregateState>> {
-    if state.is_hidden_aggregate(&aggregate_type) {
-        return Err(EventError::AggregateNotFound);
-    }
-    let args = vec![
-        "aggregate".to_string(),
-        "get".to_string(),
-        aggregate_type.clone(),
-        aggregate_id.clone(),
-    ];
-
-    let mut aggregate: AggregateState = run_cli_json(args).await?;
-    aggregate = state.sanitize_aggregate(aggregate);
-    Ok(Json(aggregate))
-}
-
-#[derive(Deserialize, Default)]
-struct EventsQuery {
-    #[serde(default)]
-    skip: Option<usize>,
-    #[serde(default)]
-    take: Option<usize>,
-}
-
-async fn list_events(
-    State(state): State<AppState>,
-    Path((aggregate_type, aggregate_id)): Path<(String, String)>,
-    Query(params): Query<EventsQuery>,
-) -> Result<Json<Vec<EventRecord>>> {
-    if state.is_hidden_aggregate(&aggregate_type) {
-        return Err(EventError::AggregateNotFound);
-    }
-    let skip = params.skip.unwrap_or(0);
-    let mut take = params.take.unwrap_or(state.page_limit());
-    if take == 0 {
-        return Ok(Json(Vec::new()));
-    }
-    if take > state.page_limit() {
-        take = state.page_limit();
-    }
-
-    let args = vec![
-        "aggregate".to_string(),
-        "replay".to_string(),
-        aggregate_type.clone(),
-        aggregate_id.clone(),
-        "--skip".to_string(),
-        skip.to_string(),
-        "--take".to_string(),
-        take.to_string(),
-        "--json".to_string(),
-    ];
-
-    let events: Vec<EventRecord> = run_cli_json(args).await?;
-    Ok(Json(events))
-}
-
-async fn graphql_handler(
-    Extension(schema): Extension<EventSchema>,
-    headers: HeaderMap,
-    request: GraphQLRequest,
-) -> GraphQLResponse {
-    let request = request.into_inner().data(headers);
-    schema.execute(request).await.into()
-}
-
-async fn graphql_playground() -> impl IntoResponse {
-    Html(async_graphql::http::playground_source(
-        GraphQLPlaygroundConfig::new("/graphql"),
-    ))
-}
-
-#[derive(Deserialize)]
-struct AppendEventGlobalRequest {
-    aggregate_type: String,
-    aggregate_id: String,
-    event_type: String,
-    #[serde(default)]
-    payload: Option<Value>,
-    #[serde(default)]
-    patch: Option<Value>,
-    #[serde(default)]
-    note: Option<String>,
-}
-
-async fn append_event_global(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<AppendEventGlobalRequest>,
-) -> Result<Json<EventRecord>> {
-    let token = extract_bearer_token(&headers).ok_or(EventError::Unauthorized)?;
-    let AppendEventGlobalRequest {
-        aggregate_type,
-        aggregate_id,
-        event_type,
-        payload,
-        patch,
-        note,
-    } = request;
-    let resource = format!("aggregate:{}:{}", aggregate_type, aggregate_id);
-    let claims =
-        state
-            .tokens()
-            .authorize_action(&token, "aggregate.append", Some(resource.as_str()))?;
-
-    if patch.is_some() && payload.is_some() {
-        return Err(EventError::InvalidSchema(
-            "payload and patch cannot be provided together".into(),
-        ));
-    }
-
-    let store = state.store();
-    let schemas = state.schemas();
-
-    let effective_payload = if let Some(patch_ops) = patch.as_ref() {
-        store.prepare_payload_from_patch(&aggregate_type, &aggregate_id, patch_ops)?
-    } else if let Some(payload) = payload {
-        payload
-    } else {
-        return Err(EventError::InvalidSchema(
-            "either payload or patch must be provided".into(),
-        ));
-    };
-
-    let mode = state.restrict();
-    if mode.enforces_validation() {
-        if mode.requires_declared_schema() {
-            if let Err(_) = schemas.get(&aggregate_type) {
-                return Err(EventError::SchemaViolation(
-                    crate::restrict::strict_mode_missing_schema_message(&aggregate_type),
-                ));
-            }
-        }
-        schemas.validate_event(&aggregate_type, &event_type, &effective_payload)?;
-    }
-
-    let actor_claims = claims.actor_claims().ok_or(EventError::Unauthorized)?;
-    let issued_by: Option<ActorClaims> = Some(actor_claims);
-    let append_input = AppendEvent {
-        aggregate_type: aggregate_type.clone(),
-        aggregate_id: aggregate_id.clone(),
-        event_type: event_type.clone(),
-        payload: effective_payload.clone(),
-        issued_by,
-        note,
-    };
-
-    let record = tokio::task::spawn_blocking({
-        let store = Arc::clone(&store);
-        move || store.append(append_input)
-    })
-    .await
-    .map_err(|err| EventError::Storage(format!("failed to append event: {err}")))??;
-
-    if schemas.should_snapshot(&record.aggregate_type, record.version) {
-        let aggregate_type = record.aggregate_type.clone();
-        let aggregate_id = record.aggregate_id.clone();
-        let version = record.version;
-        let snapshot_result = tokio::task::spawn_blocking({
-            let store = Arc::clone(&store);
-            move || {
-                store.create_snapshot(
-                    &aggregate_type,
-                    &aggregate_id,
-                    Some(format!("auto snapshot v{}", version)),
-                )
-            }
-        })
-        .await
-        .map_err(|err| EventError::Storage(format!("failed to create auto snapshot: {err}")))?;
-
-        if let Err(err) = snapshot_result {
-            warn!(
-                target: "server",
-                "failed to create auto snapshot for {}::{} v{}: {}",
-                record.aggregate_type,
-                record.aggregate_id,
-                record.version,
-                err
-            );
-        }
-    }
-
-    let plugins = {
-        let config = state.config();
-        let guard = config.read().unwrap();
-        PluginManager::from_config(&*guard)?
-    };
-
-    if !plugins.is_empty() {
-        let schema = schemas.get(&record.aggregate_type).ok();
-        let aggregate_type = record.aggregate_type.clone();
-        let aggregate_id = record.aggregate_id.clone();
-        let state_result = tokio::task::spawn_blocking({
-            let store = Arc::clone(&store);
-            move || store.get_aggregate_state(&aggregate_type, &aggregate_id)
-        })
-        .await
-        .map_err(|err| EventError::Storage(format!("failed to load aggregate state: {err}")))?;
-
-        match state_result {
-            Ok(current_state) => {
-                if let Err(err) = plugins.notify_event(&record, &current_state, schema.as_ref()) {
-                    error!("plugin notification failed: {err}");
-                }
-            }
-            Err(err) => {
-                warn!(
-                    "plugin notification skipped (failed to load state for {}::{}): {}",
-                    record.aggregate_type, record.aggregate_id, err
-                );
-            }
-        }
-    }
-
-    Ok(Json(record))
-}
-
-async fn verify_aggregate(
-    State(state): State<AppState>,
-    Path((aggregate_type, aggregate_id)): Path<(String, String)>,
-) -> Result<Json<VerifyResponse>> {
-    if state.is_hidden_aggregate(&aggregate_type) {
-        return Err(EventError::AggregateNotFound);
-    }
-    let args = vec![
-        "aggregate".to_string(),
-        "verify".to_string(),
-        aggregate_type.clone(),
-        aggregate_id.clone(),
-        "--json".to_string(),
-    ];
-    let response: VerifyResponse = run_cli_json(args).await?;
-    Ok(Json(response))
-}
-
-#[derive(Serialize, Deserialize)]
-struct VerifyResponse {
-    merkle_root: String,
 }
 
 pub(crate) fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {

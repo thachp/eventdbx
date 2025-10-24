@@ -15,8 +15,6 @@ mod tcp;
 use tcp::TcpPlugin;
 mod http;
 use http::HttpPlugin;
-mod grpc;
-use grpc::GrpcPlugin;
 mod log;
 use log::LogPlugin;
 use process::ProcessPlugin;
@@ -85,10 +83,6 @@ pub fn establish_connection(definition: &PluginDefinition) -> Result<()> {
             let plugin = HttpPlugin::new(settings.clone());
             plugin.ensure_ready()
         }
-        PluginConfig::Grpc(settings) => {
-            let plugin = GrpcPlugin::new(settings.clone());
-            plugin.ensure_ready()
-        }
         PluginConfig::Log(settings) => {
             let plugin = LogPlugin::new(settings.clone());
             plugin.ensure_ready()
@@ -101,7 +95,6 @@ pub fn instantiate_plugin(definition: &PluginDefinition, config: &Config) -> Box
     match &definition.config {
         PluginConfig::Tcp(settings) => Box::new(TcpPlugin::new(settings.clone())),
         PluginConfig::Http(settings) => Box::new(HttpPlugin::new(settings.clone())),
-        PluginConfig::Grpc(settings) => Box::new(GrpcPlugin::new(settings.clone())),
         PluginConfig::Log(settings) => Box::new(LogPlugin::new(settings.clone())),
         PluginConfig::Process(settings) => {
             let identifier = definition

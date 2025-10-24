@@ -360,10 +360,6 @@ pub fn normalize_capnp_endpoint(endpoint: &str) -> Result<String> {
         Ok(rest.to_string())
     } else if let Some(rest) = trimmed.strip_prefix("capnp://") {
         Ok(rest.to_string())
-    } else if let Some(rest) = trimmed.strip_prefix("grpc://") {
-        Ok(rest.to_string())
-    } else if let Some(rest) = trimmed.strip_prefix("grpcs://") {
-        Ok(rest.to_string())
     } else if trimmed.contains("://") {
         bail!("unsupported replication endpoint scheme: {endpoint}");
     } else {

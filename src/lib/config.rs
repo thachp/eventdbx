@@ -83,9 +83,9 @@ impl ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            rest: true,
-            graphql: true,
-            grpc: true,
+            rest: false,
+            graphql: false,
+            grpc: false,
         }
     }
 }
@@ -878,7 +878,6 @@ pub struct PluginDefinition {
 pub enum PluginConfig {
     Tcp(TcpPluginConfig),
     Http(HttpPluginConfig),
-    Grpc(GrpcPluginConfig),
     Log(LogPluginConfig),
     Process(ProcessPluginConfig),
 }
@@ -888,7 +887,6 @@ impl PluginConfig {
         match self {
             PluginConfig::Tcp(_) => PluginKind::Tcp,
             PluginConfig::Http(_) => PluginKind::Http,
-            PluginConfig::Grpc(_) => PluginKind::Grpc,
             PluginConfig::Log(_) => PluginKind::Log,
             PluginConfig::Process(_) => PluginKind::Process,
         }
@@ -900,7 +898,6 @@ impl PluginConfig {
 pub enum PluginKind {
     Tcp,
     Http,
-    Grpc,
     Log,
     Process,
 }
@@ -918,11 +915,6 @@ pub struct HttpPluginConfig {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub https: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GrpcPluginConfig {
-    pub endpoint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

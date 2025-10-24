@@ -6,11 +6,11 @@ nav_id: apis
 
 # API Reference
 
-EventDBX exposes multiple surfaces so you can choose the right tool for each integration. Tokens issued by the CLI are accepted everywhere unless specifically noted.
+EventDBX exposes multiple surfaces so you can choose the right tool for each integration. Tokens issued by the CLI are accepted everywhere unless specifically noted. REST/GraphQL/gRPC are now provided by companion binaries in the [dbx_plugins](https://github.com/thachp/dbx_plugins) workspace; the core daemon retains the admin API, replication socket, and control channel.
 
 ## REST
 
-Base URL defaults to `http://localhost:7070`.
+Run the `rest_api` plugin to expose these routes (`cargo run -p rest_api -- --bind 0.0.0.0:7070 --control 127.0.0.1:6363`). Base URL defaults to `http://localhost:7070`.
 
 | Endpoint | Description |
 | --- | --- |
@@ -41,7 +41,7 @@ curl -X POST \
 
 ## GraphQL
 
-GraphQL shares the REST listener (`/graphql`). Supply the same bearer token.
+Launch the `graphql_api` plugin (`cargo run -p graphql_api -- --bind 0.0.0.0:7071 --control 127.0.0.1:6363`). Supply the same bearer token.
 
 ```bash
 curl -X POST \
@@ -76,7 +76,7 @@ curl -X POST \
 
 ## gRPC
 
-Enable gRPC with `dbx start --api grpc` (or `--api all`). Use `grpcurl` for quick checks:
+Launch the `grpc_api` plugin (`cargo run -p grpc_api -- --bind 0.0.0.0:7072 --control 127.0.0.1:6363`). Use `grpcurl` for quick checks:
 
 ```bash
 grpcurl \

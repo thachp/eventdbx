@@ -49,10 +49,10 @@ All Admin API calls must send `X-Admin-Key: rotate-me-please` (or the same value
 ## 3. Start the server
 
 ```bash
-dbx start --foreground --api rest --api graphql --api grpc
+dbx start --foreground
 ```
 
-By default EventDBX stores data under `~/.eventdbx/data`. Override it with `dbx start --data-dir <path>`. The process writes a PID file so `dbx stop` can terminate it cleanly later.
+By default EventDBX stores data under `~/.eventdbx/data`. Override it with `dbx start --data-dir <path>`. The process writes a PID file so `dbx stop` can terminate it cleanly later. Public REST/GraphQL/gRPC endpoints now live in the [dbx_plugins](https://github.com/thachp/dbx_plugins) workspace—launch the `rest_api`, `graphql_api`, or `grpc_api` binaries beside the daemon when you need them.
 
 ## 4. Define a schema
 
@@ -68,7 +68,7 @@ Add additional events later with `dbx schema add patient --events patient-archiv
 
 ## 5. Issue a token
 
-Automation uses bearer tokens for REST/GraphQL/gRPC calls.
+Automation uses bearer tokens for control-socket calls and any optional plugin surfaces.
 
 ```bash
 dbx token generate \
@@ -112,13 +112,7 @@ Use the CLI for quick reads:
 dbx aggregate get patient p-001 --include-events
 ```
 
-Or hit the REST API:
-
-```bash
-curl \
-  -H "Authorization: Bearer ${EVENTDBX_TOKEN}" \
-  http://localhost:7070/v1/aggregates/patient/p-001
-```
+Plugins expose REST/GraphQL/gRPC endpoints for external readers. Check the plugin README for usage examples.
 
 ## Next steps
 
