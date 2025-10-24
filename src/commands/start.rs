@@ -448,6 +448,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         grpc: None,
         socket: None,
         admin: None,
+        snowflake_worker_id: None,
     });
 }
 

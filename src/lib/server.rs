@@ -111,6 +111,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     let store = Arc::new(EventStore::open(
         config_snapshot.event_store_path(),
         encryption.clone(),
+        config_snapshot.snowflake_worker_id,
     )?);
     let local_public_key = Arc::new(
         decode_public_key_bytes(

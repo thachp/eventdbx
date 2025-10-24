@@ -47,6 +47,7 @@ Event writes enforce a few key rules:
 - Declare a schema for the aggregate before the first write; the initial event must end with `_created`.
 - `aggregate_id` accepts letters, numbers, underscores, and hyphens (max 128 characters) with no surrounding whitespace.
 - Payload JSON is limited to 256 KiB, and optional `metadata` objects (keys prefixed with `@`) are capped at 64 KiB so plugins can react without overwhelming the bus.
+- `event_id` values are Snowflake IDs encoded as strings; assign each node a unique `snowflake_worker_id` (0-1023) in `config.toml` to avoid collisions when pushing or pulling events.
 
 ## GraphQL
 

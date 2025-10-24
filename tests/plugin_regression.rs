@@ -6,6 +6,7 @@ use chrono::Utc;
 use eventdbx::{
     config::{Config, HttpPluginConfig, PluginConfig, PluginDefinition},
     plugin::instantiate_plugin,
+    snowflake::SnowflakeId,
     store::{AggregateState, EventMetadata, EventRecord},
 };
 use serde_json::{Value, json};
@@ -67,7 +68,7 @@ async fn http_plugin_posts_event_payload() -> Result<()> {
         payload: json!({ "status": "created" }),
         extensions: None,
         metadata: EventMetadata {
-            event_id: uuid::Uuid::new_v4(),
+            event_id: SnowflakeId::from_u64(42),
             created_at: Utc::now(),
             issued_by: None,
             note: Some("regression".into()),

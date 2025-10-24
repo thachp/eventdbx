@@ -16,6 +16,7 @@ pub mod restrict;
 pub mod schema;
 pub mod server;
 pub mod service;
+pub mod snowflake;
 pub mod store;
 pub mod token;
 pub mod validation;

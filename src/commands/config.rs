@@ -42,6 +42,8 @@ pub struct ConfigArgs {
     pub admin_bind: Option<String>,
     #[arg(long = "admin-port")]
     pub admin_port: Option<u16>,
+    #[arg(long = "snowflake-worker-id")]
+    pub snowflake_worker_id: Option<u16>,
 }
 
 pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
@@ -66,6 +68,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         admin_enabled,
         admin_bind,
         admin_port,
+        snowflake_worker_id,
     } = args;
 
     let data_encryption_key = normalize_secret(data_encryption_key);
@@ -101,6 +104,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         grpc: None,
         socket: None,
         admin: admin_update,
+        snowflake_worker_id,
     });
 
     if !was_initialized && !config.is_initialized() {
@@ -158,4 +162,5 @@ fn has_updates(args: &ConfigArgs) -> bool {
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
         || args.admin_port.is_some()
+        || args.snowflake_worker_id.is_some()
 }

@@ -288,7 +288,11 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
         }
         AggregateCommands::Remove(args) => {
-            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+            let store = EventStore::open(
+                config.event_store_path(),
+                config.encryption_key()?,
+                config.snowflake_worker_id,
+            )?;
             store.remove_aggregate(&args.aggregate, &args.aggregate_id)?;
             println!(
                 "aggregate_type={} aggregate_id={} removed",
@@ -401,7 +405,11 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
 
             if stage {
-                match EventStore::open(config.event_store_path(), config.encryption_key()?) {
+                match EventStore::open(
+                    config.event_store_path(),
+                    config.encryption_key()?,
+                    config.snowflake_worker_id,
+                ) {
                     Ok(store) => {
                         let effective_payload = if let Some(ref ops) = patch_ops {
                             store.prepare_payload_from_patch(&aggregate, &aggregate_id, ops)?
@@ -458,7 +466,11 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
 
             let encryption = config.encryption_key()?;
-            match EventStore::open(config.event_store_path(), encryption) {
+            match EventStore::open(
+                config.event_store_path(),
+                encryption,
+                config.snowflake_worker_id,
+            ) {
                 Ok(store) => {
                     let plugins = PluginManager::from_config(&config)?;
                     let effective_payload = if let Some(ref ops) = patch_ops {
@@ -577,13 +589,21 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
         }
         AggregateCommands::Snapshot(args) => {
-            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+            let store = EventStore::open(
+                config.event_store_path(),
+                config.encryption_key()?,
+                config.snowflake_worker_id,
+            )?;
             let snapshot =
                 store.create_snapshot(&args.aggregate, &args.aggregate_id, args.comment.clone())?;
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
         }
         AggregateCommands::Archive(args) => {
-            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+            let store = EventStore::open(
+                config.event_store_path(),
+                config.encryption_key()?,
+                config.snowflake_worker_id,
+            )?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
@@ -599,7 +619,11 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             );
         }
         AggregateCommands::Restore(args) => {
-            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+            let store = EventStore::open(
+                config.event_store_path(),
+                config.encryption_key()?,
+                config.snowflake_worker_id,
+            )?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
@@ -623,7 +647,11 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
 
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
-            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+            let store = EventStore::open(
+                config.event_store_path(),
+                config.encryption_key()?,
+                config.snowflake_worker_id,
+            )?;
             let plugins = PluginManager::from_config(&config)?;
             let mut tx = store.transaction()?;
 

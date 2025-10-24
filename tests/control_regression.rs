@@ -35,7 +35,11 @@ async fn control_capnp_regression_flows() -> Result<()> {
         events: vec!["order_created".into()],
         snapshot_threshold: None,
     })?;
-    let store = Arc::new(EventStore::open(config.event_store_path(), None)?);
+    let store = Arc::new(EventStore::open(
+        config.event_store_path(),
+        None,
+        config.snowflake_worker_id,
+    )?);
 
     let core = CoreContext::new(
         Arc::clone(&tokens),

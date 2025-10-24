@@ -9,13 +9,13 @@ use eventdbx::{
         replication_hello, replication_hello_response, replication_request, replication_response,
     },
     replication_capnp_client::{CapnpReplicationClient, REPLICATION_PROTOCOL_VERSION},
+    snowflake::SnowflakeId,
     store::{AggregatePositionEntry, EventMetadata, EventRecord},
 };
 use futures::AsyncWriteExt;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use uuid::Uuid;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn capnp_regression_list_positions_and_pull_events() -> Result<()> {
@@ -48,7 +48,7 @@ async fn capnp_regression_list_positions_and_pull_events() -> Result<()> {
         },
     ];
 
-    let event_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("static uuid");
+    let event_id = SnowflakeId::from_u64(9_999_999_999);
     let created_at = Utc
         .timestamp_opt(1_700_000_000, 123_000)
         .single()

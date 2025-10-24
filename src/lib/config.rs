@@ -193,6 +193,8 @@ pub struct Config {
     pub admin: AdminApiConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default = "default_snowflake_worker_id")]
+    pub snowflake_worker_id: u16,
 }
 
 impl Default for Config {
@@ -218,6 +220,7 @@ impl Default for Config {
             api: default_api_config(),
             admin: AdminApiConfig::default(),
             auth: AuthConfig::default(),
+            snowflake_worker_id: default_snowflake_worker_id(),
         }
     }
 }
@@ -237,6 +240,7 @@ pub struct ConfigUpdate {
     pub grpc: Option<GrpcApiConfigUpdate>,
     pub socket: Option<SocketConfigUpdate>,
     pub admin: Option<AdminApiConfigUpdate>,
+    pub snowflake_worker_id: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -353,6 +357,9 @@ impl Config {
         }
         if let Some(max_attempts) = update.plugin_max_attempts {
             self.plugin_max_attempts = max_attempts.max(1);
+        }
+        if let Some(worker_id) = update.snowflake_worker_id {
+            self.snowflake_worker_id = worker_id;
         }
         if let Some(api) = update.api {
             if let Some(rest) = api.rest {
@@ -805,6 +812,10 @@ fn default_page_limit() -> usize {
 
 fn default_plugin_max_attempts() -> u32 {
     10
+}
+
+fn default_snowflake_worker_id() -> u16 {
+    0
 }
 
 fn default_grpc_bind_addr() -> String {

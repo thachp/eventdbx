@@ -32,6 +32,14 @@ dbx config --dek "$(cat dek.txt)"
 
 > The configuration lives under `~/.eventdbx/config.toml` by default. Pass `--config <path>` to every command if you store it elsewhere.
 
+Each writer process needs a distinct Snowflake worker id so generated `event_id`s stay unique during replication. Set it once per node:
+
+```bash
+dbx config --snowflake-worker-id 7
+```
+
+Valid values range from 0–1023.
+
 ### Optional: enable the Admin API
 
 Enable the `/admin` surface for automation:

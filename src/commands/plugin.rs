@@ -12,7 +12,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use serde_json::json;
-use uuid::Uuid;
 
 use eventdbx::config::{
     Config, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition, PluginKind,
@@ -28,6 +27,7 @@ use eventdbx::store::{
 use eventdbx::{
     error::EventError,
     schema::{AggregateSchema, SchemaManager},
+    snowflake::SnowflakeId,
 };
 use std::any::Any;
 use std::thread;
@@ -571,8 +571,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 }),
                 extensions: None,
                 metadata: EventMetadata {
-                    event_id: Uuid::parse_str("45c3013e-9b95-4ed0-9af9-1a465f81d3cf")
-                        .unwrap_or_else(|_| Uuid::new_v4()),
+                    event_id: SnowflakeId::from_u64(1_234_567_890),
                     created_at: DateTime::parse_from_rfc3339("2024-12-01T17:22:43.512345Z")
                         .map(|dt| dt.with_timezone(&Utc))
                         .unwrap_or_else(|_| Utc::now()),
@@ -1034,7 +1033,11 @@ fn replay_blocking(
     aggregate_id: Option<String>,
 ) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
-    let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+    let store = EventStore::open(
+        config.event_store_path(),
+        config.encryption_key()?,
+        config.snowflake_worker_id,
+    )?;
     let schema_manager = SchemaManager::load(config.schema_store_path())?;
 
     let plugin_defs = config.load_plugins()?;

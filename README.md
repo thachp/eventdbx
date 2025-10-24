@@ -292,7 +292,7 @@ Example HTTP/TCP payload (`EventRecord`):
     "comment": "Archived via API"
   },
   "metadata": {
-    "event_id": "45c3013e-9b95-4ed0-9af9-1a465f81d3cf",
+    "event_id": "1234567890123",
     "created_at": "2024-12-01T17:22:43.512345Z",
     "issued_by": {
       "group": "admin",
