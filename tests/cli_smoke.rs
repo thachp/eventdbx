@@ -6,6 +6,9 @@ use assert_cmd::Command;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+use chrono::Utc;
+use eventdbx::{plugin::queue::PluginQueueStore, snowflake::SnowflakeId};
+
 struct CliTest {
     _tmp: TempDir,
     home: PathBuf,
@@ -280,7 +283,7 @@ fn plugin_list_empty_reports_none() -> Result<()> {
 fn queue_status_empty() -> Result<()> {
     let cli = CliTest::new()?;
     let stdout = cli.run(&["queue"])?;
-    assert_eq!(stdout.trim(), "pending=0 dead=0");
+    assert_eq!(stdout.trim(), "pending=0 processing=0 done=0 dead=0");
     Ok(())
 }
 
@@ -289,7 +292,7 @@ fn queue_retry_without_dead_events() -> Result<()> {
     let cli = CliTest::new()?;
     let stdout = cli.run(&["queue", "retry"])?;
     assert!(
-        stdout.contains("no dead plugin events to retry"),
+        stdout.contains("no dead plugin jobs to retry"),
         "unexpected queue retry output:\n{}",
         stdout
     );
@@ -299,35 +302,36 @@ fn queue_retry_without_dead_events() -> Result<()> {
 cli_success_contains_test!(
     queue_clear_no_dead_events,
     ["queue", "clear"],
-    "no dead plugin events to clear"
+    "no dead plugin jobs to clear"
 );
 
 cli_success_contains_test!(
     queue_retry_specific_event_no_match,
     ["queue", "retry", "--event-id", "1"],
-    "no dead plugin events to retry"
+    "no dead plugin jobs match the provided id"
 );
 
 #[test]
 fn queue_clear_prompts_and_respects_confirmation() -> Result<()> {
     let cli = CliTest::new()?;
-    let queue_path = cli.data_dir().join("plugin_queue.json");
-    if let Some(parent) = queue_path.parent() {
-        fs::create_dir_all(parent)?;
+    {
+        let queue_path = cli.data_dir().join("plugin_queue.db");
+        let store = PluginQueueStore::open(queue_path.as_path()).map_err(anyhow::Error::from)?;
+        let job = store
+            .enqueue_job(
+                "test",
+                serde_json::json!({"event_id": SnowflakeId::from_u64(42).to_string()}),
+                Utc::now().timestamp_millis(),
+            )
+            .map_err(anyhow::Error::from)?;
+        let dispatched = store
+            .dispatch_jobs("test", 1, Utc::now().timestamp_millis())
+            .map_err(anyhow::Error::from)?;
+        assert_eq!(dispatched.len(), 1);
+        store
+            .fail_job(job.id, "boom".into(), Utc::now().timestamp_millis(), 0)
+            .map_err(anyhow::Error::from)?;
     }
-    let status = json!({
-        "pending": 0,
-        "dead": 1,
-        "pending_events": [],
-        "dead_events": [{
-            "event_id": "42",
-            "aggregate_type": "order",
-            "aggregate_id": "order-1",
-            "event_type": "order_failed",
-            "attempts": 3
-        }]
-    });
-    fs::write(&queue_path, serde_json::to_string_pretty(&status)?)?;
 
     let cancelled = cli.run_with_input(&["queue", "clear"], "\n")?;
     assert!(
@@ -338,7 +342,7 @@ fn queue_clear_prompts_and_respects_confirmation() -> Result<()> {
 
     let cleared = cli.run_with_input(&["queue", "clear"], "clear\n")?;
     assert!(
-        cleared.contains("cleared 1 dead event(s) from the plugin queue"),
+        cleared.contains("cleared 1 dead job(s) from the plugin queue"),
         "expected clear confirmation, got:\n{}",
         cleared
     );
@@ -348,39 +352,41 @@ fn queue_clear_prompts_and_respects_confirmation() -> Result<()> {
 #[test]
 fn queue_status_displays_dead_events() -> Result<()> {
     let cli = CliTest::new()?;
-    let queue_path = cli.data_dir().join("plugin_queue.json");
-    if let Some(parent) = queue_path.parent() {
-        fs::create_dir_all(parent)?;
+    {
+        let queue_path = cli.data_dir().join("plugin_queue.db");
+        let store = PluginQueueStore::open(queue_path.as_path()).map_err(anyhow::Error::from)?;
+        store
+            .enqueue_job(
+                "alpha",
+                serde_json::json!({"event_id": SnowflakeId::from_u64(99).to_string()}),
+                Utc::now().timestamp_millis(),
+            )
+            .map_err(anyhow::Error::from)?;
+        let job = store
+            .enqueue_job(
+                "alpha",
+                serde_json::json!({"event_id": SnowflakeId::from_u64(100).to_string()}),
+                Utc::now().timestamp_millis(),
+            )
+            .map_err(anyhow::Error::from)?;
+        let dispatched = store
+            .dispatch_jobs("alpha", 1, Utc::now().timestamp_millis())
+            .map_err(anyhow::Error::from)?;
+        assert_eq!(dispatched.len(), 1);
+        store
+            .fail_job(job.id, "error".into(), Utc::now().timestamp_millis(), 0)
+            .map_err(anyhow::Error::from)?;
     }
-    let status = json!({
-        "pending": 1,
-        "dead": 1,
-        "pending_events": [{
-            "event_id": "99",
-            "aggregate_type": "user",
-            "aggregate_id": "u-1",
-            "event_type": "user_created",
-            "attempts": 1
-        }],
-        "dead_events": [{
-            "event_id": "100",
-            "aggregate_type": "user",
-            "aggregate_id": "u-2",
-            "event_type": "user_created",
-            "attempts": 3
-        }]
-    });
-    fs::write(&queue_path, serde_json::to_string_pretty(&status)?)?;
 
     let status_output = cli.run(&["queue"])?;
     assert!(
-        status_output.contains("pending=1 dead=1"),
+        status_output.contains("dead=1"),
         "unexpected queue status:\n{}",
         status_output
     );
     assert!(
-        status_output.contains("u-2"),
-        "expected dead event details in output:\n{}",
+        status_output.contains("status=\"dead\""),
+        "expected dead job details in output:\n{}",
         status_output
     );
     Ok(())

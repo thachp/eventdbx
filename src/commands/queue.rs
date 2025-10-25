@@ -1,24 +1,19 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    fs,
-    io::{self, Write},
-    path::{Path, PathBuf},
-};
+use std::{io::Write, path::PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::{TimeZone, Utc};
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
 
 use eventdbx::{
-    config::{Config, PluginDefinition, load_or_default},
-    error::EventError,
-    plugin::{Plugin, establish_connection, instantiate_plugin},
-    schema::SchemaManager,
+    config::{Config, load_or_default},
+    plugin::{
+        PluginManager,
+        queue::{JobRecord, PluginQueueStore},
+    },
     snowflake::SnowflakeId,
-    store::{AggregateState, EventRecord, EventStore, payload_to_map},
 };
 
-use crate::commands::plugin::{dedupe_plugins_by_name, normalize_plugin_names, plugin_kind_name};
+use crate::commands::plugin::{dedupe_plugins_by_name, normalize_plugin_names};
 
 #[derive(Args)]
 pub struct QueueArgs {
@@ -31,14 +26,14 @@ pub enum QueueAction {
     /// Remove all dead entries from the queue
     #[command(name = "clear")]
     Clear,
-    /// Retry dead entries, optionally filtering by event id
+    /// Retry dead entries, optionally filtering by job id
     #[command(name = "retry")]
     Retry(QueueRetryArgs),
 }
 
 #[derive(Args, Clone, Copy)]
 pub struct QueueRetryArgs {
-    /// Retry only the dead entry with this event id
+    /// Retry only the dead entry with this job id
     #[arg(long)]
     pub event_id: Option<SnowflakeId>,
 }
@@ -57,20 +52,22 @@ pub fn execute(config_path: Option<PathBuf>, args: QueueArgs) -> Result<()> {
         config.save_plugins(&plugins)?;
     }
 
-    let queue_path = config.plugin_queue_path();
+    let queue_store = PluginQueueStore::open_with_legacy(
+        config.plugin_queue_db_path().as_path(),
+        config.plugin_queue_path().as_path(),
+    )
+    .map_err(anyhow::Error::from)?;
+
     match args.action {
         None => {
-            print_plugin_queue_status(queue_path)?;
+            print_plugin_queue_status(&queue_store)?;
         }
         Some(QueueAction::Clear) => {
-            let status = load_plugin_queue_status(&queue_path)?;
-            let dead_count = status
-                .as_ref()
-                .map(|status| status.dead_events.len())
-                .unwrap_or(0);
+            let status = queue_store.status().map_err(anyhow::Error::from)?;
+            let dead_count = status.dead.len();
 
             if dead_count == 0 {
-                println!("no dead plugin events to clear");
+                println!("no dead plugin jobs to clear");
                 return Ok(());
             }
 
@@ -79,314 +76,133 @@ pub fn execute(config_path: Option<PathBuf>, args: QueueArgs) -> Result<()> {
                 return Ok(());
             }
 
-            let cleared = clear_dead_queue(queue_path)?;
-            println!("cleared {} dead event(s) from the plugin queue", cleared);
+            let cleared = queue_store.clear_dead().map_err(anyhow::Error::from)?;
+            println!("cleared {} dead job(s) from the plugin queue", cleared);
         }
         Some(QueueAction::Retry(retry_args)) => {
-            retry_dead_events(&config, &plugins, queue_path, retry_args.event_id)?;
+            retry_dead_jobs(&config, &queue_store, retry_args.event_id)?;
         }
     }
     Ok(())
 }
 
-fn print_plugin_queue_status(path: PathBuf) -> Result<()> {
-    match load_plugin_queue_status(&path)? {
-        Some(status) => {
-            println!("pending={} dead={}", status.pending, status.dead);
+fn print_plugin_queue_status(store: &PluginQueueStore) -> Result<()> {
+    let status = store.status().map_err(anyhow::Error::from)?;
 
-            if !status.pending_events.is_empty() {
-                println!("\nPending events:");
-                for event in &status.pending_events {
-                    println!(
-                        "  {} aggregate={}::{} event={} attempts={}",
-                        event.event_id,
-                        event.aggregate_type,
-                        event.aggregate_id,
-                        event.event_type,
-                        event.attempts
-                    );
-                }
-            }
+    println!(
+        "pending={} processing={} done={} dead={}",
+        status.pending.len(),
+        status.processing.len(),
+        status.done.len(),
+        status.dead.len()
+    );
 
-            if !status.dead_events.is_empty() {
-                println!("\nDead events:");
-                for event in &status.dead_events {
-                    println!(
-                        "  {} aggregate={}::{} event={} attempts={} (no further retries)",
-                        event.event_id,
-                        event.aggregate_type,
-                        event.aggregate_id,
-                        event.event_type,
-                        event.attempts
-                    );
-                }
-            }
-        }
-        None => {
-            println!("pending=0 dead=0");
+    if !status.pending.is_empty() {
+        println!("\nPending jobs:");
+        for job in &status.pending {
+            print_job(job);
         }
     }
+
+    if !status.processing.is_empty() {
+        println!("\nProcessing jobs:");
+        for job in &status.processing {
+            print_job(job);
+        }
+    }
+
+    if !status.dead.is_empty() {
+        println!("\nDead jobs:");
+        for job in &status.dead {
+            print_job(job);
+        }
+    }
+
     Ok(())
 }
 
-fn clear_dead_queue(path: PathBuf) -> Result<usize> {
-    let Some(mut status) = load_plugin_queue_status(&path)? else {
-        return Ok(0);
-    };
-
-    let cleared = status.dead_events.len();
-    if cleared == 0 && status.dead == 0 {
-        return Ok(0);
-    }
-
-    status.dead = 0;
-    status.dead_events.clear();
-    write_plugin_queue_status(&path, &status)?;
-    Ok(cleared)
+fn print_job(job: &JobRecord) {
+    let retry_at = job
+        .next_retry_at
+        .map(|ts| format_timestamp(ts))
+        .unwrap_or_else(|| "-".into());
+    let last_error = job.last_error.as_deref().unwrap_or("-");
+    println!(
+        "  id={} plugin=\"{}\" status={:?} attempts={} next_retry={} last_error={}",
+        job.id,
+        job.plugin,
+        job.status.as_str(),
+        job.attempts,
+        retry_at,
+        last_error
+    );
 }
 
-fn retry_dead_events(
+fn retry_dead_jobs(
     config: &Config,
-    plugins: &[PluginDefinition],
-    queue_path: PathBuf,
-    filter_event: Option<SnowflakeId>,
+    store: &PluginQueueStore,
+    filter_job: Option<SnowflakeId>,
 ) -> Result<()> {
-    let mut status = match load_plugin_queue_status(&queue_path)? {
-        Some(status) => status,
-        None => {
-            println!("no dead plugin events to retry");
-            return Ok(());
-        }
-    };
-
-    let target_events: Vec<PluginQueueEvent> = status
-        .dead_events
-        .iter()
-        .cloned()
-        .filter(|entry| match filter_event {
-            Some(id) => id == entry.event_id,
+    let status = store.status().map_err(anyhow::Error::from)?;
+    let targets: Vec<JobRecord> = status
+        .dead
+        .into_iter()
+        .filter(|job| match filter_job {
+            Some(id) => job.id == id.as_u64(),
             None => true,
         })
         .collect();
 
-    if target_events.is_empty() {
-        if filter_event.is_some() {
-            println!("no dead plugin events match the provided event id");
+    if targets.is_empty() {
+        if filter_job.is_some() {
+            println!("no dead plugin jobs match the provided id");
         } else {
-            println!("no dead plugin events to retry");
+            println!("no dead plugin jobs to retry");
         }
         return Ok(());
     }
 
-    let store = EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)
-        .map_err(anyhow::Error::from)?;
-    let schema_manager = SchemaManager::load(config.schema_store_path())?;
-
-    let mut active_plugins: Vec<(String, Box<dyn Plugin>)> = Vec::new();
-
-    for definition in plugins.iter().filter(|definition| definition.enabled) {
-        if let Err(err) = establish_connection(definition) {
-            println!(
-                "skipping plugin '{}' - failed to prepare connection ({})",
-                plugin_instance_label(definition),
-                err
-            );
-            continue;
-        }
-        let label = plugin_instance_label(definition);
-        let instance = instantiate_plugin(definition, config);
-        active_plugins.push((label, instance));
+    let now = Utc::now().timestamp_millis();
+    for job in &targets {
+        store
+            .retry_dead_job(job.id, now)
+            .map_err(anyhow::Error::from)?;
     }
 
-    if active_plugins.is_empty() {
+    let manager = PluginManager::from_config(config)?;
+    if manager.is_empty() {
         println!("no enabled plugins available to process retries");
         return Ok(());
     }
 
-    let mut succeeded: HashSet<SnowflakeId> = HashSet::new();
-    let mut failed: HashSet<SnowflakeId> = HashSet::new();
+    manager.dispatch_pending().map_err(anyhow::Error::from)?;
 
-    for entry in target_events {
-        match materialize_event_state(&store, &entry) {
-            Ok(Some((record, state))) => {
-                let schema = schema_manager.get(&record.aggregate_type).ok();
-                let mut event_failed = false;
-
-                for (label, plugin) in active_plugins.iter() {
-                    if let Err(err) = plugin.notify_event(&record, &state, schema.as_ref()) {
-                        println!(
-                            "plugin '{}' failed to process event {} ({}::{}) - {}",
-                            label,
-                            record.metadata.event_id,
-                            record.aggregate_type,
-                            record.aggregate_id,
-                            err
-                        );
-                        event_failed = true;
-                    }
-                }
-
-                if event_failed {
-                    failed.insert(record.metadata.event_id);
-                } else {
-                    println!(
-                        "event {} ({}::{}) retried successfully",
-                        record.metadata.event_id, record.aggregate_type, record.aggregate_id
-                    );
-                    succeeded.insert(record.metadata.event_id);
-                }
-            }
-            Ok(None) => {
-                println!(
-                    "event {} ({}::{}) not found; removing from dead queue",
-                    entry.event_id, entry.aggregate_type, entry.aggregate_id
-                );
-                succeeded.insert(entry.event_id);
-            }
-            Err(err) => {
-                println!(
-                    "failed to load event {} ({}::{}) - {}",
-                    entry.event_id, entry.aggregate_type, entry.aggregate_id, err
-                );
-                failed.insert(entry.event_id);
-            }
-        }
-    }
-
-    if !succeeded.is_empty() {
-        status
-            .dead_events
-            .retain(|item| !succeeded.contains(&item.event_id));
-        status.dead = status.dead_events.len();
-        write_plugin_queue_status(&queue_path, &status)?;
-    }
-
+    let refreshed = store.status().map_err(anyhow::Error::from)?;
     println!(
-        "retry summary: {} succeeded, {} failed, {} remaining",
-        succeeded.len(),
-        failed.len(),
-        status.dead_events.len()
+        "retry summary: retried {} job(s), {} still dead",
+        targets.len(),
+        refreshed.dead.len()
     );
-
-    if !failed.is_empty() {
-        println!(
-            "events still pending: {}",
-            failed
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
 
     Ok(())
 }
 
 fn confirm_clear_dead(dead_count: usize) -> Result<bool> {
     print!(
-        "This will remove {} dead plugin event(s). Type 'clear' to confirm: ",
+        "This will remove {} dead plugin job(s). Type 'clear' to confirm: ",
         dead_count
     );
-    io::stdout().flush()?;
+    std::io::stdout().flush()?;
     let mut input = String::new();
-    io::stdin()
+    std::io::stdin()
         .read_line(&mut input)
         .with_context(|| "failed to read confirmation input")?;
     Ok(input.trim().eq_ignore_ascii_case("clear"))
 }
 
-fn load_plugin_queue_status(path: &Path) -> Result<Option<PluginQueueStatus>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("failed to read queue file at {}", path.display()))?;
-    if contents.trim().is_empty() {
-        return Ok(Some(PluginQueueStatus::default()));
-    }
-    let status =
-        serde_json::from_str(&contents).with_context(|| "failed to decode queue status JSON")?;
-    Ok(Some(status))
-}
-
-fn write_plugin_queue_status(path: &Path, status: &PluginQueueStatus) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-    }
-    let payload = serde_json::to_string_pretty(status)?;
-    fs::write(path, payload)?;
-    Ok(())
-}
-
-fn materialize_event_state(
-    store: &EventStore,
-    entry: &PluginQueueEvent,
-) -> Result<Option<(EventRecord, AggregateState)>> {
-    let events = match store.list_events(&entry.aggregate_type, &entry.aggregate_id) {
-        Ok(events) => events,
-        Err(EventError::AggregateNotFound) => return Ok(None),
-        Err(err) => return Err(err.into()),
-    };
-
-    if events.is_empty() {
-        return Ok(None);
-    }
-
-    let archived_flag = store
-        .get_aggregate_state(&entry.aggregate_type, &entry.aggregate_id)
-        .map(|state| state.archived)
-        .unwrap_or(false);
-
-    let mut state_map = BTreeMap::new();
-
-    for event in events.into_iter() {
-        for (key, value) in payload_to_map(&event.payload) {
-            state_map.insert(key, value);
-        }
-
-        if event.metadata.event_id == entry.event_id {
-            let aggregate_state = AggregateState {
-                aggregate_type: event.aggregate_type.clone(),
-                aggregate_id: event.aggregate_id.clone(),
-                version: event.version,
-                state: state_map.clone(),
-                merkle_root: event.merkle_root.clone(),
-                archived: archived_flag,
-            };
-            return Ok(Some((event, aggregate_state)));
-        }
-    }
-
-    Ok(None)
-}
-
-fn plugin_instance_label(definition: &PluginDefinition) -> String {
-    match definition.name.as_deref() {
-        Some(name) if !name.trim().is_empty() => {
-            format!("{} ({})", plugin_kind_name(definition.config.kind()), name)
-        }
-        _ => plugin_kind_name(definition.config.kind()).to_string(),
-    }
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-struct PluginQueueStatus {
-    pending: usize,
-    dead: usize,
-    #[serde(default)]
-    pending_events: Vec<PluginQueueEvent>,
-    #[serde(default)]
-    dead_events: Vec<PluginQueueEvent>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct PluginQueueEvent {
-    event_id: SnowflakeId,
-    aggregate_type: String,
-    aggregate_id: String,
-    event_type: String,
-    attempts: u32,
+fn format_timestamp(timestamp_millis: i64) -> String {
+    Utc.timestamp_millis_opt(timestamp_millis)
+        .single()
+        .unwrap_or_else(|| Utc.timestamp_millis_opt(0).single().unwrap())
+        .to_rfc3339()
 }

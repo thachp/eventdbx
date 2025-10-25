@@ -1,6 +1,7 @@
 use std::{future::Future, result::Result as StdResult, time::Duration};
 
 use reqwest::Client;
+use serde_json::{Map, Value as JsonValue};
 use tokio::{
     runtime::{Handle, Runtime},
     task::block_in_place,
@@ -9,11 +10,9 @@ use tokio::{
 use crate::{
     config::HttpPluginConfig,
     error::{EventError, Result},
-    schema::AggregateSchema,
-    store::{AggregateState, EventRecord},
 };
 
-use super::Plugin;
+use super::{Plugin, PluginDelivery};
 
 pub(super) struct HttpPlugin {
     config: HttpPluginConfig,
@@ -103,12 +102,7 @@ impl Plugin for HttpPlugin {
         "http"
     }
 
-    fn notify_event(
-        &self,
-        record: &EventRecord,
-        _state: &AggregateState,
-        _schema: Option<&AggregateSchema>,
-    ) -> Result<()> {
+    fn notify_event(&self, delivery: PluginDelivery<'_>) -> Result<()> {
         let resolved = self.resolved_endpoint();
         let headers: Vec<(String, String)> = self
             .config
@@ -116,19 +110,44 @@ impl Plugin for HttpPlugin {
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
-        let record = record.clone();
+
+        let mut body = Map::new();
+        if let Some(record) = delivery.record {
+            body.insert(
+                "event".to_string(),
+                serde_json::to_value(record).unwrap_or(JsonValue::Null),
+            );
+        }
+        if let Some(state) = delivery.state {
+            body.insert(
+                "state".to_string(),
+                serde_json::to_value(state).unwrap_or(JsonValue::Null),
+            );
+        }
+        if let Some(schema) = delivery.schema {
+            body.insert(
+                "schema".to_string(),
+                serde_json::to_value(schema).unwrap_or(JsonValue::Null),
+            );
+        }
+
+        if body.is_empty() {
+            return Ok(());
+        }
+
+        let payload = JsonValue::Object(body);
 
         self.run_with_client(|client| {
             let resolved = resolved.clone();
             let headers = headers.clone();
-            let record = record.clone();
+            let payload = payload.clone();
             async move {
                 let mut request = client.post(&resolved);
                 for (key, value) in headers {
                     request = request.header(&key, &value);
                 }
                 let response = request
-                    .json(&record)
+                    .json(&payload)
                     .send()
                     .await
                     .map_err(|err| EventError::Storage(err.to_string()))?;

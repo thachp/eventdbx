@@ -59,7 +59,7 @@ All Admin API calls must send a bearer token with full privileges. The CLI write
 dbx start --foreground
 ```
 
-By default EventDBX stores data under `~/.eventdbx/data`. Override it with `dbx start --data-dir <path>`. The process writes a PID file so `dbx stop` can terminate it cleanly later. Public REST/GraphQL/gRPC endpoints now live in the [dbx_plugins](https://github.com/thachp/dbx_plugins) workspace—launch the `rest_api`, `graphql_api`, or `grpc_api` binaries beside the daemon when you need them.
+By default EventDBX stores data under `~/.eventdbx/data`. Override it with `dbx start --data-dir <path>`. The process writes a PID file so `dbx stop` can terminate it cleanly later. Public REST/GraphQL/gRPC endpoints now live in the [dbx_plugins](https://github.com/thachp/dbx_plugins) workspace—launch the `dbx_rest`, `dbx_graphql`, or `dbx_grpc` binaries beside the daemon when you need them.
 
 ## 4. Define a schema
 

@@ -588,6 +588,10 @@ impl Config {
         self.data_dir.join("plugin_queue.json")
     }
 
+    pub fn plugin_queue_db_path(&self) -> PathBuf {
+        self.data_dir.join("plugin_queue.db")
+    }
+
     pub fn pid_file_path(&self) -> PathBuf {
         self.data_dir.join("eventdbx.pid")
     }
@@ -814,6 +818,10 @@ fn default_plugin_max_attempts() -> u32 {
     10
 }
 
+fn default_plugin_payload_mode() -> PluginPayloadMode {
+    PluginPayloadMode::All
+}
+
 fn default_snowflake_worker_id() -> u16 {
     0
 }
@@ -880,6 +888,8 @@ pub struct PluginDefinition {
     pub enabled: bool,
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default = "default_plugin_payload_mode")]
+    pub payload_mode: PluginPayloadMode,
     pub config: PluginConfig,
 }
 
@@ -913,6 +923,40 @@ pub enum PluginKind {
     Http,
     Log,
     Process,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginPayloadMode {
+    All,
+    EventOnly,
+    StateOnly,
+    SchemaOnly,
+    EventAndSchema,
+}
+
+impl PluginPayloadMode {
+    pub fn includes_event(self) -> bool {
+        matches!(
+            self,
+            PluginPayloadMode::All
+                | PluginPayloadMode::EventOnly
+                | PluginPayloadMode::EventAndSchema
+        )
+    }
+
+    pub fn includes_state(self) -> bool {
+        matches!(self, PluginPayloadMode::All | PluginPayloadMode::StateOnly)
+    }
+
+    pub fn includes_schema(self) -> bool {
+        matches!(
+            self,
+            PluginPayloadMode::All
+                | PluginPayloadMode::SchemaOnly
+                | PluginPayloadMode::EventAndSchema
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

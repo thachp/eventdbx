@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use axum::{Router, body::Bytes, extract::State, http::StatusCode, routing::post};
 use chrono::Utc;
 use eventdbx::{
-    config::{Config, HttpPluginConfig, PluginConfig, PluginDefinition},
-    plugin::instantiate_plugin,
+    config::{Config, HttpPluginConfig, PluginConfig, PluginDefinition, PluginPayloadMode},
+    plugin::{PluginDelivery, instantiate_plugin},
     snowflake::SnowflakeId,
     store::{AggregateState, EventMetadata, EventRecord},
 };
@@ -52,6 +52,7 @@ async fn http_plugin_posts_event_payload() -> Result<()> {
     let plugin_definition = PluginDefinition {
         enabled: true,
         name: Some("http-regression".to_string()),
+        payload_mode: PluginPayloadMode::All,
         config: PluginConfig::Http(HttpPluginConfig {
             endpoint,
             headers: BTreeMap::from([("X-Test".to_string(), "ok".to_string())]),
@@ -87,7 +88,11 @@ async fn http_plugin_posts_event_payload() -> Result<()> {
     };
 
     plugin
-        .notify_event(&record, &state, None)
+        .notify_event(PluginDelivery {
+            record: Some(&record),
+            state: Some(&state),
+            schema: None,
+        })
         .context("plugin notify_event failed")?;
 
     let body = rx
@@ -98,15 +103,26 @@ async fn http_plugin_posts_event_payload() -> Result<()> {
 
     let received: Value =
         serde_json::from_slice(&body).context("failed to decode posted payload as JSON")?;
-    assert_eq!(received["aggregate_type"], "order");
-    assert_eq!(received["aggregate_id"], "order-123");
-    assert_eq!(received["event_type"], "OrderCreated");
-    assert_eq!(received["version"], 5);
-    assert_eq!(received["metadata"]["note"], "regression");
+    let event = received
+        .get("event")
+        .context("missing event payload")?;
+    assert_eq!(event["aggregate_type"], "order");
+    assert_eq!(event["aggregate_id"], "order-123");
+    assert_eq!(event["event_type"], "OrderCreated");
+    assert_eq!(event["version"], 5);
+    assert_eq!(event["metadata"]["note"], "regression");
     assert_eq!(
-        received["metadata"]["event_id"],
+        event["metadata"]["event_id"],
         record.metadata.event_id.to_string()
     );
+    let state = received
+        .get("state")
+        .context("missing state payload")?;
+    assert_eq!(state["aggregate_type"], "order");
+    assert_eq!(state["aggregate_id"], "order-123");
+    assert_eq!(state["version"], 5);
+    assert_eq!(state["state"]["status"], "created");
+    assert!(received.get("schema").is_none());
 
     Ok(())
 }
