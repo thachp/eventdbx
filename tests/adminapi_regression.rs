@@ -6,6 +6,7 @@ use eventdbx::{
     restrict::RestrictMode,
     schema::{CreateSchemaInput, SchemaManager},
     server,
+    token::{IssueTokenInput, JwtLimits, TokenManager},
 };
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
@@ -52,8 +53,29 @@ async fn adminapi_regression() -> TestResult<()> {
     config.admin.enabled = true;
     config.admin.bind_addr = "127.0.0.1".to_string();
     config.admin.port = Some(admin_port);
-    config.set_admin_master_key("super-secret")?;
     config.ensure_data_dir()?;
+
+    let token_manager = TokenManager::load(
+        config.jwt_manager_config()?,
+        config.tokens_path(),
+        config.jwt_revocations_path(),
+        config.encryption_key()?,
+    )?;
+    let admin_token = token_manager
+        .issue(IssueTokenInput {
+            subject: "ops:admin".to_string(),
+            group: "ops".to_string(),
+            user: "admin".to_string(),
+            root: true,
+            actions: Vec::new(),
+            resources: Vec::new(),
+            ttl_secs: Some(3600),
+            not_before: None,
+            issued_by: "adminapi-regression".to_string(),
+            limits: JwtLimits::default(),
+        })?
+        .token;
+    drop(token_manager);
 
     // Pre-seed a schema so the in-memory schema manager contains an aggregate
     // before the server starts. Update endpoints operate on this stateful cache.
@@ -75,8 +97,7 @@ async fn adminapi_regression() -> TestResult<()> {
     wait_for_health(&base_url).await?;
 
     let admin_base = format!("http://127.0.0.1:{admin_port}/admin");
-    let admin_key = "super-secret";
-    wait_for_admin(&admin_base, admin_key).await?;
+    wait_for_admin(&admin_base, &admin_token).await?;
 
     let client = Client::builder().timeout(Duration::from_secs(5)).build()?;
 
@@ -100,7 +121,7 @@ async fn adminapi_regression() -> TestResult<()> {
     });
     let issued_token: Value = client
         .post(format!("{admin_base}/tokens"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .json(&issue_payload)
         .send()
         .await?
@@ -132,7 +153,7 @@ async fn adminapi_regression() -> TestResult<()> {
     // List tokens should include the newly issued token.
     let tokens_list: Value = client
         .get(format!("{admin_base}/tokens"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?
         .error_for_status()?
@@ -160,7 +181,7 @@ async fn adminapi_regression() -> TestResult<()> {
     });
     let refreshed_token: Value = client
         .post(format!("{admin_base}/tokens/{token_str}/refresh"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .json(&refresh_payload)
         .send()
         .await?
@@ -188,7 +209,7 @@ async fn adminapi_regression() -> TestResult<()> {
     // Revoke the token and verify it is marked as revoked.
     let revoke_response = client
         .post(format!("{admin_base}/tokens/{token_str}/revoke"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?;
     assert_eq!(
@@ -198,7 +219,7 @@ async fn adminapi_regression() -> TestResult<()> {
     );
     let tokens_after_revoke: Value = client
         .get(format!("{admin_base}/tokens"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?
         .error_for_status()?
@@ -225,7 +246,7 @@ async fn adminapi_regression() -> TestResult<()> {
     });
     let schema_response: Value = client
         .post(format!("{admin_base}/schemas"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .json(&schema_payload)
         .send()
         .await?
@@ -241,7 +262,7 @@ async fn adminapi_regression() -> TestResult<()> {
     // Retrieve the newly created schema.
     let created_lookup: Value = client
         .get(format!("{admin_base}/schemas/{created_aggregate}"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?
         .error_for_status()?
@@ -266,7 +287,7 @@ async fn adminapi_regression() -> TestResult<()> {
     });
     let updated_schema: Value = client
         .patch(format!("{admin_base}/schemas/{managed_aggregate}"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .json(&schema_update_payload)
         .send()
         .await?
@@ -304,7 +325,7 @@ async fn adminapi_regression() -> TestResult<()> {
         .delete(format!(
             "{admin_base}/schemas/{managed_aggregate}/events/created"
         ))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?
         .error_for_status()?
@@ -321,12 +342,12 @@ async fn adminapi_regression() -> TestResult<()> {
     // Configure a remote endpoint.
     let remote_public_key = STANDARD.encode([3u8; 32]);
     let remote_payload = json!({
-        "endpoint": "tcp://0.0.0.0:7443",
+        "endpoint": "tcp://0.0.0.0:6363",
         "public_key": remote_public_key
     });
     let remote_response = client
         .put(format!("{admin_base}/remotes/primary"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .json(&remote_payload)
         .send()
         .await?;
@@ -344,7 +365,7 @@ async fn adminapi_regression() -> TestResult<()> {
         match remote_created {
             Value::Object(_) => {
                 assert_eq!(
-                    remote_created["endpoint"], "tcp://0.0.0.0:7443",
+                    remote_created["endpoint"], "tcp://0.0.0.0:6363",
                     "remote endpoint should match configuration"
                 );
             }
@@ -361,7 +382,7 @@ async fn adminapi_regression() -> TestResult<()> {
 
     let remotes: Value = client
         .get(format!("{admin_base}/remotes"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?
         .error_for_status()?
@@ -371,7 +392,7 @@ async fn adminapi_regression() -> TestResult<()> {
         remotes
             .get("primary")
             .and_then(|remote| remote.get("endpoint"))
-            .map(|endpoint| endpoint == "tcp://0.0.0.0:7443")
+            .map(|endpoint| endpoint == "tcp://0.0.0.0:6363")
             .unwrap_or(false),
         "remote configuration should be persisted"
     );
@@ -379,7 +400,7 @@ async fn adminapi_regression() -> TestResult<()> {
     // Delete the remote configuration and ensure it no longer exists.
     let delete_remote = client
         .delete(format!("{admin_base}/remotes/primary"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?;
     assert_eq!(
@@ -389,7 +410,7 @@ async fn adminapi_regression() -> TestResult<()> {
     );
     let remotes_after_delete: Value = client
         .get(format!("{admin_base}/remotes"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?
         .error_for_status()?
@@ -411,7 +432,7 @@ async fn adminapi_regression() -> TestResult<()> {
     });
     let plugin_response = client
         .put(format!("{admin_base}/plugins/logger"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .json(&plugin_payload)
         .send()
         .await?;
@@ -432,7 +453,7 @@ async fn adminapi_regression() -> TestResult<()> {
 
     let plugins_response: Value = client
         .get(format!("{admin_base}/plugins"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?
         .error_for_status()?
@@ -450,7 +471,7 @@ async fn adminapi_regression() -> TestResult<()> {
     // Disable and then enable the plugin via dedicated endpoints.
     let disabled_plugin: Value = client
         .post(format!("{admin_base}/plugins/logger/disable"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?
         .error_for_status()?
@@ -462,7 +483,7 @@ async fn adminapi_regression() -> TestResult<()> {
     );
     let enabled_plugin: Value = client
         .post(format!("{admin_base}/plugins/logger/enable"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?
         .error_for_status()?
@@ -476,7 +497,7 @@ async fn adminapi_regression() -> TestResult<()> {
     // Disable once more so removal is allowed.
     let disabled_before_delete: Value = client
         .post(format!("{admin_base}/plugins/logger/disable"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?
         .error_for_status()?
@@ -490,7 +511,7 @@ async fn adminapi_regression() -> TestResult<()> {
     // Remove the plugin entirely and confirm it no longer appears in listings.
     let delete_plugin_response = client
         .delete(format!("{admin_base}/plugins/logger"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?;
     assert_eq!(
@@ -500,7 +521,7 @@ async fn adminapi_regression() -> TestResult<()> {
     );
     let plugins_after_delete: Value = client
         .get(format!("{admin_base}/plugins"))
-        .header("X-Admin-Key", admin_key)
+        .bearer_auth(&admin_token)
         .send()
         .await?
         .error_for_status()?
@@ -549,16 +570,16 @@ async fn wait_for_health(base_url: &str) -> TestResult<()> {
     Err("server did not become healthy in time".into())
 }
 
-async fn wait_for_admin(base_url: &str, admin_key: &str) -> TestResult<()> {
+async fn wait_for_admin(base_url: &str, token: &str) -> TestResult<()> {
     let client = Client::new();
     for _ in 0..40 {
         let resp = client
             .get(format!("{base_url}/tokens"))
-            .header("X-Admin-Key", admin_key)
+            .bearer_auth(token)
             .send()
             .await;
         if let Ok(resp) = resp {
-            if resp.status() != StatusCode::UNAUTHORIZED {
+            if resp.status().is_success() {
                 return Ok(());
             }
         }

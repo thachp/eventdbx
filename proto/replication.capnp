@@ -32,6 +32,7 @@ struct EventRecord {
   metadata @5 :Data;
   merkleRoot @6 :Text;
   hash @7 :Text;
+  extensions @8 :Data;
 }
 
 struct ApplyEventsRequest {

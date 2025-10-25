@@ -11,6 +11,8 @@ use anyhow::{Result, anyhow};
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 
+use crate::commands::cli_token;
+
 use eventdbx::{
     config::{ApiConfig, ApiConfigUpdate, Config, ConfigUpdate, load_or_default},
     restrict::{self, RESTRICT_ENV},
@@ -153,6 +155,18 @@ pub struct DestroyArgs {
 
 pub async fn execute(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     restrict::set_env(args.restrict.into());
+    if args.api.is_some()
+        || args.rest
+        || args.no_rest
+        || args.graphql
+        || args.no_graphql
+        || args.grpc
+        || args.no_grpc
+    {
+        eprintln!(
+            "Warning: built-in REST/GraphQL/gRPC surfaces have moved to the plugin workspace. Launch the dbx_plugins binaries instead."
+        );
+    }
     if args.foreground {
         start_foreground(config_path, args).await
     } else {
@@ -372,6 +386,7 @@ fn load_and_update_config(
     let (mut config, path) = load_or_default(config_path)?;
     apply_start_overrides(&mut config, args);
     config.ensure_data_dir()?;
+    cli_token::ensure_bootstrap_token(&config)?;
     config.save(&path)?;
     Ok((config, path))
 }
@@ -433,6 +448,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         grpc: None,
         socket: None,
         admin: None,
+        snowflake_worker_id: None,
     });
 }
 

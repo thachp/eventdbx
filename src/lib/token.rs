@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use parking_lot::RwLock;
@@ -16,8 +17,8 @@ use super::{
     store::ActorClaims,
 };
 
-const ROOT_ACTION: &str = "*.*";
-const ROOT_RESOURCE: &str = "*";
+pub const ROOT_ACTION: &str = "*.*";
+pub const ROOT_RESOURCE: &str = "*";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -44,7 +45,6 @@ pub struct JwtClaims {
     pub exp: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nbf: Option<i64>,
-    pub root: bool,
     #[serde(default)]
     pub group: String,
     #[serde(default)]
@@ -71,9 +71,6 @@ impl JwtClaims {
     }
 
     pub fn allows_action(&self, action: &str) -> bool {
-        if self.root {
-            return true;
-        }
         if self.actions.is_empty() {
             return false;
         }
@@ -83,9 +80,6 @@ impl JwtClaims {
     }
 
     pub fn allows_resource(&self, resource: Option<&str>) -> bool {
-        if self.root {
-            return true;
-        }
         let Some(resource) = resource else {
             // No resource provided means action-level authorization only.
             return true;
@@ -189,7 +183,8 @@ pub struct RevokedTokenRecord {
 pub struct JwtManagerConfig {
     pub issuer: String,
     pub audience: String,
-    pub secret: Vec<u8>,
+    pub private_key: Vec<u8>,
+    pub public_key: Vec<u8>,
     pub key_id: Option<String>,
     pub default_ttl: Duration,
     pub clock_skew: Duration,
@@ -203,6 +198,7 @@ pub struct TokenManager {
     header: Header,
     encoding_key: EncodingKey,
     decoding_key: DecodingKey,
+    public_key: Vec<u8>,
     issuer: String,
     audience: String,
     default_ttl: Duration,
@@ -249,13 +245,16 @@ impl TokenManager {
         let records = RwLock::new(read_token_records(&ledger_path, encryptor.as_ref())?);
         let revocations = RevocationStore::load(revocation_path, encryptor.clone())?;
 
-        let mut header = Header::new(Algorithm::HS256);
+        let mut header = Header::new(Algorithm::EdDSA);
         if let Some(kid) = config.key_id {
             header.kid = Some(kid);
         }
 
-        let encoding_key = EncodingKey::from_secret(&config.secret);
-        let decoding_key = DecodingKey::from_secret(&config.secret);
+        let encoding_key = EncodingKey::from_ed_der(&config.private_key);
+        let public_key_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&config.public_key);
+        let decoding_key = DecodingKey::from_ed_components(&public_key_b64)
+            .map_err(|err| EventError::Config(format!("invalid jwt public key material: {err}")))?;
 
         Ok(Self {
             ledger_path,
@@ -265,11 +264,16 @@ impl TokenManager {
             header,
             encoding_key,
             decoding_key,
+            public_key: config.public_key.clone(),
             issuer: config.issuer,
             audience: config.audience,
             default_ttl: config.default_ttl,
             clock_skew: config.clock_skew,
         })
+    }
+
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
     }
 
     pub fn issue(&self, input: IssueTokenInput) -> Result<TokenRecord> {
@@ -291,7 +295,6 @@ impl TokenManager {
             iat: now.timestamp(),
             exp: expires_at.map(|ts| ts.timestamp()),
             nbf: payload.not_before.map(|ts| ts.timestamp()),
-            root: payload.root,
             group: payload.group.clone(),
             user: payload.user.clone(),
             actions: if payload.root {
@@ -317,7 +320,7 @@ impl TokenManager {
             subject: payload.subject,
             group: payload.group,
             user: payload.user,
-            root: claims.root,
+            root: payload.root,
             actions: claims.actions.clone(),
             resources: claims.resources.clone(),
             issued_at: now,
@@ -399,7 +402,6 @@ impl TokenManager {
             iat: record.issued_at.timestamp(),
             exp: record.expires_at.map(|ts| ts.timestamp()),
             nbf: record.not_before.map(|ts| ts.timestamp()),
-            root: record.root,
             group: record.group.clone(),
             user: record.user.clone(),
             actions,
@@ -517,7 +519,7 @@ impl TokenManager {
     }
 
     fn decode(&self, token: &str) -> Result<JwtClaims> {
-        let mut validation = Validation::new(Algorithm::HS256);
+        let mut validation = Validation::new(Algorithm::EdDSA);
         validation.validate_exp = false;
         validation.validate_nbf = false;
         validation.required_spec_claims = HashSet::new();

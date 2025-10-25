@@ -9,7 +9,6 @@ use parking_lot::{Mutex, MutexGuard};
 use rocksdb::{DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options, WriteBatch};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
 
 use json_patch::Patch;
 
@@ -19,6 +18,7 @@ use super::{
     merkle::{compute_merkle_root, empty_root},
     schema::MAX_EVENT_NOTE_LENGTH,
 };
+use crate::snowflake::{MAX_WORKER_ID, SnowflakeGenerator, SnowflakeId};
 
 const SEP: u8 = 0x1F;
 const PREFIX_EVENT: &str = "evt";
@@ -32,6 +32,8 @@ pub struct EventRecord {
     pub aggregate_id: String,
     pub event_type: String,
     pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Value>,
     pub metadata: EventMetadata,
     pub version: u64,
     pub hash: String,
@@ -40,7 +42,7 @@ pub struct EventRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventMetadata {
-    pub event_id: Uuid,
+    pub event_id: SnowflakeId,
     pub created_at: DateTime<Utc>,
     pub issued_by: Option<ActorClaims>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,11 +57,6 @@ pub struct ActorClaims {
 
 impl<'a> Transaction<'a> {
     pub fn append(&mut self, input: AppendEvent) -> Result<EventRecord> {
-        let key = AggregateKey::new(input.aggregate_type.clone(), input.aggregate_id.clone());
-        let (meta, state) = self.ensure_cache(&key)?;
-        if meta.archived {
-            return Err(EventError::AggregateArchived);
-        }
         if let Some(note) = input.note.as_ref() {
             if note.chars().count() > MAX_EVENT_NOTE_LENGTH {
                 return Err(EventError::InvalidSchema(format!(
@@ -68,7 +65,13 @@ impl<'a> Transaction<'a> {
                 )));
             }
         }
-        let record = apply_event(meta, state, input);
+        let key = AggregateKey::new(input.aggregate_type.clone(), input.aggregate_id.clone());
+        let event_id = self.store.next_event_id();
+        let (meta, state) = self.ensure_cache(&key)?;
+        if meta.archived {
+            return Err(EventError::AggregateArchived);
+        }
+        let record = apply_event(meta, state, input, event_id);
         let stored_record = self.store.encode_record(&record)?;
         let event_value = serde_json::to_vec(&stored_record)?;
 
@@ -155,12 +158,14 @@ fn apply_event(
     meta: &mut AggregateMeta,
     state: &mut BTreeMap<String, String>,
     input: AppendEvent,
+    event_id: SnowflakeId,
 ) -> EventRecord {
     let AppendEvent {
         aggregate_type,
         aggregate_id,
         event_type,
         payload,
+        metadata,
         issued_by,
         note,
     } = input;
@@ -170,7 +175,6 @@ fn apply_event(
 
     let version = meta.version + 1;
     let created_at = Utc::now();
-    let event_id = Uuid::new_v4();
     let payload_map = payload_to_map(&payload);
     let hash = hash_event(
         &aggregate_type,
@@ -193,6 +197,7 @@ fn apply_event(
         aggregate_id,
         event_type,
         payload,
+        extensions: metadata,
         metadata: EventMetadata {
             event_id,
             created_at,
@@ -293,6 +298,7 @@ pub struct AppendEvent {
     pub aggregate_id: String,
     pub event_type: String,
     pub payload: Value,
+    pub metadata: Option<Value>,
     pub issued_by: Option<ActorClaims>,
     pub note: Option<String>,
 }
@@ -366,6 +372,7 @@ pub struct EventStore {
     write_lock: Mutex<()>,
     read_only: bool,
     encryptor: Option<Encryptor>,
+    id_generator: Mutex<SnowflakeGenerator>,
 }
 
 pub struct Transaction<'a> {
@@ -396,17 +403,25 @@ pub struct AggregatePositionEntry {
 }
 
 impl EventStore {
-    pub fn open(path: PathBuf, encryptor: Option<Encryptor>) -> Result<Self> {
+    pub fn open(path: PathBuf, encryptor: Option<Encryptor>, worker_id: u16) -> Result<Self> {
         let mut options = Options::default();
         options.create_if_missing(true);
         let db = DBWithThreadMode::<MultiThreaded>::open(&options, path)
             .map_err(|err| EventError::Storage(err.to_string()))?;
+
+        if worker_id > MAX_WORKER_ID {
+            return Err(EventError::Config(format!(
+                "snowflake worker id {} exceeds maximum {}",
+                worker_id, MAX_WORKER_ID
+            )));
+        }
 
         Ok(Self {
             db,
             write_lock: Mutex::new(()),
             read_only: false,
             encryptor,
+            id_generator: Mutex::new(SnowflakeGenerator::new(worker_id)),
         })
     }
 
@@ -421,7 +436,13 @@ impl EventStore {
             write_lock: Mutex::new(()),
             read_only: true,
             encryptor,
+            id_generator: Mutex::new(SnowflakeGenerator::new(0)),
         })
+    }
+
+    fn next_event_id(&self) -> SnowflakeId {
+        let mut guard = self.id_generator.lock();
+        guard.next_id()
     }
 
     pub fn prepare_payload_from_patch(
@@ -489,6 +510,7 @@ impl EventStore {
 
         let aggregate_type = input.aggregate_type.clone();
         let aggregate_id = input.aggregate_id.clone();
+        let event_id = self.next_event_id();
 
         let mut meta = self
             .load_meta(&aggregate_type, &aggregate_id)?
@@ -498,7 +520,7 @@ impl EventStore {
             return Err(EventError::AggregateArchived);
         }
         let mut state = self.load_state_map(&aggregate_type, &aggregate_id)?;
-        let record = apply_event(&mut meta, &mut state, input);
+        let record = apply_event(&mut meta, &mut state, input, event_id);
         let stored_record = self.encode_record(&record)?;
         let encoded_state = self.encode_state_map(&state)?;
 
@@ -696,6 +718,15 @@ impl EventStore {
         }
 
         Ok(events)
+    }
+
+    pub fn aggregate_version(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Option<u64>> {
+        let meta = self.load_meta(aggregate_type, aggregate_id)?;
+        Ok(meta.map(|meta| meta.version))
     }
 
     pub fn list_aggregate_ids(&self, aggregate_type: &str) -> Result<Vec<String>> {
@@ -1156,7 +1187,7 @@ mod tests {
         let path = dir.path().join("event_store");
 
         {
-            let store = EventStore::open(path.clone(), None).unwrap();
+            let store = EventStore::open(path.clone(), None, 0).unwrap();
 
             let payload = serde_json::json!({ "name": "Alice" });
 
@@ -1166,6 +1197,7 @@ mod tests {
                     aggregate_id: "patient-1".into(),
                     event_type: "patient-created".into(),
                     payload: payload.clone(),
+                    metadata: None,
                     issued_by: None,
                     note: None,
                 })
@@ -1188,7 +1220,7 @@ mod tests {
     fn transaction_appends_multiple_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
-        let store = EventStore::open(path, None).unwrap();
+        let store = EventStore::open(path, None, 0).unwrap();
 
         let mut tx = store.transaction().unwrap();
         let first = tx
@@ -1197,6 +1229,7 @@ mod tests {
                 aggregate_id: "order-42".into(),
                 event_type: "order-created".into(),
                 payload: serde_json::json!({ "status": "processing" }),
+                metadata: None,
                 issued_by: None,
                 note: None,
             })
@@ -1212,6 +1245,7 @@ mod tests {
                     "status": "shipped",
                     "tracking": "abc123"
                 }),
+                metadata: None,
                 issued_by: None,
                 note: None,
             })
@@ -1236,7 +1270,7 @@ mod tests {
     fn transaction_without_commit_discards_changes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
-        let store = EventStore::open(path.clone(), None).unwrap();
+        let store = EventStore::open(path.clone(), None, 0).unwrap();
 
         {
             let mut tx = store.transaction().unwrap();
@@ -1245,6 +1279,7 @@ mod tests {
                 aggregate_id: "inv-1".into(),
                 event_type: "invoice-created".into(),
                 payload: serde_json::json!({ "total": "100.00" }),
+                metadata: None,
                 issued_by: None,
                 note: None,
             })
@@ -1259,7 +1294,7 @@ mod tests {
     fn snapshots_and_archive_flow() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
-        let store = EventStore::open(path, None).unwrap();
+        let store = EventStore::open(path, None, 0).unwrap();
 
         let payload = serde_json::json!({ "status": "active" });
 
@@ -1269,6 +1304,7 @@ mod tests {
                 aggregate_id: "order-1".into(),
                 event_type: "order-created".into(),
                 payload,
+                metadata: None,
                 issued_by: None,
                 note: None,
             })
@@ -1291,6 +1327,7 @@ mod tests {
                 aggregate_id: "order-1".into(),
                 event_type: "order-updated".into(),
                 payload: serde_json::json!({}),
+                metadata: None,
                 issued_by: None,
                 note: None,
             })
@@ -1305,7 +1342,7 @@ mod tests {
     fn append_event_with_note_persists_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
-        let store = EventStore::open(path, None).unwrap();
+        let store = EventStore::open(path, None, 0).unwrap();
 
         let note_text = "initial import".to_string();
         let record = store
@@ -1314,6 +1351,7 @@ mod tests {
                 aggregate_id: "acct-1".into(),
                 event_type: "account-created".into(),
                 payload: serde_json::json!({ "status": "active" }),
+                metadata: None,
                 issued_by: None,
                 note: Some(note_text.clone()),
             })
@@ -1326,7 +1364,7 @@ mod tests {
     fn reject_event_note_exceeding_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
-        let store = EventStore::open(path, None).unwrap();
+        let store = EventStore::open(path, None, 0).unwrap();
 
         let long_note = "x".repeat(MAX_EVENT_NOTE_LENGTH + 1);
         let err = store
@@ -1335,6 +1373,7 @@ mod tests {
                 aggregate_id: "acct-2".into(),
                 event_type: "account-created".into(),
                 payload: serde_json::json!({ "status": "pending" }),
+                metadata: None,
                 issued_by: None,
                 note: Some(long_note),
             })
@@ -1344,10 +1383,38 @@ mod tests {
     }
 
     #[test]
+    fn append_event_with_extensions_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path.clone(), None, 0).unwrap();
+
+        let metadata = serde_json::json!({"@plugin": {"mode": "debug"}});
+        let record = store
+            .append(AppendEvent {
+                aggregate_type: "account".into(),
+                aggregate_id: "acct-3".into(),
+                event_type: "account-created".into(),
+                payload: serde_json::json!({ "status": "active" }),
+                metadata: Some(metadata.clone()),
+                issued_by: None,
+                note: None,
+            })
+            .unwrap();
+
+        assert_eq!(record.extensions, Some(metadata.clone()));
+
+        drop(store);
+        let reopened = EventStore::open(path, None, 0).unwrap();
+        let events = reopened.list_events("account", "acct-3").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].extensions, Some(metadata));
+    }
+
+    #[test]
     fn prepare_payload_from_patch_updates_nested_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
-        let store = EventStore::open(path.clone(), None).unwrap();
+        let store = EventStore::open(path.clone(), None, 0).unwrap();
 
         store
             .append(AppendEvent {
@@ -1360,6 +1427,7 @@ mod tests {
                         "address": { "city": "Portland" }
                     }
                 }),
+                metadata: None,
                 issued_by: None,
                 note: None,
             })
@@ -1387,7 +1455,7 @@ mod tests {
     fn prepare_payload_from_patch_rejects_unsupported_operations() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
-        let store = EventStore::open(path, None).unwrap();
+        let store = EventStore::open(path, None, 0).unwrap();
 
         let patch = serde_json::json!([
             { "op": "remove", "path": "/status" }
@@ -1404,7 +1472,7 @@ mod tests {
     fn prepare_payload_from_patch_supports_add_on_new_aggregate() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
-        let store = EventStore::open(path, None).unwrap();
+        let store = EventStore::open(path, None, 0).unwrap();
 
         let patch = serde_json::json!([
             { "op": "add", "path": "/status", "value": "inactive" }

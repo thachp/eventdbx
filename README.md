@@ -32,20 +32,11 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 
    - Omit `--foreground` to daemonise the process.
    - Use `--data-dir <path>` to override the default `$HOME/.eventdbx` directory.
-  - Restriction (schema enforcement) defaults to `default`; switch to `--restrict=off` for permissive prototyping or `--restrict=strict` to require declared schemas on every write.
-   - The server owns the RocksDB lock while it is running; the CLI detects this and automatically proxies write commands through the HTTP API. Stop the daemon only when you need offline tasks like staging or manual maintenance.
 
-- Choose the API surfaces with `--api rest`, `--api graphql`, `--api grpc`, or `--api all` (enable every surface). Persist the selection by editing the `[api]` table in `config.toml`, for example:
-  ```
-  [api]
-  rest = true
-  graphql = true
-  grpc = true
-  ```
-- Default ports can be overridden in `config.toml`:
-  - REST and GraphQL share the HTTP listener defined by `port` (default `7070`).
-  - gRPC uses `[grpc].bind_addr` (default `0.0.0.0:7070`, sharing the HTTP listener).
-  - The CLI socket listens on `[socket].bind_addr` (default `0.0.0.0:6363`).
+- Restriction (schema enforcement) defaults to `default`; switch to `--restrict=off` for permissive prototyping or `--restrict=strict` to require declared schemas on every write.
+- The server owns the RocksDB lock while it is running; the CLI detects this and automatically proxies write commands through the control socket. Stop the daemon only when you need offline tasks like staging or manual maintenance.
+
+- Public REST/GraphQL/gRPC surfaces now live in the [dbx_plugins workspace](https://github.com/thachp/dbx_plugins). Deploy the `rest_api`, `graphql_api`, or `grpc_api` binaries alongside the daemon to expose those endpoints. The built-in server only retains the admin API and control socket.
 
 3. **Define a schema (recommended when running in restricted mode)**
 
@@ -64,27 +55,11 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    ```
 
 5. **Append an event**
-   - When the server is running the CLI proxies writes through the REST API automatically. Pass a token with `--token` or set `EVENTDBX_TOKEN` to reuse your own credentials; otherwise the CLI mints a short-lived token for the call.
+   - When the server is running the CLI proxies writes through the control socket automatically. Pass a token with `--token` or set `EVENTDBX_TOKEN` to reuse your own credentials; otherwise the CLI mints a short-lived token for the call.
      ```bash
      dbx aggregate apply person p-002 patient-added \
        --field name="Jane Doe" \
        --field status=active
-     ```
-   - You can also call the REST endpoint directly:
-     ```bash
-     export EVENTDBX_TOKEN=<token from step 4>
-     curl -X POST http://127.0.0.1:7070/v1/events \
-       -H "Authorization: Bearer ${EVENTDBX_TOKEN}" \
-       -H "Content-Type: application/json" \
-       -d '{
-         "aggregate_type": "person",
-         "aggregate_id": "p-002",
-         "event_type": "patient-added",
-         "payload": {
-           "name": "Jane Doe",
-           "status": "active"
-         }
-       }'
      ```
    - If the server is stopped, the same CLI command writes to the local RocksDB store directly.
 
@@ -97,9 +72,8 @@ You now have a working EventDBX instance with an initial aggregate. Explore the 
 - **Event Sourcing and Replay**: EventDBX is built on the principle of event sourcing, storing all changes to the data as a sequence of events. This allows for the complete replay of events to reconstruct the database's state at any point in time, thereby enhancing data recovery and audit capabilities. Unlike traditional databases that execute update statements to modify data, this system is event-driven. Aggregate state changes are defined in the event object, allowing these events to be replayed at any time to reconstruct the aggregate's current state.
 - **Merkle Tree Integration**: Each aggregate in EventDBX is associated with a Merkle tree of events, enabling verification of data integrity. The Merkle tree structure ensures that any data tampering can be detected, offering an additional security layer against data corruption.
 - **Built-in Audit Trails**: EventDBX automatically maintains a comprehensive audit trail of all transactions, a feature invaluable for meeting compliance and regulatory requirements. It provides transparent and tamper-evident records. During audits, administrators can issue specific tokens to auditors to access and review specific aggregate instances and all relevant events associated with those instances.
-- **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes.
+- **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. Tokens are signed with an Ed25519 key pair stored under `[auth]` in `config.toml`; keep `private_key` secret and distribute `public_key` to services that need to validate them. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes.
 - **Encrypted Payloads & Secrets at Rest**: Event payloads, aggregate snapshots, and `tokens.json` are encrypted transparently when a DEK is configured. Metadata such as aggregate identifiers, versions, and Merkle roots remain readable so plugins, replication, and integrity checks keep working without additional configuration.
-- **Dedicated Admin API**: Operate schemas, tokens, plugins, and remotes programmatically through the `/admin` surface. Every request is authenticated with an Argon2-hashed master key so automation can stay locked down without interactive shells.
 - **Powered by RocksDB and Rust**: At its core, EventDBX utilizes RocksDB for storage, taking advantage of its high performance and efficiency. The system is developed in Rust, known for its safety, efficiency, and concurrency capabilities, ensuring that it is both rapid and dependable.
 
 ## Restriction Modes
@@ -129,8 +103,8 @@ EventDBX ships a single `dbx` binary. Every command accepts an optional `--confi
 
 ### Configuration
 
-- `dbx config [--port <u16>] [--data-dir <path>] [--cache-threshold <usize>] [--dek <base64>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>] [--snapshot-threshold <u64>] [--clear-snapshot-threshold] [--admin-enabled <true|false>] [--admin-bind <addr>] [--admin-port <u16>] [--admin-master-key <secret>] [--clear-admin-master-key]`  
-  Persists configuration updates. Run without flags to print the current settings. The first invocation must include a data encryption key via `--dek` (32 bytes of base64). `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10). Supply `--admin-master-key` to enable the Admin API with an Argon2-hashed shared secret, or use `--clear-admin-master-key` to revoke automation access. `--admin-enabled=false` disables the HTTP surface entirely.
+- `dbx config [--port <u16>] [--data-dir <path>] [--cache-threshold <usize>] [--dek <base64>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>] [--snapshot-threshold <u64>] [--clear-snapshot-threshold] [--admin-enabled <true|false>] [--admin-bind <addr>] [--admin-port <u16>]`  
+  Persists configuration updates. Run without flags to print the current settings. The first invocation must include a data encryption key via `--dek` (32 bytes of base64). `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10). The Admin API relies on bearer tokens; set `--admin-enabled=false` to disable the HTTP surface entirely.
 
 ### Tokens
 
@@ -216,32 +190,32 @@ Replication keys live alongside the data directory (`replication.key` / `replica
 
 ### Admin API
 
-The Admin API exposes token, schema, remote, and plugin management over HTTP so automation can operate EventDBX without shell access. It is disabled by default; enable it and seed a shared secret with:
+The Admin API exposes token, schema, remote, and plugin management over HTTP so automation can operate EventDBX without shell access. It is disabled by default; enable it with:
 
 ```bash
 dbx config \
   --admin-enabled true \
   --admin-bind 127.0.0.1 \
-  --admin-port 7171 \
-  --admin-master-key "rotate-me-please"
+  --admin-port 7171
 ```
 
-The master key is hashed with Argon2 and never written in plaintext. Include it on every request as either `X-Admin-Key: <secret>` or an `Authorization: Bearer <secret>` token:
+Authorization uses the same JWTs as the CLI. The first server start writes a root token to `~/.eventdbx/cli.token`; reuse it (or mint a dedicated token with `dbx token generate --root`) and attach it as a bearer credential:
 
 ```bash
-curl -H "X-Admin-Key: rotate-me-please" http://127.0.0.1:7171/admin/remotes
+curl -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
+  http://127.0.0.1:7171/admin/remotes
 ```
 
 Key routes:
 
-| Method & Path | Description |
-| --- | --- |
-| `GET /admin/tokens` | List issued tokens; `POST` issues a new token, `/revoke` and `/refresh` manage lifecycle. |
-| `GET /admin/schemas` | Fetch declared schemas or append new ones with `POST`. |
+| Method & Path        | Description                                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `GET /admin/tokens`  | List issued tokens; `POST` issues a new token, `/revoke` and `/refresh` manage lifecycle.                    |
+| `GET /admin/schemas` | Fetch declared schemas or append new ones with `POST`.                                                       |
 | `GET /admin/remotes` | Show replication remotes; `PUT /admin/remotes/{name}` upserts a remote using the same validation as the CLI. |
-| `GET /admin/plugins` | Inspect plugin configuration and toggle instances with `/enable` or `/disable`. |
+| `GET /admin/plugins` | Inspect plugin configuration and toggle instances with `/enable` or `/disable`.                              |
 
-Disable access any time with `dbx config --admin-enabled false` or rotate the credential with `--admin-master-key <new-secret>`. Use `--clear-admin-master-key` to immediately revoke all automation traffic while keeping the endpoints online.
+Disable access any time with `dbx config --admin-enabled false` or issue a new root token and revoke the old one via `dbx token revoke`.
 
 ### Upgrades
 
@@ -316,8 +290,13 @@ Example HTTP/TCP payload (`EventRecord`):
     "status": "inactive",
     "comment": "Archived via API"
   },
+  "extensions": {
+    "@analytics": {
+      "correlation_id": "rest-1234"
+    }
+  },
   "metadata": {
-    "event_id": "45c3013e-9b95-4ed0-9af9-1a465f81d3cf",
+    "event_id": "1234567890123",
     "created_at": "2024-12-01T17:22:43.512345Z",
     "issued_by": {
       "group": "admin",
@@ -330,150 +309,8 @@ Example HTTP/TCP payload (`EventRecord`):
 }
 ```
 
-## REST API
-
-The server exposes a small HTTP API (served on port `7070` by default). All endpoints require a bearer token unless otherwise noted.
-
-| Method & Path                                               | Description                                                       |
-| ----------------------------------------------------------- | ----------------------------------------------------------------- |
-| `GET /health`                                               | Liveness probe (unauthenticated).                                 |
-| `GET /v1/aggregates`                                        | Lists aggregates; supports `skip`/`take` query parameters.        |
-| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}`        | Returns the current state for a specific aggregate.               |
-| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events` | Lists events for an aggregate; supports `skip`/`take` pagination. |
-| `POST /v1/events`                                           | Appends an event; aggregate identifiers are provided in the body. |
-| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/verify` | Computes and returns the Merkle root for integrity verification.  |
-
-Paginated responses cap `take` at the configurable `page_limit` (default `1000`). Adjust it with `dbx config --page-limit <n>` if you need larger pages.
-
-All authenticated requests must include `Authorization: Bearer <token>` with a token issued via the CLI.
-
-### cURL examples
-
-```bash
-# Post a JSON event (global endpoint)
-curl \
-  -X POST \
-  -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "aggregate_type": "patient",
-        "aggregate_id": "p-001",
-        "event_type": "patient-updated",
-        "payload": {
-          "status": "inactive",
-          "meta": {"source": "api"}
-        }
-      }' \
-  http://localhost:7070/v1/events
-
-# Retrieve the first 10 events for an aggregate (supports `skip`/`take` up to `page_limit`)
-curl \
-  -H "Authorization: Bearer TOKEN" \
-  "http://localhost:7070/v1/aggregates/patient/p-001/events?skip=0&take=10"
-
-
-# Health check
-curl http://localhost:7070/health
-
-# List aggregates (replace TOKEN with an active value)
-curl \
-  -H "Authorization: Bearer TOKEN" \
-  http://localhost:7070/v1/aggregates
-
-# Append an event (global endpoint)
-curl \
-  -X POST \
-  -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "aggregate_type": "patient",
-        "aggregate_id": "p-001",
-        "event_type": "patient-updated",
-        "payload": {
-          "status": "inactive",
-          "comment": "Archived via API"
-        }
-      }' \
-  http://localhost:7070/v1/events
-
-```
-
-## gRPC API
-
-Enable the gRPC surface by setting `[api] grpc = true` in `config.toml`. The `[grpc]` table configures the bind address (default `0.0.0.0:7070`, reusing the HTTP listener). The service mirrors the REST operations (`AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, and `VerifyAggregate`) plus a simple `Health` probe.
-
-Example `grpcurl` invocation:
-
-```bash
-grpcurl -H "authorization: Bearer TOKEN" \
-  -d '{
-        "aggregate_type": "patient",
-        "aggregate_id": "p-001",
-        "event_type": "patient-updated",
-        "payload_json": "{\"status\":\"inactive\"}"
-      }' \
-  -plaintext 127.0.0.1:7070 dbx.api.EventService/AppendEvent
-```
-
-## GraphQL API
-
-GraphQL is served on `/graphql`, and an interactive Playground is available via `GET /graphql` or `/graphql/playground`. Supply the same bearer token header used for REST requests.
-
-### Query example
-
-```bash
-curl -X POST \
-  -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "query": "query RecentAggregates($take: Int!) { aggregates(take: $take) { aggregate_type aggregate_id version merkle_root state } }",
-        "variables": { "take": 5 }
-      }' \
-  http://localhost:7070/graphql
-```
-
-Sample response:
-
-```json
-{
-  "data": {
-    "aggregates": [
-      {
-        "aggregate_type": "patient",
-        "aggregate_id": "p-001",
-        "version": 3,
-        "merkle_root": "8f4c3d…",
-        "state": {
-          "name": "Jane Doe",
-          "status": "active"
-        }
-      }
-    ]
-  }
-}
-```
-
-### Mutation example
-
-```bash
-curl -X POST \
-  -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "query": "mutation Append($input: AppendEventInput!) { appendEvent(input: $input) { aggregate_type aggregate_id version payload } }",
-        "variables": {
-          "input": {
-            "aggregate_type": "patient",
-            "aggregate_id": "p-001",
-            "event_type": "patient-updated",
-            "payload": { "status": "inactive", "comment": "Archived via GraphQL" }
-          }
-        }
-      }' \
-  http://localhost:7070/graphql
-```
-
-The mutation triggers the same validation, replication, and plugin notifications as the REST endpoint.
+> **Heads-up for plugin authors**  
+> The [dbx_plugins](https://github.com/thachp/dbx_plugins) surfaces now receive `event_id` values as Snowflake strings and may optionally see an `extensions` object alongside `payload`. Update custom handlers to treat `metadata.event_id` as a stringified Snowflake and to ignore or consume the new `extensions` envelope as needed.
 
 ## Contributing
 

@@ -8,13 +8,13 @@ use std::{
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use eventdbx::{
     config::{Config, PluginDefinition, load_or_default},
     error::EventError,
     plugin::{Plugin, establish_connection, instantiate_plugin},
     schema::SchemaManager,
+    snowflake::SnowflakeId,
     store::{AggregateState, EventRecord, EventStore, payload_to_map},
 };
 
@@ -40,7 +40,7 @@ pub enum QueueAction {
 pub struct QueueRetryArgs {
     /// Retry only the dead entry with this event id
     #[arg(long)]
-    pub event_id: Option<Uuid>,
+    pub event_id: Option<SnowflakeId>,
 }
 
 pub fn execute(config_path: Option<PathBuf>, args: QueueArgs) -> Result<()> {
@@ -149,7 +149,7 @@ fn retry_dead_events(
     config: &Config,
     plugins: &[PluginDefinition],
     queue_path: PathBuf,
-    filter_event: Option<Uuid>,
+    filter_event: Option<SnowflakeId>,
 ) -> Result<()> {
     let mut status = match load_plugin_queue_status(&queue_path)? {
         Some(status) => status,
@@ -203,8 +203,8 @@ fn retry_dead_events(
         return Ok(());
     }
 
-    let mut succeeded: HashSet<Uuid> = HashSet::new();
-    let mut failed: HashSet<Uuid> = HashSet::new();
+    let mut succeeded: HashSet<SnowflakeId> = HashSet::new();
+    let mut failed: HashSet<SnowflakeId> = HashSet::new();
 
     for entry in target_events {
         match materialize_event_state(&store, &entry) {
@@ -384,7 +384,7 @@ struct PluginQueueStatus {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct PluginQueueEvent {
-    event_id: Uuid,
+    event_id: SnowflakeId,
     aggregate_type: String,
     aggregate_id: String,
     event_type: String,

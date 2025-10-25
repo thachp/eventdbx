@@ -338,7 +338,11 @@ pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Res
             )
             .await?;
         } else {
-            match EventStore::open(config.event_store_path(), config.encryption_key()?) {
+            match EventStore::open(
+                config.event_store_path(),
+                config.encryption_key()?,
+                config.snowflake_worker_id,
+            ) {
                 Ok(store) => {
                     let store = Arc::new(store);
                     let local_positions = store.aggregate_positions()?;

@@ -12,10 +12,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use serde_json::json;
-use uuid::Uuid;
 
 use eventdbx::config::{
-    Config, GrpcPluginConfig, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition,
+    CapnpPluginConfig, Config, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition,
     PluginKind, ProcessPluginConfig, TcpPluginConfig, load_or_default,
 };
 use eventdbx::plugin::{
@@ -28,6 +27,7 @@ use eventdbx::store::{
 use eventdbx::{
     error::EventError,
     schema::{AggregateSchema, SchemaManager},
+    snowflake::SnowflakeId,
 };
 use std::any::Any;
 use std::thread;
@@ -107,12 +107,12 @@ pub enum PluginConfigureCommands {
     /// Configure the TCP plugin
     #[command(name = "tcp")]
     Tcp(PluginTcpConfigureArgs),
+    /// Configure the Cap'n Proto plugin
+    #[command(name = "capnp")]
+    Capnp(PluginCapnpConfigureArgs),
     /// Configure the HTTP plugin
     #[command(name = "http")]
     Http(PluginHttpConfigureArgs),
-    /// Configure the gRPC plugin
-    #[command(name = "grpc")]
-    Grpc(PluginGrpcConfigureArgs),
     /// Configure the logging plugin
     #[command(name = "log")]
     Log(PluginLogConfigureArgs),
@@ -141,6 +141,25 @@ pub struct PluginTcpConfigureArgs {
 }
 
 #[derive(Args)]
+pub struct PluginCapnpConfigureArgs {
+    /// Hostname or IP of the Cap'n Proto service
+    #[arg(long)]
+    pub host: String,
+
+    /// Port of the Cap'n Proto service
+    #[arg(long)]
+    pub port: u16,
+
+    /// Disable the plugin after configuring
+    #[arg(long, default_value_t = false)]
+    pub disable: bool,
+
+    /// Name for this Cap'n Proto plugin instance
+    #[arg(long)]
+    pub name: String,
+}
+
+#[derive(Args)]
 pub struct PluginHttpConfigureArgs {
     /// HTTP endpoint to POST aggregate updates to
     #[arg(long)]
@@ -159,21 +178,6 @@ pub struct PluginHttpConfigureArgs {
     pub https: bool,
 
     /// Name for this HTTP plugin instance
-    #[arg(long)]
-    pub name: String,
-}
-
-#[derive(Args)]
-pub struct PluginGrpcConfigureArgs {
-    /// gRPC endpoint to send replication batches to
-    #[arg(long)]
-    pub endpoint: String,
-
-    /// Disable the plugin after configuring
-    #[arg(long, default_value_t = false)]
-    pub disable: bool,
-
-    /// Name for this gRPC plugin instance
     #[arg(long)]
     pub name: String,
 }
@@ -325,6 +329,45 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                     }
                 );
             }
+            PluginConfigureCommands::Capnp(args) => {
+                let name = args.name.trim();
+                if name.is_empty() {
+                    bail!("plugin name cannot be empty");
+                }
+                let name_owned = name.to_string();
+                let label = display_label(name);
+                match find_plugin_mut(&mut plugins, PluginKind::Capnp, Some(name))? {
+                    Some(plugin) => {
+                        plugin.enabled = !args.disable;
+                        plugin.name = Some(name_owned.clone());
+                        plugin.config = PluginConfig::Capnp(CapnpPluginConfig {
+                            host: args.host,
+                            port: args.port,
+                        });
+                    }
+                    None => {
+                        ensure_unique_plugin_name(&plugins, name)?;
+                        plugins.push(PluginDefinition {
+                            enabled: !args.disable,
+                            name: Some(name_owned.clone()),
+                            config: PluginConfig::Capnp(CapnpPluginConfig {
+                                host: args.host,
+                                port: args.port,
+                            }),
+                        });
+                    }
+                }
+                config.save_plugins(&plugins)?;
+                println!(
+                    "Cap'n Proto plugin '{}' {}",
+                    label,
+                    if args.disable {
+                        "disabled"
+                    } else {
+                        "configured"
+                    }
+                );
+            }
             PluginConfigureCommands::Http(args) => {
                 let mut headers = BTreeMap::new();
                 for entry in args.headers {
@@ -362,43 +405,6 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 config.save_plugins(&plugins)?;
                 println!(
                     "HTTP plugin '{}' {}",
-                    label,
-                    if args.disable {
-                        "disabled"
-                    } else {
-                        "configured"
-                    }
-                );
-            }
-            PluginConfigureCommands::Grpc(args) => {
-                let name = args.name.trim();
-                if name.is_empty() {
-                    bail!("plugin name cannot be empty");
-                }
-                let name_owned = name.to_string();
-                let label = display_label(name);
-                match find_plugin_mut(&mut plugins, PluginKind::Grpc, Some(name))? {
-                    Some(plugin) => {
-                        plugin.enabled = !args.disable;
-                        plugin.name = Some(name_owned.clone());
-                        plugin.config = PluginConfig::Grpc(GrpcPluginConfig {
-                            endpoint: args.endpoint.clone(),
-                        });
-                    }
-                    None => {
-                        ensure_unique_plugin_name(&plugins, name)?;
-                        plugins.push(PluginDefinition {
-                            enabled: !args.disable,
-                            name: Some(name_owned.clone()),
-                            config: PluginConfig::Grpc(GrpcPluginConfig {
-                                endpoint: args.endpoint.clone(),
-                            }),
-                        });
-                    }
-                }
-                config.save_plugins(&plugins)?;
-                println!(
-                    "gRPC plugin '{}' {}",
                     label,
                     if args.disable {
                         "disabled"
@@ -624,9 +630,9 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                     "status": "inactive",
                     "comment": "Archived via API"
                 }),
+                extensions: None,
                 metadata: EventMetadata {
-                    event_id: Uuid::parse_str("45c3013e-9b95-4ed0-9af9-1a465f81d3cf")
-                        .unwrap_or_else(|_| Uuid::new_v4()),
+                    event_id: SnowflakeId::from_u64(1_234_567_890),
                     created_at: DateTime::parse_from_rfc3339("2024-12-01T17:22:43.512345Z")
                         .map(|dt| dt.with_timezone(&Utc))
                         .unwrap_or_else(|_| Utc::now()),
@@ -1088,7 +1094,11 @@ fn replay_blocking(
     aggregate_id: Option<String>,
 ) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
-    let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+    let store = EventStore::open(
+        config.event_store_path(),
+        config.encryption_key()?,
+        config.snowflake_worker_id,
+    )?;
     let schema_manager = SchemaManager::load(config.schema_store_path())?;
 
     let plugin_defs = config.load_plugins()?;
@@ -1257,8 +1267,8 @@ fn display_label(name: &str) -> &str {
 pub(crate) fn plugin_kind_name(kind: PluginKind) -> &'static str {
     match kind {
         PluginKind::Tcp => "tcp",
+        PluginKind::Capnp => "capnp",
         PluginKind::Http => "http",
-        PluginKind::Grpc => "grpc",
         PluginKind::Log => "log",
         PluginKind::Process => "process",
     }

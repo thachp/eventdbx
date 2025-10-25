@@ -3,7 +3,7 @@ use std::{
     env,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -15,18 +15,23 @@ use serde_json::{self, Value};
 use tokio::{
     net::{TcpListener, TcpStream},
     process::Command,
-    task::JoinHandle,
+    task::{JoinHandle, spawn_blocking},
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     cli_capnp::{cli_request, cli_response},
+    config::Config,
+    control_capnp::{control_request, control_response},
+    error::EventError,
+    plugin::PluginManager,
     replication_capnp::{
         replication_hello, replication_hello_response, replication_request, replication_response,
     },
     replication_capnp_client::REPLICATION_PROTOCOL_VERSION,
     schema::{AggregateSchema, SchemaManager},
+    service::{AppendEventInput, CoreContext},
     store::{AggregatePositionEntry, EventMetadata, EventRecord, EventStore},
 };
 
@@ -46,6 +51,7 @@ struct SerializedEvent {
     hash: String,
     payload: Vec<u8>,
     metadata: Vec<u8>,
+    extensions: Vec<u8>,
 }
 
 enum ReplicationReply {
@@ -56,11 +62,120 @@ enum ReplicationReply {
     ApplySchemas { aggregate_count: u32 },
 }
 
+enum ControlReply {
+    ListAggregates(String),
+    GetAggregate {
+        found: bool,
+        aggregate_json: Option<String>,
+    },
+    ListEvents(String),
+    AppendEvent(String),
+    VerifyAggregate(String),
+}
+
+enum ControlCommand {
+    ListAggregates {
+        skip: usize,
+        take: Option<usize>,
+    },
+    GetAggregate {
+        aggregate_type: String,
+        aggregate_id: String,
+    },
+    ListEvents {
+        aggregate_type: String,
+        aggregate_id: String,
+        skip: usize,
+        take: Option<usize>,
+    },
+    AppendEvent {
+        token: String,
+        aggregate_type: String,
+        aggregate_id: String,
+        event_type: String,
+        payload: Option<Value>,
+        patch: Option<Value>,
+        metadata: Option<Value>,
+        note: Option<String>,
+    },
+    VerifyAggregate {
+        aggregate_type: String,
+        aggregate_id: String,
+    },
+}
+
+fn control_error_code(err: &EventError) -> &'static str {
+    match err {
+        EventError::InvalidToken => "invalid_token",
+        EventError::TokenExpired => "token_expired",
+        EventError::TokenLimitReached => "token_limit_reached",
+        EventError::Unauthorized => "unauthorized",
+        EventError::AggregateNotFound => "aggregate_not_found",
+        EventError::AggregateArchived => "aggregate_archived",
+        EventError::SchemaExists => "schema_exists",
+        EventError::SchemaNotFound => "schema_not_found",
+        EventError::InvalidSchema(_) => "invalid_schema",
+        EventError::SchemaViolation(_) => "schema_violation",
+        EventError::Config(_) => "config",
+        EventError::Storage(_) => "storage",
+        EventError::Io(_) => "io",
+        EventError::Serialization(_) => "serialization",
+    }
+}
+
+fn read_control_text(
+    field: capnp::Result<capnp::text::Reader<'_>>,
+    label: &str,
+) -> std::result::Result<String, EventError> {
+    let reader =
+        field.map_err(|err| EventError::Serialization(format!("failed to read {label}: {err}")))?;
+    reader
+        .to_string()
+        .map_err(|err| EventError::Serialization(format!("invalid utf-8 in {label}: {err}")))
+}
+
+#[cfg_attr(not(test), doc(hidden))]
+pub mod test_support {
+    use super::*;
+    use tokio::io::{DuplexStream, ReadHalf, WriteHalf, duplex, split};
+    use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+    pub fn spawn_control_session(
+        core: CoreContext,
+        shared_config: Arc<RwLock<Config>>,
+    ) -> (
+        Compat<WriteHalf<DuplexStream>>,
+        Compat<ReadHalf<DuplexStream>>,
+        tokio::task::JoinHandle<Result<()>>,
+    ) {
+        let (client, server) = duplex(4096);
+        let (server_reader_raw, server_writer_raw) = split(server);
+        let mut server_reader = server_reader_raw.compat();
+        let mut server_writer = server_writer_raw.compat_write();
+        let task = tokio::spawn(async move {
+            handle_control_session(
+                None,
+                &mut server_reader,
+                &mut server_writer,
+                core,
+                shared_config,
+            )
+            .await
+        });
+
+        let (client_reader_raw, client_writer_raw) = split(client);
+        let client_writer = client_writer_raw.compat_write();
+        let client_reader = client_reader_raw.compat();
+
+        (client_writer, client_reader, task)
+    }
+}
+
 pub async fn start(
     bind_addr: &str,
     config_path: Arc<PathBuf>,
-    store: Arc<EventStore>,
-    schemas: Arc<SchemaManager>,
+    core: CoreContext,
+    shared_config: Arc<RwLock<Config>>,
     local_public_key: Arc<Vec<u8>>,
 ) -> Result<JoinHandle<()>> {
     let listener = TcpListener::bind(bind_addr)
@@ -72,9 +187,15 @@ pub async fn start(
         .unwrap_or_else(|_| bind_addr.to_string());
     info!("CLI Cap'n Proto server listening on {}", display_addr);
 
-    let handle = tokio::spawn(async move {
-        if let Err(err) = serve(listener, config_path, store, schemas, local_public_key).await {
-            warn!("CLI proxy server terminated: {err:?}");
+    let handle = tokio::spawn({
+        let core = core.clone();
+        let shared_config = Arc::clone(&shared_config);
+        async move {
+            if let Err(err) =
+                serve(listener, config_path, core, shared_config, local_public_key).await
+            {
+                warn!("CLI proxy server terminated: {err:?}");
+            }
         }
     });
     Ok(handle)
@@ -83,8 +204,8 @@ pub async fn start(
 async fn serve(
     listener: TcpListener,
     config_path: Arc<PathBuf>,
-    store: Arc<EventStore>,
-    schemas: Arc<SchemaManager>,
+    core: CoreContext,
+    shared_config: Arc<RwLock<Config>>,
     local_public_key: Arc<Vec<u8>>,
 ) -> Result<()> {
     loop {
@@ -93,12 +214,12 @@ async fn serve(
             .await
             .context("failed to accept CLI proxy connection")?;
         let config_path = Arc::clone(&config_path);
-        let store = Arc::clone(&store);
-        let schemas = Arc::clone(&schemas);
+        let core = core.clone();
+        let shared_config = Arc::clone(&shared_config);
         let local_public_key = Arc::clone(&local_public_key);
         tokio::spawn(async move {
             if let Err(err) =
-                handle_connection(stream, config_path, store, schemas, local_public_key).await
+                handle_connection(stream, config_path, core, shared_config, local_public_key).await
             {
                 warn!(target: "cli_proxy", peer = %peer, "CLI proxy connection error: {err:?}");
             }
@@ -109,8 +230,8 @@ async fn serve(
 async fn handle_connection(
     stream: TcpStream,
     config_path: Arc<PathBuf>,
-    store: Arc<EventStore>,
-    schemas: Arc<SchemaManager>,
+    core: CoreContext,
+    shared_config: Arc<RwLock<Config>>,
     local_public_key: Arc<Vec<u8>>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
@@ -138,19 +259,37 @@ async fn handle_connection(
             Arc::clone(&config_path),
         )
         .await?;
-    } else {
-        handle_replication_session(
-            first_message,
-            &mut reader,
-            &mut writer,
-            store,
-            schemas,
-            local_public_key,
-        )
-        .await?;
+        return Ok(());
     }
 
+    if is_control_request(&first_message) {
+        handle_control_session(
+            Some(first_message),
+            &mut reader,
+            &mut writer,
+            core,
+            shared_config,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    handle_replication_session(
+        first_message,
+        &mut reader,
+        &mut writer,
+        core,
+        local_public_key,
+    )
+    .await?;
     Ok(())
+}
+
+fn is_control_request(message: &capnp::message::Reader<OwnedSegments>) -> bool {
+    match message.get_root::<control_request::Reader>() {
+        Ok(reader) => reader.get_payload().which().is_ok(),
+        Err(_) => false,
+    }
 }
 
 async fn handle_cli_loop<R, W>(
@@ -211,12 +350,421 @@ where
     Ok(())
 }
 
+async fn handle_control_session<R, W>(
+    mut pending: Option<capnp::message::Reader<OwnedSegments>>,
+    reader: &mut R,
+    writer: &mut W,
+    core: CoreContext,
+    shared_config: Arc<RwLock<Config>>,
+) -> Result<()>
+where
+    R: futures::AsyncRead + Unpin,
+    W: futures::AsyncWrite + Unpin,
+{
+    loop {
+        let message = if let Some(message) = pending.take() {
+            message
+        } else {
+            match try_read_message(&mut *reader, ReaderOptions::new()).await {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(err) => {
+                    return Err(anyhow::Error::new(err).context("failed to read control request"));
+                }
+            }
+        };
+
+        let request = message
+            .get_root::<control_request::Reader>()
+            .context("failed to decode control request")?;
+        let request_id = request.get_id();
+
+        let response_result = match parse_control_command(request) {
+            Ok(command) => {
+                execute_control_command(command, core.clone(), Arc::clone(&shared_config)).await
+            }
+            Err(err) => Err(err),
+        };
+
+        let response_bytes = {
+            let mut response_message = capnp::message::Builder::new_default();
+            {
+                let mut response = response_message.init_root::<control_response::Builder>();
+                response.set_id(request_id);
+                match response_result {
+                    Ok(reply) => {
+                        let payload = response.reborrow().init_payload();
+                        match reply {
+                            ControlReply::ListAggregates(json) => {
+                                let mut builder = payload.init_list_aggregates();
+                                builder.set_aggregates_json(&json);
+                            }
+                            ControlReply::GetAggregate {
+                                found,
+                                aggregate_json,
+                            } => {
+                                let mut builder = payload.init_get_aggregate();
+                                builder.set_found(found);
+                                if let Some(json) = aggregate_json {
+                                    builder.set_aggregate_json(&json);
+                                } else {
+                                    builder.set_aggregate_json("");
+                                }
+                            }
+                            ControlReply::ListEvents(json) => {
+                                let mut builder = payload.init_list_events();
+                                builder.set_events_json(&json);
+                            }
+                            ControlReply::AppendEvent(json) => {
+                                let mut builder = payload.init_append_event();
+                                builder.set_event_json(&json);
+                            }
+                            ControlReply::VerifyAggregate(merkle_root) => {
+                                let mut builder = payload.init_verify_aggregate();
+                                builder.set_merkle_root(&merkle_root);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let payload = response.reborrow().init_payload();
+                        let mut builder = payload.init_error();
+                        builder.set_code(control_error_code(&err));
+                        builder.set_message(&err.to_string());
+                    }
+                }
+            }
+            write_message_to_words(&response_message)
+        };
+
+        writer
+            .write_all(&response_bytes)
+            .await
+            .context("failed to write control response")?;
+        writer
+            .flush()
+            .await
+            .context("failed to flush control response")?;
+    }
+
+    Ok(())
+}
+
+fn parse_control_command(
+    request: control_request::Reader<'_>,
+) -> std::result::Result<ControlCommand, EventError> {
+    use control_request::payload;
+
+    match request
+        .get_payload()
+        .which()
+        .map_err(|err| EventError::Serialization(err.to_string()))?
+    {
+        payload::ListAggregates(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let skip = usize::try_from(req.get_skip())
+                .map_err(|_| EventError::InvalidSchema("skip exceeds platform limits".into()))?;
+            let take = if req.get_has_take() {
+                Some(usize::try_from(req.get_take()).map_err(|_| {
+                    EventError::InvalidSchema("take exceeds platform limits".into())
+                })?)
+            } else {
+                None
+            };
+
+            Ok(ControlCommand::ListAggregates { skip, take })
+        }
+        payload::GetAggregate(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+            let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+
+            Ok(ControlCommand::GetAggregate {
+                aggregate_type,
+                aggregate_id,
+            })
+        }
+        payload::ListEvents(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+            let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+            let skip = usize::try_from(req.get_skip())
+                .map_err(|_| EventError::InvalidSchema("skip exceeds platform limits".into()))?;
+            let take = if req.get_has_take() {
+                Some(usize::try_from(req.get_take()).map_err(|_| {
+                    EventError::InvalidSchema("take exceeds platform limits".into())
+                })?)
+            } else {
+                None
+            };
+
+            Ok(ControlCommand::ListEvents {
+                aggregate_type,
+                aggregate_id,
+                skip,
+                take,
+            })
+        }
+        payload::AppendEvent(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+            let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+            let event_type = read_control_text(req.get_event_type(), "event_type")?;
+
+            let payload_raw = read_control_text(req.get_payload_json(), "payload_json")?;
+            let payload_trimmed = payload_raw.trim();
+            let payload = if payload_trimmed.is_empty() {
+                None
+            } else {
+                Some(
+                    serde_json::from_str::<Value>(payload_trimmed).map_err(|err| {
+                        EventError::InvalidSchema(format!("invalid payload_json: {err}"))
+                    })?,
+                )
+            };
+
+            let patch_raw = read_control_text(req.get_patch_json(), "patch_json")?;
+            let patch_trimmed = patch_raw.trim();
+            let patch = if patch_trimmed.is_empty() {
+                None
+            } else {
+                Some(serde_json::from_str::<Value>(patch_trimmed).map_err(|err| {
+                    EventError::InvalidSchema(format!("invalid patch_json: {err}"))
+                })?)
+            };
+
+            let metadata = if req.get_has_metadata() {
+                let metadata_raw = read_control_text(req.get_metadata_json(), "metadata_json")?;
+                let metadata_trimmed = metadata_raw.trim();
+                if metadata_trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        serde_json::from_str::<Value>(metadata_trimmed).map_err(|err| {
+                            EventError::InvalidSchema(format!("invalid metadata_json: {err}"))
+                        })?,
+                    )
+                }
+            } else {
+                None
+            };
+
+            let note = if req.get_has_note() {
+                Some(read_control_text(req.get_note(), "note")?)
+            } else {
+                None
+            };
+
+            Ok(ControlCommand::AppendEvent {
+                token,
+                aggregate_type,
+                aggregate_id,
+                event_type,
+                payload,
+                patch,
+                metadata,
+                note,
+            })
+        }
+        payload::VerifyAggregate(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+            let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+
+            Ok(ControlCommand::VerifyAggregate {
+                aggregate_type,
+                aggregate_id,
+            })
+        }
+    }
+}
+
+async fn execute_control_command(
+    command: ControlCommand,
+    core: CoreContext,
+    shared_config: Arc<RwLock<Config>>,
+) -> std::result::Result<ControlReply, EventError> {
+    match command {
+        ControlCommand::ListAggregates { skip, take } => {
+            let aggregates = spawn_blocking({
+                let core = core.clone();
+                move || core.list_aggregates(skip, take)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("list aggregates task failed: {err}")))?;
+            let json = serde_json::to_string(&aggregates)?;
+            Ok(ControlReply::ListAggregates(json))
+        }
+        ControlCommand::GetAggregate {
+            aggregate_type,
+            aggregate_id,
+        } => {
+            let aggregate = spawn_blocking({
+                let core = core.clone();
+                let aggregate_type = aggregate_type.clone();
+                let aggregate_id = aggregate_id.clone();
+                move || core.get_aggregate(&aggregate_type, &aggregate_id)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("get aggregate task failed: {err}")))??;
+
+            let json = aggregate
+                .as_ref()
+                .map(|aggregate| serde_json::to_string(aggregate))
+                .transpose()?;
+
+            Ok(ControlReply::GetAggregate {
+                found: aggregate.is_some(),
+                aggregate_json: json,
+            })
+        }
+        ControlCommand::ListEvents {
+            aggregate_type,
+            aggregate_id,
+            skip,
+            take,
+        } => {
+            let events = spawn_blocking({
+                let core = core.clone();
+                let aggregate_type = aggregate_type.clone();
+                let aggregate_id = aggregate_id.clone();
+                move || core.list_events(&aggregate_type, &aggregate_id, skip, take)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("list events task failed: {err}")))??;
+
+            let json = serde_json::to_string(&events)?;
+            Ok(ControlReply::ListEvents(json))
+        }
+        ControlCommand::AppendEvent {
+            token,
+            aggregate_type,
+            aggregate_id,
+            event_type,
+            payload,
+            patch,
+            metadata,
+            note,
+        } => {
+            let record = spawn_blocking({
+                let core = core.clone();
+                let input = AppendEventInput {
+                    token,
+                    aggregate_type: aggregate_type.clone(),
+                    aggregate_id: aggregate_id.clone(),
+                    event_type: event_type.clone(),
+                    payload,
+                    patch,
+                    metadata,
+                    note,
+                };
+                move || core.append_event(input)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("append event task failed: {err}")))??;
+
+            let record_json = serde_json::to_string(&record)?;
+
+            let schemas = core.schemas();
+            if schemas.should_snapshot(&record.aggregate_type, record.version) {
+                let aggregate_type = record.aggregate_type.clone();
+                let aggregate_id = record.aggregate_id.clone();
+                let version = record.version;
+                let snapshot_result = spawn_blocking({
+                    let store = core.store();
+                    let aggregate_type_key = aggregate_type.clone();
+                    let aggregate_id_key = aggregate_id.clone();
+                    move || {
+                        store.create_snapshot(
+                            &aggregate_type_key,
+                            &aggregate_id_key,
+                            Some(format!("auto snapshot v{}", version)),
+                        )
+                    }
+                })
+                .await
+                .map_err(|err| {
+                    EventError::Storage(format!("failed to create auto snapshot: {err}"))
+                })?;
+                if let Err(err) = snapshot_result {
+                    warn!(
+                        target: "server",
+                        "failed to create auto snapshot for {}::{} v{}: {}",
+                        aggregate_type,
+                        aggregate_id,
+                        version,
+                        err
+                    );
+                }
+            }
+
+            let plugins = {
+                let guard = shared_config
+                    .read()
+                    .map_err(|_| EventError::Storage("failed to acquire config lock".into()))?;
+                PluginManager::from_config(&*guard)?
+            };
+
+            if !plugins.is_empty() {
+                let schemas = core.schemas();
+                let schema = schemas.get(&record.aggregate_type).ok();
+                let aggregate_type = record.aggregate_type.clone();
+                let aggregate_id = record.aggregate_id.clone();
+                let state_result = spawn_blocking({
+                    let store = core.store();
+                    let aggregate_type_key = aggregate_type.clone();
+                    let aggregate_id_key = aggregate_id.clone();
+                    move || store.get_aggregate_state(&aggregate_type_key, &aggregate_id_key)
+                })
+                .await
+                .map_err(|err| {
+                    EventError::Storage(format!("failed to load aggregate state: {err}"))
+                })?;
+
+                match state_result {
+                    Ok(current_state) => {
+                        if let Err(err) =
+                            plugins.notify_event(&record, &current_state, schema.as_ref())
+                        {
+                            error!("plugin notification failed: {}", err);
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            "plugin notification skipped (failed to load state for {}::{}): {}",
+                            aggregate_type, aggregate_id, err
+                        );
+                    }
+                }
+            }
+
+            Ok(ControlReply::AppendEvent(record_json))
+        }
+        ControlCommand::VerifyAggregate {
+            aggregate_type,
+            aggregate_id,
+        } => {
+            let merkle = spawn_blocking({
+                let core = core.clone();
+                let aggregate_type = aggregate_type.clone();
+                let aggregate_id = aggregate_id.clone();
+                move || core.verify_aggregate(&aggregate_type, &aggregate_id)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("verify aggregate task failed: {err}")))??;
+
+            Ok(ControlReply::VerifyAggregate(merkle))
+        }
+    }
+}
+
 async fn handle_replication_session<R, W>(
     first_message: capnp::message::Reader<OwnedSegments>,
     reader: &mut R,
     writer: &mut W,
-    store: Arc<EventStore>,
-    schemas: Arc<SchemaManager>,
+    core: CoreContext,
     local_public_key: Arc<Vec<u8>>,
 ) -> Result<()>
 where
@@ -275,6 +823,8 @@ where
         return Ok(());
     }
 
+    let store = core.store();
+    let schemas = core.schemas();
     let store = Arc::clone(&store);
     let schemas = Arc::clone(&schemas);
     let mut last_sequence = 0u64;
@@ -352,6 +902,12 @@ fn process_replication_request(
                     .map_err(|err| anyhow!("failed to encode event payload: {err}"))?;
                 let metadata = serde_json::to_vec(&event.metadata)
                     .map_err(|err| anyhow!("failed to encode event metadata: {err}"))?;
+                let extensions = if let Some(ext) = &event.extensions {
+                    serde_json::to_vec(ext)
+                        .map_err(|err| anyhow!("failed to encode event extensions: {err}"))?
+                } else {
+                    Vec::new()
+                };
                 serialized.push(SerializedEvent {
                     aggregate_type: event.aggregate_type,
                     aggregate_id: event.aggregate_id,
@@ -361,6 +917,7 @@ fn process_replication_request(
                     hash: event.hash,
                     payload,
                     metadata,
+                    extensions,
                 });
             }
 
@@ -440,6 +997,7 @@ fn populate_replication_response(
                 record.set_hash(&event.hash);
                 record.set_payload(&event.payload);
                 record.set_metadata(&event.metadata);
+                record.set_extensions(&event.extensions);
             }
         }
         ReplicationReply::ApplyEvents { applied_sequence } => {
@@ -473,17 +1031,29 @@ fn decode_capnp_event(
     let metadata_bytes = reader
         .get_metadata()
         .map_err(|err| anyhow!("failed to read event metadata: {err}"))?;
+    let extensions_bytes = reader
+        .get_extensions()
+        .map_err(|err| anyhow!("failed to read event extensions: {err}"))?;
 
     let payload: Value = serde_json::from_slice(payload_bytes)
         .map_err(|err| anyhow!("failed to decode event payload: {err}"))?;
     let metadata: EventMetadata = serde_json::from_slice(metadata_bytes)
         .map_err(|err| anyhow!("failed to decode event metadata: {err}"))?;
+    let extensions = if extensions_bytes.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::from_slice(extensions_bytes)
+                .map_err(|err| anyhow!("failed to decode event extensions: {err}"))?,
+        )
+    };
 
     Ok(EventRecord {
         aggregate_type,
         aggregate_id,
         event_type,
         payload,
+        extensions,
         metadata,
         version,
         hash,

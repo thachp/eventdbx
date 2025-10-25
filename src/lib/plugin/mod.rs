@@ -13,10 +13,10 @@ mod process;
 pub mod registry;
 mod tcp;
 use tcp::TcpPlugin;
+mod capnp;
+use capnp::CapnpPlugin;
 mod http;
 use http::HttpPlugin;
-mod grpc;
-use grpc::GrpcPlugin;
 mod log;
 use log::LogPlugin;
 use process::ProcessPlugin;
@@ -81,12 +81,12 @@ pub fn establish_connection(definition: &PluginDefinition) -> Result<()> {
             let plugin = TcpPlugin::new(settings.clone());
             plugin.ensure_ready()
         }
-        PluginConfig::Http(settings) => {
-            let plugin = HttpPlugin::new(settings.clone());
+        PluginConfig::Capnp(settings) => {
+            let plugin = CapnpPlugin::new(settings.clone());
             plugin.ensure_ready()
         }
-        PluginConfig::Grpc(settings) => {
-            let plugin = GrpcPlugin::new(settings.clone());
+        PluginConfig::Http(settings) => {
+            let plugin = HttpPlugin::new(settings.clone());
             plugin.ensure_ready()
         }
         PluginConfig::Log(settings) => {
@@ -100,8 +100,8 @@ pub fn establish_connection(definition: &PluginDefinition) -> Result<()> {
 pub fn instantiate_plugin(definition: &PluginDefinition, config: &Config) -> Box<dyn Plugin> {
     match &definition.config {
         PluginConfig::Tcp(settings) => Box::new(TcpPlugin::new(settings.clone())),
+        PluginConfig::Capnp(settings) => Box::new(CapnpPlugin::new(settings.clone())),
         PluginConfig::Http(settings) => Box::new(HttpPlugin::new(settings.clone())),
-        PluginConfig::Grpc(settings) => Box::new(GrpcPlugin::new(settings.clone())),
         PluginConfig::Log(settings) => Box::new(LogPlugin::new(settings.clone())),
         PluginConfig::Process(settings) => {
             let identifier = definition

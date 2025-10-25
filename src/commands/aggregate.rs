@@ -19,13 +19,20 @@ use eventdbx::{
     error::EventError,
     merkle::compute_merkle_root,
     plugin::PluginManager,
-    restrict::{self, RestrictMode},
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{self, ActorClaims, AppendEvent, EventRecord, EventStore, payload_to_map},
     token::{IssueTokenInput, JwtLimits, TokenManager},
+    validation::{
+        ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
+        ensure_payload_size, ensure_schema_declared, ensure_snake_case,
+    },
 };
 
-use crate::commands::client::ServerClient;
+#[cfg(test)]
+use eventdbx::restrict::{self, RestrictMode};
+
+use crate::commands::{cli_token, client::ServerClient};
+use tracing::warn;
 
 #[derive(Subcommand)]
 pub enum AggregateCommands {
@@ -77,8 +84,12 @@ pub struct AggregateApplyArgs {
     pub token: Option<String>,
 
     /// Raw JSON payload to use instead of key-value fields
-    #[arg(long)]
+    #[arg(long, value_name = "JSON")]
     pub payload: Option<String>,
+
+    /// JSON metadata with plugin-specific keys prefixed by '@'
+    #[arg(long)]
+    pub metadata: Option<String>,
 
     /// Optional note associated with the event (up to 128 characters)
     #[arg(long, value_name = "NOTE")]
@@ -277,7 +288,11 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
         }
         AggregateCommands::Remove(args) => {
-            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+            let store = EventStore::open(
+                config.event_store_path(),
+                config.encryption_key()?,
+                config.snowflake_worker_id,
+            )?;
             store.remove_aggregate(&args.aggregate, &args.aggregate_id)?;
             println!(
                 "aggregate_type={} aggregate_id={} removed",
@@ -339,6 +354,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 stage,
                 token,
                 payload: payload_arg,
+                metadata,
                 note,
                 patch,
             } = args;
@@ -366,29 +382,53 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 }
             }
 
+            let metadata_value = match metadata {
+                Some(raw) => Some(
+                    serde_json::from_str::<Value>(&raw)
+                        .with_context(|| "failed to parse JSON metadata provided via --metadata")?,
+                ),
+                None => None,
+            };
+            if let Some(ref metadata) = metadata_value {
+                ensure_metadata_extensions(metadata)?;
+            }
+
+            ensure_snake_case("aggregate_type", &aggregate)?;
+            ensure_snake_case("event_type", &event)?;
+            ensure_aggregate_id(&aggregate_id)?;
+
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
-            if config.restrict.enforces_validation() {
-                ensure_schema_for_mode(config.restrict, &schema_manager, &aggregate)?;
-                if patch_ops.is_none() {
-                    schema_manager.validate_event(&aggregate, &event, &payload)?;
-                }
+            ensure_schema_declared(&schema_manager, &aggregate)?;
+            if patch_ops.is_none() {
+                ensure_payload_size(&payload)?;
+                schema_manager.validate_event(&aggregate, &event, &payload)?;
             }
 
             if stage {
-                match EventStore::open(config.event_store_path(), config.encryption_key()?) {
+                match EventStore::open(
+                    config.event_store_path(),
+                    config.encryption_key()?,
+                    config.snowflake_worker_id,
+                ) {
                     Ok(store) => {
                         let effective_payload = if let Some(ref ops) = patch_ops {
                             store.prepare_payload_from_patch(&aggregate, &aggregate_id, ops)?
                         } else {
                             payload.clone()
                         };
-                        if patch_ops.is_some() && config.restrict.enforces_validation() {
+                        if patch_ops.is_some() {
+                            ensure_payload_size(&effective_payload)?;
                             schema_manager.validate_event(
                                 &aggregate,
                                 &event,
                                 &effective_payload,
                             )?;
                         }
+                        let is_new = match store.aggregate_version(&aggregate, &aggregate_id)? {
+                            Some(version) if version > 0 => false,
+                            Some(_) | None => true,
+                        };
+                        ensure_first_event_rule(is_new, &event)?;
                         {
                             let mut tx = store.transaction()?;
                             tx.append(AppendEvent {
@@ -396,6 +436,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                                 aggregate_id: aggregate_id.clone(),
                                 event_type: event.clone(),
                                 payload: effective_payload.clone(),
+                                metadata: metadata_value.clone(),
                                 issued_by: None,
                                 note: note.clone(),
                             })?;
@@ -406,6 +447,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                             aggregate_id,
                             event,
                             payload: effective_payload,
+                            metadata: metadata_value.clone(),
                             issued_by: None,
                             note,
                         };
@@ -424,7 +466,11 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
 
             let encryption = config.encryption_key()?;
-            match EventStore::open(config.event_store_path(), encryption) {
+            match EventStore::open(
+                config.event_store_path(),
+                encryption,
+                config.snowflake_worker_id,
+            ) {
                 Ok(store) => {
                     let plugins = PluginManager::from_config(&config)?;
                     let effective_payload = if let Some(ref ops) = patch_ops {
@@ -432,14 +478,21 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     } else {
                         payload.clone()
                     };
-                    if patch_ops.is_some() && config.restrict.enforces_validation() {
+                    if patch_ops.is_some() {
+                        ensure_payload_size(&effective_payload)?;
                         schema_manager.validate_event(&aggregate, &event, &effective_payload)?;
                     }
+                    let is_new = match store.aggregate_version(&aggregate, &aggregate_id)? {
+                        Some(version) if version > 0 => false,
+                        Some(_) | None => true,
+                    };
+                    ensure_first_event_rule(is_new, &event)?;
                     let record = store.append(AppendEvent {
                         aggregate_type: aggregate.clone(),
                         aggregate_id: aggregate_id.clone(),
                         event_type: event.clone(),
                         payload: effective_payload.clone(),
+                        metadata: metadata_value.clone(),
                         issued_by: None,
                         note: note.clone(),
                     })?;
@@ -487,6 +540,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                             Some(&payload)
                         },
                         patch_ops.as_ref(),
+                        metadata_value.as_ref(),
                         note.as_deref(),
                     )?;
                     println!("{}", serde_json::to_string_pretty(&record)?);
@@ -535,13 +589,21 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
         }
         AggregateCommands::Snapshot(args) => {
-            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+            let store = EventStore::open(
+                config.event_store_path(),
+                config.encryption_key()?,
+                config.snowflake_worker_id,
+            )?;
             let snapshot =
                 store.create_snapshot(&args.aggregate, &args.aggregate_id, args.comment.clone())?;
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
         }
         AggregateCommands::Archive(args) => {
-            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+            let store = EventStore::open(
+                config.event_store_path(),
+                config.encryption_key()?,
+                config.snowflake_worker_id,
+            )?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
@@ -557,7 +619,11 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             );
         }
         AggregateCommands::Restore(args) => {
-            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+            let store = EventStore::open(
+                config.event_store_path(),
+                config.encryption_key()?,
+                config.snowflake_worker_id,
+            )?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
@@ -581,23 +647,37 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
 
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
-            let store = EventStore::open(config.event_store_path(), config.encryption_key()?)?;
+            let store = EventStore::open(
+                config.event_store_path(),
+                config.encryption_key()?,
+                config.snowflake_worker_id,
+            )?;
             let plugins = PluginManager::from_config(&config)?;
             let mut tx = store.transaction()?;
 
             for staged_event in &staged_events {
-                if config.restrict.enforces_validation() {
-                    ensure_schema_for_mode(
-                        config.restrict,
-                        &schema_manager,
-                        &staged_event.aggregate,
-                    )?;
-                    schema_manager.validate_event(
-                        &staged_event.aggregate,
-                        &staged_event.event,
-                        &staged_event.payload,
-                    )?;
+                ensure_snake_case("aggregate_type", &staged_event.aggregate)?;
+                ensure_snake_case("event_type", &staged_event.event)?;
+                ensure_aggregate_id(&staged_event.aggregate_id)?;
+                ensure_payload_size(&staged_event.payload)?;
+                if let Some(ref metadata) = staged_event.metadata {
+                    ensure_metadata_extensions(metadata)?;
                 }
+
+                let is_new = match store
+                    .aggregate_version(&staged_event.aggregate, &staged_event.aggregate_id)?
+                {
+                    Some(version) if version > 0 => false,
+                    Some(_) | None => true,
+                };
+                ensure_first_event_rule(is_new, &staged_event.event)?;
+
+                ensure_schema_declared(&schema_manager, &staged_event.aggregate)?;
+                schema_manager.validate_event(
+                    &staged_event.aggregate,
+                    &staged_event.event,
+                    &staged_event.payload,
+                )?;
 
                 tx.append(staged_event.to_append_event())?;
             }
@@ -661,6 +741,7 @@ fn maybe_auto_snapshot(store: &EventStore, schemas: &SchemaManager, record: &Eve
     }
 }
 
+#[cfg(test)]
 fn ensure_schema_for_mode(
     mode: RestrictMode,
     schema_manager: &SchemaManager,
@@ -682,12 +763,22 @@ fn proxy_append_via_http(
     event: &str,
     payload: Option<&Value>,
     patch: Option<&Value>,
+    metadata: Option<&Value>,
     note: Option<&str>,
 ) -> Result<EventRecord> {
     let token = ensure_proxy_token(config, token)?;
     let client = ServerClient::new(config)?;
     client
-        .append_event(&token, aggregate, aggregate_id, event, payload, patch, note)
+        .append_event(
+            &token,
+            aggregate,
+            aggregate_id,
+            event,
+            payload,
+            patch,
+            metadata,
+            note,
+        )
         .with_context(|| {
             format!(
                 "failed to append event via running server on port {}",
@@ -702,6 +793,15 @@ fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> 
     }
     if let Some(token) = env::var("EVENTDBX_TOKEN").ok().and_then(normalize_token) {
         return Ok(token);
+    }
+    match cli_token::ensure_bootstrap_token(config) {
+        Ok(token) => return Ok(token),
+        Err(err) => {
+            warn!(
+                "failed to load CLI bootstrap token ({}); falling back to ephemeral token",
+                err
+            );
+        }
     }
     issue_ephemeral_token(config)
 }
@@ -1189,6 +1289,8 @@ struct StagedEvent {
     #[serde(default = "default_event_payload")]
     payload: Value,
     #[serde(default)]
+    metadata: Option<Value>,
+    #[serde(default)]
     issued_by: Option<StagedIssuedBy>,
     #[serde(default)]
     note: Option<String>,
@@ -1207,6 +1309,7 @@ impl StagedEvent {
             aggregate_id: self.aggregate_id.clone(),
             event_type: self.event.clone(),
             payload: self.payload.clone(),
+            metadata: self.metadata.clone(),
             issued_by: self.issued_by.clone().map(Into::into),
             note: self.note.clone(),
         }

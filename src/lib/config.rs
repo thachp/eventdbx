@@ -5,12 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use argon2::{
-    Argon2,
-    password_hash::{
-        Error as PasswordHashError, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-    },
-};
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
@@ -18,6 +12,10 @@ use base64::{
 use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::SigningKey;
 use rand_core::{OsRng, RngCore};
+use ring::{
+    rand::SystemRandom,
+    signature::{ED25519_PUBLIC_KEY_LEN, Ed25519KeyPair, KeyPair},
+};
 use serde::de::{Deserializer, Error as DeError};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -83,9 +81,9 @@ impl ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            rest: true,
-            graphql: true,
-            grpc: true,
+            rest: false,
+            graphql: false,
+            grpc: false,
         }
     }
 }
@@ -130,7 +128,9 @@ pub struct AuthConfig {
     #[serde(default = "default_jwt_audience")]
     pub audience: String,
     #[serde(default)]
-    pub secret: Option<String>,
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
     #[serde(default)]
     pub key_id: Option<String>,
     #[serde(default = "default_jwt_ttl_secs")]
@@ -141,10 +141,13 @@ pub struct AuthConfig {
 
 impl Default for AuthConfig {
     fn default() -> Self {
+        let (private_key, public_key) = generate_jwt_keypair()
+            .unwrap_or_else(|err| panic!("failed to generate default jwt key pair: {err}"));
         Self {
             issuer: default_jwt_issuer(),
             audience: default_jwt_audience(),
-            secret: Some(generate_jwt_secret()),
+            private_key: Some(private_key),
+            public_key: Some(public_key),
             key_id: Some(format!("key-{}", Utc::now().format("%Y%m%d%H%M%S"))),
             default_ttl_secs: default_jwt_ttl_secs(),
             clock_skew_secs: default_jwt_clock_skew_secs(),
@@ -190,6 +193,8 @@ pub struct Config {
     pub admin: AdminApiConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default = "default_snowflake_worker_id")]
+    pub snowflake_worker_id: u16,
 }
 
 impl Default for Config {
@@ -215,6 +220,7 @@ impl Default for Config {
             api: default_api_config(),
             admin: AdminApiConfig::default(),
             auth: AuthConfig::default(),
+            snowflake_worker_id: default_snowflake_worker_id(),
         }
     }
 }
@@ -234,6 +240,7 @@ pub struct ConfigUpdate {
     pub grpc: Option<GrpcApiConfigUpdate>,
     pub socket: Option<SocketConfigUpdate>,
     pub admin: Option<AdminApiConfigUpdate>,
+    pub snowflake_worker_id: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -274,18 +281,25 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
         cfg.grpc.legacy_enabled = None;
 
         let updated = cfg.ensure_encryption_key();
-        let auth_updated = cfg.ensure_auth_secret();
+        let auth_updated = cfg.ensure_auth_keys()?;
+        let replication_updated = if cfg.socket.bind_addr == "0.0.0.0:7443" {
+            cfg.socket.bind_addr = default_socket_bind_addr();
+            cfg.updated_at = Utc::now();
+            true
+        } else {
+            false
+        };
         cfg.ensure_data_dir()?;
         cfg.ensure_replication_identity()?;
         let migrated = cfg.migrate_plugins()?;
-        if updated || migrated || auth_updated {
+        if updated || migrated || auth_updated || replication_updated {
             cfg.save(&config_path)?;
         }
         Ok((cfg, config_path))
     } else {
         let mut cfg = Config::default();
         let _ = cfg.ensure_encryption_key();
-        let _ = cfg.ensure_auth_secret();
+        cfg.ensure_auth_keys()?;
         cfg.ensure_data_dir()?;
         cfg.ensure_replication_identity()?;
         let _ = cfg.migrate_plugins()?;
@@ -344,6 +358,9 @@ impl Config {
         if let Some(max_attempts) = update.plugin_max_attempts {
             self.plugin_max_attempts = max_attempts.max(1);
         }
+        if let Some(worker_id) = update.snowflake_worker_id {
+            self.snowflake_worker_id = worker_id;
+        }
         if let Some(api) = update.api {
             if let Some(rest) = api.rest {
                 self.api.rest = rest;
@@ -398,23 +415,31 @@ impl Config {
         true
     }
 
-    pub fn ensure_auth_secret(&mut self) -> bool {
-        let needs_secret = self
+    pub fn ensure_auth_keys(&mut self) -> Result<bool> {
+        let needs_private = self
             .auth
-            .secret
+            .private_key
             .as_ref()
             .map(|value| value.trim().is_empty())
             .unwrap_or(true);
-        if !needs_secret {
-            return false;
+        let needs_public = self
+            .auth
+            .public_key
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true);
+        if !needs_private && !needs_public {
+            return Ok(false);
         }
 
-        self.auth.secret = Some(generate_jwt_secret());
+        let (private_key, public_key) = generate_jwt_keypair()?;
+        self.auth.private_key = Some(private_key);
+        self.auth.public_key = Some(public_key);
         if self.auth.key_id.is_none() {
             self.auth.key_id = Some(format!("key-{}", Utc::now().format("%Y%m%d%H%M%S")));
         }
         self.updated_at = Utc::now();
-        true
+        Ok(true)
     }
 
     pub fn identity_key_path(&self) -> PathBuf {
@@ -490,22 +515,48 @@ impl Config {
         self.data_dir.join("tokens.json")
     }
 
+    pub fn cli_token_path(&self) -> PathBuf {
+        self.data_dir.join("cli.token")
+    }
+
     pub fn jwt_revocations_path(&self) -> PathBuf {
         self.data_dir.join("jwt_revocations.json")
     }
 
     pub fn jwt_manager_config(&self) -> Result<JwtManagerConfig> {
-        let secret = self
+        let private = self
             .auth
-            .secret
+            .private_key
             .as_ref()
-            .ok_or_else(|| EventError::Config("jwt secret not configured".to_string()))?;
-        let secret_bytes = STANDARD
-            .decode(secret.trim())
-            .map_err(|err| EventError::Config(format!("invalid jwt secret: {err}")))?;
-        if secret_bytes.len() < 32 {
+            .ok_or_else(|| EventError::Config("jwt private key not configured".to_string()))?;
+        let private_key = STANDARD
+            .decode(private.trim())
+            .map_err(|err| EventError::Config(format!("invalid jwt private key: {err}")))?;
+        if private_key.is_empty() {
             return Err(EventError::Config(
-                "jwt secret must decode to at least 32 bytes".to_string(),
+                "jwt private key must contain data".to_string(),
+            ));
+        }
+        let public = self
+            .auth
+            .public_key
+            .as_ref()
+            .ok_or_else(|| EventError::Config("jwt public key not configured".to_string()))?;
+        let public_key = STANDARD
+            .decode(public.trim())
+            .map_err(|err| EventError::Config(format!("invalid jwt public key: {err}")))?;
+        if public_key.len() != ED25519_PUBLIC_KEY_LEN {
+            return Err(EventError::Config(format!(
+                "jwt public key must decode to {} bytes (got {})",
+                ED25519_PUBLIC_KEY_LEN,
+                public_key.len()
+            )));
+        }
+        let key_pair = Ed25519KeyPair::from_pkcs8(private_key.as_slice())
+            .map_err(|err| EventError::Config(format!("invalid jwt private key: {err}")))?;
+        if key_pair.public_key().as_ref() != public_key.as_slice() {
+            return Err(EventError::Config(
+                "jwt public key does not match private key".to_string(),
             ));
         }
         let ttl = self.auth.default_ttl_secs.max(60);
@@ -513,7 +564,8 @@ impl Config {
         Ok(JwtManagerConfig {
             issuer: self.auth.issuer.clone(),
             audience: self.auth.audience.clone(),
-            secret: secret_bytes,
+            private_key,
+            public_key,
             key_id: self.auth.key_id.clone(),
             default_ttl: Duration::seconds(ttl as i64),
             clock_skew: Duration::seconds(clock_skew as i64),
@@ -557,59 +609,6 @@ impl Config {
             Some(value) => Ok(Some(Encryptor::new_from_base64(value)?)),
             None => Ok(None),
         }
-    }
-
-    pub fn set_admin_master_key(&mut self, key: &str) -> Result<()> {
-        let normalized = key.trim();
-        if normalized.is_empty() {
-            return Err(EventError::Config(
-                "admin master key cannot be empty".to_string(),
-            ));
-        }
-
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let hash = argon2
-            .hash_password(normalized.as_bytes(), &salt)
-            .map_err(|err| EventError::Config(format!("failed to hash admin master key: {err}")))?;
-        self.admin.master_key_hash = Some(hash.to_string());
-        self.updated_at = Utc::now();
-        Ok(())
-    }
-
-    pub fn clear_admin_master_key(&mut self) {
-        self.admin.master_key_hash = None;
-        self.updated_at = Utc::now();
-    }
-
-    pub fn verify_admin_master_key(&self, candidate: &str) -> Result<bool> {
-        let Some(stored) = self.admin.master_key_hash.as_ref() else {
-            return Ok(false);
-        };
-
-        let parsed = PasswordHash::new(stored).map_err(|err| {
-            EventError::Config(format!("stored admin master key hash is invalid: {err}"))
-        })?;
-        let argon2 = Argon2::default();
-        let normalized = candidate.trim();
-        if normalized.is_empty() {
-            return Ok(false);
-        }
-        match argon2.verify_password(normalized.as_bytes(), &parsed) {
-            Ok(_) => Ok(true),
-            Err(PasswordHashError::Password) => Ok(false),
-            Err(err) => Err(EventError::Config(format!(
-                "failed to verify admin master key: {err}"
-            ))),
-        }
-    }
-
-    pub fn admin_master_key_configured(&self) -> bool {
-        self.admin
-            .master_key_hash
-            .as_ref()
-            .map(|hash| !hash.trim().is_empty())
-            .unwrap_or(false)
     }
 
     pub fn load_plugins(&self) -> Result<Vec<PluginDefinition>> {
@@ -724,8 +723,8 @@ pub struct AdminApiConfig {
     pub bind_addr: String,
     #[serde(default = "default_admin_port")]
     pub port: Option<u16>,
-    #[serde(default)]
-    pub master_key_hash: Option<String>,
+    #[serde(default, skip_serializing, alias = "master_key_hash")]
+    _deprecated_master_key_hash: Option<String>,
 }
 
 impl Default for AdminApiConfig {
@@ -734,7 +733,7 @@ impl Default for AdminApiConfig {
             enabled: default_admin_enabled(),
             bind_addr: default_admin_bind_addr(),
             port: default_admin_port(),
-            master_key_hash: None,
+            _deprecated_master_key_hash: None,
         }
     }
 }
@@ -784,8 +783,15 @@ fn default_jwt_clock_skew_secs() -> u64 {
     30
 }
 
-fn generate_jwt_secret() -> String {
-    generate_data_encryption_key()
+fn generate_jwt_keypair() -> Result<(String, String)> {
+    let rng = SystemRandom::new();
+    let pkcs8_doc = Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|err| EventError::Config(format!("failed to generate jwt key pair: {err}")))?;
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_doc.as_ref())
+        .map_err(|err| EventError::Config(format!("failed to parse jwt key pair: {err}")))?;
+    let private_key = STANDARD.encode(pkcs8_doc.as_ref());
+    let public_key = STANDARD.encode(key_pair.public_key().as_ref());
+    Ok((private_key, public_key))
 }
 
 fn default_data_dir() -> PathBuf {
@@ -806,6 +812,10 @@ fn default_page_limit() -> usize {
 
 fn default_plugin_max_attempts() -> u32 {
     10
+}
+
+fn default_snowflake_worker_id() -> u16 {
+    0
 }
 
 fn default_grpc_bind_addr() -> String {
@@ -829,7 +839,7 @@ fn default_identity_key() -> PathBuf {
 }
 
 fn default_replication_bind() -> String {
-    "0.0.0.0:7443".to_string()
+    format!("0.0.0.0:{}", DEFAULT_SOCKET_PORT)
 }
 
 fn default_admin_enabled() -> bool {
@@ -877,8 +887,8 @@ pub struct PluginDefinition {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginConfig {
     Tcp(TcpPluginConfig),
+    Capnp(CapnpPluginConfig),
     Http(HttpPluginConfig),
-    Grpc(GrpcPluginConfig),
     Log(LogPluginConfig),
     Process(ProcessPluginConfig),
 }
@@ -887,8 +897,8 @@ impl PluginConfig {
     pub fn kind(&self) -> PluginKind {
         match self {
             PluginConfig::Tcp(_) => PluginKind::Tcp,
+            PluginConfig::Capnp(_) => PluginKind::Capnp,
             PluginConfig::Http(_) => PluginKind::Http,
-            PluginConfig::Grpc(_) => PluginKind::Grpc,
             PluginConfig::Log(_) => PluginKind::Log,
             PluginConfig::Process(_) => PluginKind::Process,
         }
@@ -899,8 +909,8 @@ impl PluginConfig {
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
     Tcp,
+    Capnp,
     Http,
-    Grpc,
     Log,
     Process,
 }
@@ -912,17 +922,18 @@ pub struct TcpPluginConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapnpPluginConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpPluginConfig {
     pub endpoint: String,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub https: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GrpcPluginConfig {
-    pub endpoint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
