@@ -234,7 +234,7 @@ impl ProcessConnection {
             event.set_metadata_json(&metadata_json);
             match extensions_json {
                 Some(ref json) => event.set_extensions_json(json),
-                None => event.set_extensions_json(""),
+                None => event.set_extensions_json("null"),
             }
             event.set_hash(&record.hash);
             event.set_merkle_root(&record.merkle_root);
@@ -245,7 +245,7 @@ impl ProcessConnection {
 
             match schema_json {
                 Some(ref json) => event.set_schema_json(json),
-                None => event.set_schema_json(""),
+                None => event.set_schema_json("null"),
             }
 
             let mut entries = event.init_state_entries(state.state.len() as u32);

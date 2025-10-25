@@ -636,6 +636,15 @@ fn build_plugin_config_args(name: &str, request: &PluginUpsertRequest) -> Result
             args.push("--port".to_string());
             args.push(cfg.port.to_string());
         }
+        PluginConfig::Capnp(cfg) => {
+            args.push("capnp".to_string());
+            args.push("--name".to_string());
+            args.push(name.to_string());
+            args.push("--host".to_string());
+            args.push(cfg.host.clone());
+            args.push("--port".to_string());
+            args.push(cfg.port.to_string());
+        }
         PluginConfig::Process(_) => {
             return Err(EventError::Config(
                 "process plugins must be managed via the CLI".into(),

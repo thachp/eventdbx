@@ -887,6 +887,7 @@ pub struct PluginDefinition {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginConfig {
     Tcp(TcpPluginConfig),
+    Capnp(CapnpPluginConfig),
     Http(HttpPluginConfig),
     Log(LogPluginConfig),
     Process(ProcessPluginConfig),
@@ -896,6 +897,7 @@ impl PluginConfig {
     pub fn kind(&self) -> PluginKind {
         match self {
             PluginConfig::Tcp(_) => PluginKind::Tcp,
+            PluginConfig::Capnp(_) => PluginKind::Capnp,
             PluginConfig::Http(_) => PluginKind::Http,
             PluginConfig::Log(_) => PluginKind::Log,
             PluginConfig::Process(_) => PluginKind::Process,
@@ -907,6 +909,7 @@ impl PluginConfig {
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
     Tcp,
+    Capnp,
     Http,
     Log,
     Process,
@@ -914,6 +917,12 @@ pub enum PluginKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpPluginConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapnpPluginConfig {
     pub host: String,
     pub port: u16,
 }

@@ -48,6 +48,7 @@ Event writes enforce a few key rules:
 - `aggregate_id` accepts letters, numbers, underscores, and hyphens (max 128 characters) with no surrounding whitespace.
 - Payload JSON is limited to 256 KiB, and optional `metadata` objects (keys prefixed with `@`) are capped at 64 KiB so plugins can react without overwhelming the bus.
 - `event_id` values are Snowflake IDs encoded as strings; assign each node a unique `snowflake_worker_id` (0-1023) in `config.toml` to avoid collisions when pushing or pulling events.
+- Plugins receive the event envelope with `metadata.event_id` as a stringified Snowflake and (optionally) an `extensions` object; ensure the [dbx_plugins](https://github.com/thachp/dbx_plugins) repo or any custom adapters tolerate the new fields.
 
 ## GraphQL
 

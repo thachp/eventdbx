@@ -74,7 +74,6 @@ You now have a working EventDBX instance with an initial aggregate. Explore the 
 - **Built-in Audit Trails**: EventDBX automatically maintains a comprehensive audit trail of all transactions, a feature invaluable for meeting compliance and regulatory requirements. It provides transparent and tamper-evident records. During audits, administrators can issue specific tokens to auditors to access and review specific aggregate instances and all relevant events associated with those instances.
 - **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. Tokens are signed with an Ed25519 key pair stored under `[auth]` in `config.toml`; keep `private_key` secret and distribute `public_key` to services that need to validate them. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes.
 - **Encrypted Payloads & Secrets at Rest**: Event payloads, aggregate snapshots, and `tokens.json` are encrypted transparently when a DEK is configured. Metadata such as aggregate identifiers, versions, and Merkle roots remain readable so plugins, replication, and integrity checks keep working without additional configuration.
-- **Dedicated Admin API**: Operate schemas, tokens, plugins, and remotes programmatically through the `/admin` surface. Every request is authenticated with an Argon2-hashed master key so automation can stay locked down without interactive shells.
 - **Powered by RocksDB and Rust**: At its core, EventDBX utilizes RocksDB for storage, taking advantage of its high performance and efficiency. The system is developed in Rust, known for its safety, efficiency, and concurrency capabilities, ensuring that it is both rapid and dependable.
 
 ## Restriction Modes
@@ -291,6 +290,11 @@ Example HTTP/TCP payload (`EventRecord`):
     "status": "inactive",
     "comment": "Archived via API"
   },
+  "extensions": {
+    "@analytics": {
+      "correlation_id": "rest-1234"
+    }
+  },
   "metadata": {
     "event_id": "1234567890123",
     "created_at": "2024-12-01T17:22:43.512345Z",
@@ -304,6 +308,9 @@ Example HTTP/TCP payload (`EventRecord`):
   "merkle_root": "deadbeef…"
 }
 ```
+
+> **Heads-up for plugin authors**  
+> The [dbx_plugins](https://github.com/thachp/dbx_plugins) surfaces now receive `event_id` values as Snowflake strings and may optionally see an `extensions` object alongside `payload`. Update custom handlers to treat `metadata.event_id` as a stringified Snowflake and to ignore or consume the new `extensions` envelope as needed.
 
 ## Contributing
 

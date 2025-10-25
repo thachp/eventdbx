@@ -14,8 +14,8 @@ use clap::{Args, Subcommand};
 use serde_json::json;
 
 use eventdbx::config::{
-    Config, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition, PluginKind,
-    ProcessPluginConfig, TcpPluginConfig, load_or_default,
+    CapnpPluginConfig, Config, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition,
+    PluginKind, ProcessPluginConfig, TcpPluginConfig, load_or_default,
 };
 use eventdbx::plugin::{
     Plugin, establish_connection, instantiate_plugin,
@@ -107,6 +107,9 @@ pub enum PluginConfigureCommands {
     /// Configure the TCP plugin
     #[command(name = "tcp")]
     Tcp(PluginTcpConfigureArgs),
+    /// Configure the Cap'n Proto plugin
+    #[command(name = "capnp")]
+    Capnp(PluginCapnpConfigureArgs),
     /// Configure the HTTP plugin
     #[command(name = "http")]
     Http(PluginHttpConfigureArgs),
@@ -133,6 +136,25 @@ pub struct PluginTcpConfigureArgs {
     pub disable: bool,
 
     /// Name for this TCP plugin instance
+    #[arg(long)]
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct PluginCapnpConfigureArgs {
+    /// Hostname or IP of the Cap'n Proto service
+    #[arg(long)]
+    pub host: String,
+
+    /// Port of the Cap'n Proto service
+    #[arg(long)]
+    pub port: u16,
+
+    /// Disable the plugin after configuring
+    #[arg(long, default_value_t = false)]
+    pub disable: bool,
+
+    /// Name for this Cap'n Proto plugin instance
     #[arg(long)]
     pub name: String,
 }
@@ -299,6 +321,45 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 config.save_plugins(&plugins)?;
                 println!(
                     "TCP plugin '{}' {}",
+                    label,
+                    if args.disable {
+                        "disabled"
+                    } else {
+                        "configured"
+                    }
+                );
+            }
+            PluginConfigureCommands::Capnp(args) => {
+                let name = args.name.trim();
+                if name.is_empty() {
+                    bail!("plugin name cannot be empty");
+                }
+                let name_owned = name.to_string();
+                let label = display_label(name);
+                match find_plugin_mut(&mut plugins, PluginKind::Capnp, Some(name))? {
+                    Some(plugin) => {
+                        plugin.enabled = !args.disable;
+                        plugin.name = Some(name_owned.clone());
+                        plugin.config = PluginConfig::Capnp(CapnpPluginConfig {
+                            host: args.host,
+                            port: args.port,
+                        });
+                    }
+                    None => {
+                        ensure_unique_plugin_name(&plugins, name)?;
+                        plugins.push(PluginDefinition {
+                            enabled: !args.disable,
+                            name: Some(name_owned.clone()),
+                            config: PluginConfig::Capnp(CapnpPluginConfig {
+                                host: args.host,
+                                port: args.port,
+                            }),
+                        });
+                    }
+                }
+                config.save_plugins(&plugins)?;
+                println!(
+                    "Cap'n Proto plugin '{}' {}",
                     label,
                     if args.disable {
                         "disabled"
@@ -1206,6 +1267,7 @@ fn display_label(name: &str) -> &str {
 pub(crate) fn plugin_kind_name(kind: PluginKind) -> &'static str {
     match kind {
         PluginKind::Tcp => "tcp",
+        PluginKind::Capnp => "capnp",
         PluginKind::Http => "http",
         PluginKind::Log => "log",
         PluginKind::Process => "process",
