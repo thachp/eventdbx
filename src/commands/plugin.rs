@@ -10,15 +10,15 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde_json::json;
 
 use eventdbx::config::{
     CapnpPluginConfig, Config, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition,
-    PluginKind, ProcessPluginConfig, TcpPluginConfig, load_or_default,
+    PluginKind, PluginPayloadMode, ProcessPluginConfig, TcpPluginConfig, load_or_default,
 };
 use eventdbx::plugin::{
-    Plugin, establish_connection, instantiate_plugin,
+    Plugin, PluginDelivery, establish_connection, instantiate_plugin,
     registry::{self, InstalledPluginRecord, PluginSource},
 };
 use eventdbx::store::{
@@ -102,6 +102,46 @@ pub struct PluginListArgs {
     pub json: bool,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum PayloadModeArg {
+    All,
+    EventOnly,
+    StateOnly,
+    SchemaOnly,
+    EventAndSchema,
+}
+
+impl From<PayloadModeArg> for PluginPayloadMode {
+    fn from(value: PayloadModeArg) -> Self {
+        match value {
+            PayloadModeArg::All => PluginPayloadMode::All,
+            PayloadModeArg::EventOnly => PluginPayloadMode::EventOnly,
+            PayloadModeArg::StateOnly => PluginPayloadMode::StateOnly,
+            PayloadModeArg::SchemaOnly => PluginPayloadMode::SchemaOnly,
+            PayloadModeArg::EventAndSchema => PluginPayloadMode::EventAndSchema,
+        }
+    }
+}
+
+impl From<PluginPayloadMode> for PayloadModeArg {
+    fn from(value: PluginPayloadMode) -> Self {
+        match value {
+            PluginPayloadMode::All => PayloadModeArg::All,
+            PluginPayloadMode::EventOnly => PayloadModeArg::EventOnly,
+            PluginPayloadMode::StateOnly => PayloadModeArg::StateOnly,
+            PluginPayloadMode::SchemaOnly => PayloadModeArg::SchemaOnly,
+            PluginPayloadMode::EventAndSchema => PayloadModeArg::EventAndSchema,
+        }
+    }
+}
+
+impl Default for PayloadModeArg {
+    fn default() -> Self {
+        PayloadModeArg::All
+    }
+}
+
 #[derive(Subcommand)]
 pub enum PluginConfigureCommands {
     /// Configure the TCP plugin
@@ -138,6 +178,10 @@ pub struct PluginTcpConfigureArgs {
     /// Name for this TCP plugin instance
     #[arg(long)]
     pub name: String,
+
+    /// Payload components to deliver to the plugin
+    #[arg(long = "payload", value_enum)]
+    pub payload: Option<PayloadModeArg>,
 }
 
 #[derive(Args)]
@@ -157,6 +201,10 @@ pub struct PluginCapnpConfigureArgs {
     /// Name for this Cap'n Proto plugin instance
     #[arg(long)]
     pub name: String,
+
+    /// Payload components to deliver to the plugin
+    #[arg(long = "payload", value_enum)]
+    pub payload: Option<PayloadModeArg>,
 }
 
 #[derive(Args)]
@@ -180,6 +228,10 @@ pub struct PluginHttpConfigureArgs {
     /// Name for this HTTP plugin instance
     #[arg(long)]
     pub name: String,
+
+    /// Payload components to deliver to the plugin
+    #[arg(long = "payload", value_enum)]
+    pub payload: Option<PayloadModeArg>,
 }
 
 #[derive(Args)]
@@ -199,6 +251,10 @@ pub struct PluginLogConfigureArgs {
     /// Name for this Log plugin instance
     #[arg(long)]
     pub name: String,
+
+    /// Payload components to deliver to the plugin
+    #[arg(long = "payload", value_enum)]
+    pub payload: Option<PayloadModeArg>,
 }
 
 #[derive(Args)]
@@ -230,6 +286,10 @@ pub struct PluginProcessConfigureArgs {
     /// Disable the plugin after configuring
     #[arg(long, default_value_t = false)]
     pub disable: bool,
+
+    /// Payload components to deliver to the plugin
+    #[arg(long = "payload", value_enum)]
+    pub payload: Option<PayloadModeArg>,
 }
 
 #[derive(Debug, Clone)]
@@ -291,6 +351,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
         }
         PluginCommands::Config(config_command) => match config_command {
             PluginConfigureCommands::Tcp(args) => {
+                let payload_mode = args.payload;
                 let name = args.name.trim();
                 if name.is_empty() {
                     bail!("plugin name cannot be empty");
@@ -305,12 +366,16 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                             host: args.host,
                             port: args.port,
                         });
+                        if let Some(mode) = payload_mode {
+                            plugin.payload_mode = mode.into();
+                        }
                     }
                     None => {
                         ensure_unique_plugin_name(&plugins, name)?;
                         plugins.push(PluginDefinition {
                             enabled: !args.disable,
                             name: Some(name_owned.clone()),
+                            payload_mode: payload_mode.unwrap_or_default().into(),
                             config: PluginConfig::Tcp(TcpPluginConfig {
                                 host: args.host,
                                 port: args.port,
@@ -330,6 +395,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 );
             }
             PluginConfigureCommands::Capnp(args) => {
+                let payload_mode = args.payload;
                 let name = args.name.trim();
                 if name.is_empty() {
                     bail!("plugin name cannot be empty");
@@ -344,12 +410,16 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                             host: args.host,
                             port: args.port,
                         });
+                        if let Some(mode) = payload_mode {
+                            plugin.payload_mode = mode.into();
+                        }
                     }
                     None => {
                         ensure_unique_plugin_name(&plugins, name)?;
                         plugins.push(PluginDefinition {
                             enabled: !args.disable,
                             name: Some(name_owned.clone()),
+                            payload_mode: payload_mode.unwrap_or_default().into(),
                             config: PluginConfig::Capnp(CapnpPluginConfig {
                                 host: args.host,
                                 port: args.port,
@@ -373,6 +443,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 for entry in args.headers {
                     headers.insert(entry.key, entry.value);
                 }
+                let payload_mode = args.payload;
                 let name = args.name.trim();
                 if name.is_empty() {
                     bail!("plugin name cannot be empty");
@@ -388,12 +459,16 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                             headers,
                             https: args.https,
                         });
+                        if let Some(mode) = payload_mode {
+                            plugin.payload_mode = mode.into();
+                        }
                     }
                     None => {
                         ensure_unique_plugin_name(&plugins, name)?;
                         plugins.push(PluginDefinition {
                             enabled: !args.disable,
                             name: Some(name_owned.clone()),
+                            payload_mode: payload_mode.unwrap_or_default().into(),
                             config: PluginConfig::Http(HttpPluginConfig {
                                 endpoint: args.endpoint,
                                 headers,
@@ -414,6 +489,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 );
             }
             PluginConfigureCommands::Log(args) => {
+                let payload_mode = args.payload;
                 let name = args.name.trim();
                 if name.is_empty() {
                     bail!("plugin name cannot be empty");
@@ -428,12 +504,16 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                             level: args.level.clone(),
                             template: args.template.clone(),
                         });
+                        if let Some(mode) = payload_mode {
+                            plugin.payload_mode = mode.into();
+                        }
                     }
                     None => {
                         ensure_unique_plugin_name(&plugins, name)?;
                         plugins.push(PluginDefinition {
                             enabled: !args.disable,
                             name: Some(name_owned.clone()),
+                            payload_mode: payload_mode.unwrap_or_default().into(),
                             config: PluginConfig::Log(LogPluginConfig {
                                 level: args.level.clone(),
                                 template: args.template.clone(),
@@ -453,6 +533,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 );
             }
             PluginConfigureCommands::Process(args) => {
+                let payload_mode = args.payload;
                 let instance = args.name.trim();
                 if instance.is_empty() {
                     bail!("plugin name cannot be empty");
@@ -491,12 +572,16 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                         plugin.enabled = !args.disable;
                         plugin.name = Some(instance_owned.clone());
                         plugin.config = PluginConfig::Process(process_config);
+                        if let Some(mode) = payload_mode {
+                            plugin.payload_mode = mode.into();
+                        }
                     }
                     None => {
                         ensure_unique_plugin_name(&plugins, instance)?;
                         plugins.push(PluginDefinition {
                             enabled: !args.disable,
                             name: Some(instance_owned.clone()),
+                            payload_mode: payload_mode.unwrap_or_default().into(),
                             config: PluginConfig::Process(process_config),
                         });
                     }
@@ -666,9 +751,13 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 let result = run_blocking(move || {
                     establish_connection(&definition_clone).map_err(anyhow::Error::from)?;
                     let plugin = instantiate_plugin(&definition_clone, &cfg);
-                    plugin
-                        .notify_event(&record_clone, &state_clone, None)
-                        .map_err(anyhow::Error::from)
+                    let payload_mode = definition_clone.payload_mode;
+                    let delivery = PluginDelivery {
+                        record: payload_mode.includes_event().then_some(&record_clone),
+                        state: payload_mode.includes_state().then_some(&state_clone),
+                        schema: None,
+                    };
+                    plugin.notify_event(delivery).map_err(anyhow::Error::from)
                 });
 
                 match result {
@@ -1161,7 +1250,11 @@ fn replay_single(
             merkle_root: event.merkle_root.clone(),
             archived: false,
         };
-        plugin.notify_event(&event, &state, schema)?;
+        plugin.notify_event(PluginDelivery {
+            record: Some(&event),
+            state: Some(&state),
+            schema,
+        })?;
     }
 
     println!("replayed {}::{}", aggregate, aggregate_id);

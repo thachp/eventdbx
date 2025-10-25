@@ -6,7 +6,7 @@ nav_id: cli
 
 # CLI Reference
 
-The `dbx` binary manages servers, schemas, tokens, plugins, replication, and backups. Every command accepts `--config <path>` when you need to point at a non-default configuration file.
+The `dbx` binary manages servers, schemas, tokens, plugins, replication, and backups. Every command accepts `--config <path>` when you need to point at a non-default configuration file. The CLI programs the *write* side of EventDBX and orchestrates the plugin pipeline that pushes jobs to read-side services.
 
 ## Global options
 
@@ -68,7 +68,7 @@ Staging (`--stage`) records events to `~/.eventdbx/staged_events.json` until you
 ## Plugins & queues
 
 - `dbx plugin install <plugin> <version> --source <path|url> [--bin <file>] [--checksum <sha256>] [--force]`
-- `dbx plugin config <type> …` – Configure `tcp`, `http`, `grpc`, `log`, or `process` emitters.
+- `dbx plugin config <type> …` – Configure `tcp`, `http`, `capnp`, `log`, or `process` emitters. Every `plugin config` command accepts `--payload <all|event-only|state-only|schema-only|event-and-schema>` so each plugin receives only the portions of the job it needs.
 - `dbx plugin enable <name>` / `dbx plugin disable <name>`
 - `dbx plugin remove <name>`
 - `dbx plugin list`
@@ -76,7 +76,11 @@ Staging (`--stage`) records events to `~/.eventdbx/staged_events.json` until you
 - `dbx plugin test`
 - `dbx queue`
 - `dbx queue clear`
-- `dbx queue retry [--event-id <uuid>]`
+- `dbx queue retry [--event-id <job-id>]`
+
+EventDBX’s core store owns the *write* side of CQRS; plugins serve the *read* side by consuming jobs from the queue and projecting them into downstream systems (search, analytics, notification hubs, and more). Jobs are persisted in RocksDB so delivery survives restarts, and each plugin can request only the data it needs—event documents, materialised state, schemas, or combinations thereof.
+
+See the [Plugin architecture]({{ '/plugins/' | relative_url }}) guide for deeper details, payload modes, and extension patterns.
 
 ## Replication
 

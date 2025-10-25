@@ -11,11 +11,9 @@ use crate::{
     config::CapnpPluginConfig,
     error::{EventError, Result},
     plugin_capnp,
-    schema::AggregateSchema,
-    store::{AggregateState, EventRecord},
 };
 
-use super::Plugin;
+use super::{Plugin, PluginDelivery};
 
 pub(super) struct CapnpPlugin {
     config: CapnpPluginConfig,
@@ -45,12 +43,13 @@ impl Plugin for CapnpPlugin {
         "capnp"
     }
 
-    fn notify_event(
-        &self,
-        record: &EventRecord,
-        state: &AggregateState,
-        schema: Option<&AggregateSchema>,
-    ) -> Result<()> {
+    fn notify_event(&self, delivery: PluginDelivery<'_>) -> Result<()> {
+        let Some(record) = delivery.record else {
+            return Ok(());
+        };
+        let state_opt = delivery.state;
+        let schema_opt = delivery.schema;
+
         let mut stream = self.connect()?;
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
 
@@ -59,7 +58,7 @@ impl Plugin for CapnpPlugin {
             .map_err(|err| EventError::Serialization(err.to_string()))?;
         let metadata_json = serde_json::to_string(&record.metadata)
             .map_err(|err| EventError::Serialization(err.to_string()))?;
-        let schema_json = match schema {
+        let schema_json = match schema_opt {
             Some(schema) => Some(
                 serde_json::to_string(schema)
                     .map_err(|err| EventError::Serialization(err.to_string()))?,
@@ -95,20 +94,26 @@ impl Plugin for CapnpPlugin {
             event.set_hash(&record.hash);
             event.set_merkle_root(&record.merkle_root);
 
-            event.set_state_version(state.version);
-            event.set_state_archived(state.archived);
-            event.set_state_merkle_root(&state.merkle_root);
-
             match schema_json {
                 Some(ref json) => event.set_schema_json(json),
                 None => event.set_schema_json("null"),
             }
 
-            let mut entries = event.init_state_entries(state.state.len() as u32);
-            for (idx, (key, value)) in state.state.iter().enumerate() {
-                let mut entry = entries.reborrow().get(idx as u32);
-                entry.set_key(key);
-                entry.set_value(value);
+            if let Some(state) = state_opt {
+                event.set_state_version(state.version);
+                event.set_state_archived(state.archived);
+                event.set_state_merkle_root(&state.merkle_root);
+                let mut entries = event.init_state_entries(state.state.len() as u32);
+                for (idx, (key, value)) in state.state.iter().enumerate() {
+                    let mut entry = entries.reborrow().get(idx as u32);
+                    entry.set_key(key);
+                    entry.set_value(value);
+                }
+            } else {
+                event.set_state_version(0);
+                event.set_state_archived(false);
+                event.set_state_merkle_root("");
+                event.init_state_entries(0);
             }
         }
 

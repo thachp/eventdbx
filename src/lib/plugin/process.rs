@@ -18,6 +18,8 @@ use crate::plugin_capnp;
 use crate::schema::AggregateSchema;
 use crate::store::{AggregateState, EventRecord};
 
+use super::{Plugin, PluginDelivery};
+
 const CHANNEL_LABEL_STDOUT: &str = "stdout";
 const CHANNEL_LABEL_STDERR: &str = "stderr";
 
@@ -264,18 +266,19 @@ impl ProcessConnection {
     }
 }
 
-impl super::Plugin for ProcessPlugin {
+impl Plugin for ProcessPlugin {
     fn name(&self) -> &'static str {
         "process"
     }
 
-    fn notify_event(
-        &self,
-        record: &EventRecord,
-        state: &AggregateState,
-        schema: Option<&AggregateSchema>,
-    ) -> Result<()> {
-        self.connection.send_event(record, state, schema)
+    fn notify_event(&self, delivery: PluginDelivery<'_>) -> Result<()> {
+        let Some(record) = delivery.record else {
+            return Ok(());
+        };
+        let Some(state) = delivery.state else {
+            return Ok(());
+        };
+        self.connection.send_event(record, state, delivery.schema)
     }
 }
 

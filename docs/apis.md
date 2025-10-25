@@ -10,16 +10,16 @@ EventDBX exposes multiple surfaces so you can choose the right tool for each int
 
 ## REST
 
-Run the `rest_api` plugin to expose these routes (`cargo run -p rest_api -- --bind 0.0.0.0:7070 --control 127.0.0.1:6363`). Base URL defaults to `http://localhost:7070`.
+Run the `dbx_rest_` plugin to expose these routes (`cargo run -p dbx_rest -- --bind 0.0.0.0:8080 --control 127.0.0.1:6363`). Base URL defaults to `http://localhost:8080`.
 
-| Endpoint | Description |
-| --- | --- |
-| `GET /health` | Liveness probe (no auth required). |
-| `GET /v1/aggregates` | List aggregates (`skip`/`take` query params). |
-| `GET /v1/aggregates/{type}/{id}` | Fetch the current aggregate state. |
-| `GET /v1/aggregates/{type}/{id}/events` | Stream events with pagination. |
-| `POST /v1/events` | Append an event. |
-| `GET /v1/aggregates/{type}/{id}/verify` | Return the aggregate's Merkle root. |
+| Endpoint                                | Description                                   |
+| --------------------------------------- | --------------------------------------------- |
+| `GET /health`                           | Liveness probe (no auth required).            |
+| `GET /v1/aggregates`                    | List aggregates (`skip`/`take` query params). |
+| `GET /v1/aggregates/{type}/{id}`        | Fetch the current aggregate state.            |
+| `GET /v1/aggregates/{type}/{id}/events` | Stream events with pagination.                |
+| `POST /v1/events`                       | Append an event.                              |
+| `GET /v1/aggregates/{type}/{id}/verify` | Return the aggregate's Merkle root.           |
 
 Example request:
 
@@ -43,6 +43,7 @@ curl -X POST \
 ```
 
 Event writes enforce a few key rules:
+
 - `aggregate_type` and `event_type` must be lowercase `snake_case`.
 - Declare a schema for the aggregate before the first write; the initial event must end with `_created`.
 - `aggregate_id` accepts letters, numbers, underscores, and hyphens (max 128 characters) with no surrounding whitespace.
@@ -52,7 +53,7 @@ Event writes enforce a few key rules:
 
 ## GraphQL
 
-Launch the `graphql_api` plugin (`cargo run -p graphql_api -- --bind 0.0.0.0:7071 --control 127.0.0.1:6363`). Supply the same bearer token.
+Launch the `dbx_graphql` plugin (`cargo run -p dbx_graphql -- --bind 0.0.0.0:8081 --control 127.0.0.1:6363`). Supply the same bearer token.
 
 ```bash
 curl -X POST \
@@ -87,7 +88,7 @@ curl -X POST \
 
 ## gRPC
 
-Launch the `grpc_api` plugin (`cargo run -p grpc_api -- --bind 0.0.0.0:7072 --control 127.0.0.1:6363`). Use `grpcurl` for quick checks:
+Launch the `dbx_grpc` plugin (`cargo run -p dbx_grpc -- --bind 0.0.0.0:8082 --control 127.0.0.1:6363`). Use `grpcurl` for quick checks:
 
 ```bash
 grpcurl \
@@ -127,19 +128,19 @@ Enable it with:
 dbx config \
   --admin-enabled true \
   --admin-bind 127.0.0.1 \
-  --admin-port 7171
+  --admin-port 7070
 ```
 
 Requests must include a bearer token with `*.*` privileges. Example session using the bootstrap token written to `~/.eventdbx/cli.token`:
 
 ```bash
 curl -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
-  http://127.0.0.1:7171/admin/tokens
+  http://127.0.0.1:7070/admin/tokens
 
 curl -X POST -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
   -H "Content-Type: application/json" \
   -d '{"name":"standby1","endpoint":"tcp://10.10.0.5:6363","public_key":"BASE64"}' \
-  http://127.0.0.1:7171/admin/remotes/standby1
+  http://127.0.0.1:7070/admin/remotes/standby1
 ```
 
 Endpoints include `/admin/tokens`, `/admin/schemas`, `/admin/remotes`, and `/admin/plugins`, all mirroring the behavior of their CLI counterparts.

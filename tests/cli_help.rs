@@ -152,7 +152,7 @@ const HELP_CASES: &[HelpCase] = &[
     },
     HelpCase {
         path: &["queue", "retry"],
-        expected_snippet: "Retry dead entries, optionally filtering by event id",
+        expected_snippet: "Retry dead entries, optionally filtering by job id",
     },
     HelpCase {
         path: &["aggregate"],

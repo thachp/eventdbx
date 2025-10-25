@@ -4,7 +4,9 @@ You’ll appreciate this database system. It lets you spend less time designing 
 
 ## Overview
 
-EventDBX is an event-sourced, key-value, write-side database system designed to provide immutable, append-only storage for events across various domains. It is ideal for applications requiring detailed audit trails for compliance, complex business processes involving states, and high data integrity levels.
+EventDBX is an event-sourced, NoSQL write-side database designed to provide immutable, append-only storage for events across various domains. It is ideal for applications requiring detailed audit trails for compliance, complex business processes involving states, and high data integrity levels. The core engine focuses on the *write* side of CQRS—capturing and validating events, persisting aggregate state, and ensuring integrity with Merkle trees.
+
+The companion plugin framework turns those events into durable jobs and delivers them to other services, letting external systems specialise in the *read* side. Whether you need to hydrate a search index, stream to analytics, feed caches, or trigger workflows, plugins let you extend EventDBX without altering the write path. Each plugin chooses the payload shape it needs (event-only, state-only, schema-only, or combinations) while the queue guarantees delivery and backoff.
 
 ## Getting Started
 
@@ -72,13 +74,14 @@ You now have a working EventDBX instance with an initial aggregate. Explore the 
 - **Event Sourcing and Replay**: EventDBX is built on the principle of event sourcing, storing all changes to the data as a sequence of events. This allows for the complete replay of events to reconstruct the database's state at any point in time, thereby enhancing data recovery and audit capabilities. Unlike traditional databases that execute update statements to modify data, this system is event-driven. Aggregate state changes are defined in the event object, allowing these events to be replayed at any time to reconstruct the aggregate's current state.
 - **Merkle Tree Integration**: Each aggregate in EventDBX is associated with a Merkle tree of events, enabling verification of data integrity. The Merkle tree structure ensures that any data tampering can be detected, offering an additional security layer against data corruption.
 - **Built-in Audit Trails**: EventDBX automatically maintains a comprehensive audit trail of all transactions, a feature invaluable for meeting compliance and regulatory requirements. It provides transparent and tamper-evident records. During audits, administrators can issue specific tokens to auditors to access and review specific aggregate instances and all relevant events associated with those instances.
+- **Extensible Read Models via Plugins**: Every event that lands in the write-side store can be dispatched to external systems through the plugin job queue. Configure plugins to receive only the slices they care about (event, state snapshot, schema), and let specialized services—search, analytics, personalization, alerting—build optimized read models without touching the write path.
 - **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. Tokens are signed with an Ed25519 key pair stored under `[auth]` in `config.toml`; keep `private_key` secret and distribute `public_key` to services that need to validate them. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes.
 - **Encrypted Payloads & Secrets at Rest**: Event payloads, aggregate snapshots, and `tokens.json` are encrypted transparently when a DEK is configured. Metadata such as aggregate identifiers, versions, and Merkle roots remain readable so plugins, replication, and integrity checks keep working without additional configuration.
 - **Powered by RocksDB and Rust**: At its core, EventDBX utilizes RocksDB for storage, taking advantage of its high performance and efficiency. The system is developed in Rust, known for its safety, efficiency, and concurrency capabilities, ensuring that it is both rapid and dependable.
 
 ## Restriction Modes
 
-EventDBX can run in two validation modes, tuned for different phases of development:
+EventDBX can run in three validation modes, tuned for different phases of development:
 
 - **Off** (`--restrict=off` or `--restrict=false`): Ideal for prototyping and rapid application development. Event payloads bypass schema validation entirely, letting you iterate quickly without pre-registering aggregates, tables, or column types.
 - **Default** (`--restrict=default` or `--restrict=true`): Validates events whenever a schema exists but allows aggregates without a declared schema. This matches prior behaviour and suits teams rolling out schema enforcement incrementally.
@@ -152,11 +155,11 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 ### Plugins
 
 - `dbx plugin install <plugin> <version> --source <path|url> [--bin <file>] [--checksum <sha256>] [--force]`
-- `dbx plugin config tcp --name <label> --host <hostname> --port <u16> [--disable]`
-- `dbx plugin config http --name <label> --endpoint <host|url> [--https] [--header KEY=VALUE]... [--disable]`
-- `dbx plugin config grpc --name <label> --endpoint <host|url> [--disable]`
-- `dbx plugin config log --name <label> --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
-- `dbx plugin config process --name <instance> --plugin <id> --version <semver> [--arg <value>]... [--env KEY=VALUE]... [--working-dir <path>] [--disable]`
+- `dbx plugin config tcp --name <label> --host <hostname> --port <u16> [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
+- `dbx plugin config http --name <label> --endpoint <host|url> [--https] [--header KEY=VALUE]... [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
+- `dbx plugin config log --name <label> --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
+- `dbx plugin config process --name <instance> --plugin <id> --version <semver> [--arg <value>]... [--env KEY=VALUE]... [--working-dir <path>] [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
+- `dbx plugin config capnp --name <label> --host <hostname> --port <u16> [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
 - `dbx plugin enable <label>`
 - `dbx plugin disable <label>`
 - `dbx plugin remove <label>`
@@ -164,10 +167,10 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `dbx plugin list`
 - `dbx queue`
 - `dbx queue clear`
-- `dbx queue retry [--event-id <uuid>]`
+- `dbx queue retry [--event-id <job-id>]`
 - `dbx plugin replay <plugin-name> <aggregate> [<aggregate_id>]`
 
-Clearing dead entries prompts for confirmation to avoid accidental removal. Manual retries run the failed events immediately; use `--event-id` to target a specific entry.
+Plugins consume jobs from a durable RocksDB-backed queue. EventDBX enqueues a job for every aggregate mutation, and each plugin can opt into the data it needs—event payloads, materialized state, schemas, or combinations thereof. Clearing dead entries prompts for confirmation to avoid accidental removal. Manual retries run the failed jobs immediately; use `--event-id` to target a specific entry.
 
 ### Replication
 
