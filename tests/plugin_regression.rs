@@ -103,9 +103,7 @@ async fn http_plugin_posts_event_payload() -> Result<()> {
 
     let received: Value =
         serde_json::from_slice(&body).context("failed to decode posted payload as JSON")?;
-    let event = received
-        .get("event")
-        .context("missing event payload")?;
+    let event = received.get("event").context("missing event payload")?;
     assert_eq!(event["aggregate_type"], "order");
     assert_eq!(event["aggregate_id"], "order-123");
     assert_eq!(event["event_type"], "OrderCreated");
@@ -115,9 +113,7 @@ async fn http_plugin_posts_event_payload() -> Result<()> {
         event["metadata"]["event_id"],
         record.metadata.event_id.to_string()
     );
-    let state = received
-        .get("state")
-        .context("missing state payload")?;
+    let state = received.get("state").context("missing state payload")?;
     assert_eq!(state["aggregate_type"], "order");
     assert_eq!(state["aggregate_id"], "order-123");
     assert_eq!(state["version"], 5);

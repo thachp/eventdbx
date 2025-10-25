@@ -110,6 +110,7 @@ pub enum PayloadModeArg {
     StateOnly,
     SchemaOnly,
     EventAndSchema,
+    ExtensionsOnly,
 }
 
 impl From<PayloadModeArg> for PluginPayloadMode {
@@ -120,6 +121,7 @@ impl From<PayloadModeArg> for PluginPayloadMode {
             PayloadModeArg::StateOnly => PluginPayloadMode::StateOnly,
             PayloadModeArg::SchemaOnly => PluginPayloadMode::SchemaOnly,
             PayloadModeArg::EventAndSchema => PluginPayloadMode::EventAndSchema,
+            PayloadModeArg::ExtensionsOnly => PluginPayloadMode::ExtensionsOnly,
         }
     }
 }
@@ -132,6 +134,7 @@ impl From<PluginPayloadMode> for PayloadModeArg {
             PluginPayloadMode::StateOnly => PayloadModeArg::StateOnly,
             PluginPayloadMode::SchemaOnly => PayloadModeArg::SchemaOnly,
             PluginPayloadMode::EventAndSchema => PayloadModeArg::EventAndSchema,
+            PluginPayloadMode::ExtensionsOnly => PayloadModeArg::ExtensionsOnly,
         }
     }
 }

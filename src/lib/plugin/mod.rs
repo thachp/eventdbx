@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use serde_json::Value;
 use tracing::{error, warn};
 
 use crate::{
@@ -128,14 +129,46 @@ impl PluginManager {
                             entry.label,
                             err
                         );
-                        let delivery = build_delivery(entry.mode, record, state, schema);
+                        let mode = entry.mode;
+                        let owned_record = sanitized_record_for_mode(mode, record);
+                        let record_ref = owned_record
+                            .as_ref()
+                            .or_else(|| mode.includes_event().then_some(record));
+                        let state_ref = if mode.includes_state() {
+                            Some(state)
+                        } else {
+                            None
+                        };
+                        let schema_ref = if mode.includes_schema() { schema } else { None };
+
+                        let delivery = PluginDelivery {
+                            record: record_ref,
+                            state: state_ref,
+                            schema: schema_ref,
+                        };
                         if let Err(err) = entry.plugin.notify_event(delivery) {
                             error!("plugin {} failed: {}", entry.label, err);
                         }
                     }
                 }
             } else {
-                let delivery = build_delivery(entry.mode, record, state, schema);
+                let mode = entry.mode;
+                let owned_record = sanitized_record_for_mode(mode, record);
+                let record_ref = owned_record
+                    .as_ref()
+                    .or_else(|| mode.includes_event().then_some(record));
+                let state_ref = if mode.includes_state() {
+                    Some(state)
+                } else {
+                    None
+                };
+                let schema_ref = if mode.includes_schema() { schema } else { None };
+
+                let delivery = PluginDelivery {
+                    record: record_ref,
+                    state: state_ref,
+                    schema: schema_ref,
+                };
                 if let Err(err) = entry.plugin.notify_event(delivery) {
                     error!("plugin {} failed: {}", entry.label, err);
                 }
@@ -203,36 +236,48 @@ impl PluginManager {
     }
 }
 
+fn sanitized_record_for_mode(mode: PluginPayloadMode, record: &EventRecord) -> Option<EventRecord> {
+    match mode {
+        PluginPayloadMode::ExtensionsOnly => {
+            let mut sanitized = record.clone();
+            sanitized.payload = Value::Null;
+            Some(sanitized)
+        }
+        _ => None,
+    }
+}
+
 fn build_job_payload(
     mode: PluginPayloadMode,
     record: &EventRecord,
     state: &AggregateState,
     schema: Option<&AggregateSchema>,
 ) -> JobPayload {
-    let include_event = mode.includes_event();
-    let include_state = mode.includes_state();
-    let include_schema = mode.includes_schema();
-    JobPayload {
-        record: include_event.then(|| record.clone()),
-        state: include_state.then(|| state.clone()),
-        schema: include_schema.then_some(schema.cloned()).flatten(),
-        legacy: None,
-    }
-}
+    let record_payload = if let Some(sanitized) = sanitized_record_for_mode(mode, record) {
+        Some(sanitized)
+    } else if mode.includes_event() {
+        Some(record.clone())
+    } else {
+        None
+    };
 
-fn build_delivery<'a>(
-    mode: PluginPayloadMode,
-    record: &'a EventRecord,
-    state: &'a AggregateState,
-    schema: Option<&'a AggregateSchema>,
-) -> PluginDelivery<'a> {
-    let include_event = mode.includes_event();
-    let include_state = mode.includes_state();
-    let include_schema = mode.includes_schema();
-    PluginDelivery {
-        record: include_event.then_some(record),
-        state: include_state.then_some(state),
-        schema: include_schema.then_some(schema).flatten(),
+    let state_payload = if mode.includes_state() {
+        Some(state.clone())
+    } else {
+        None
+    };
+
+    let schema_payload = if mode.includes_schema() {
+        schema.cloned()
+    } else {
+        None
+    };
+
+    JobPayload {
+        record: record_payload,
+        state: state_payload,
+        schema: schema_payload,
+        legacy: None,
     }
 }
 
@@ -240,6 +285,7 @@ fn build_delivery<'a>(
 mod tests {
     use super::*;
     use crate::{
+        schema::AggregateSchema,
         snowflake::SnowflakeId,
         store::{AggregateState, EventMetadata, EventRecord},
     };
@@ -298,6 +344,61 @@ mod tests {
             archived: false,
         };
         (record, state)
+    }
+
+    #[test]
+    fn extensions_only_mode_sanitizes_job_payload() {
+        let (mut record, state) = sample_record(99);
+        record.payload = json!({"secret": "value"});
+        record.extensions = Some(json!({"trace_id": "abc123"}));
+
+        let job_payload =
+            build_job_payload(PluginPayloadMode::ExtensionsOnly, &record, &state, None);
+
+        let job_record = job_payload.record.expect("record is present");
+        assert!(job_payload.state.is_none());
+        assert!(job_payload.schema.is_none());
+        assert!(job_record.payload.is_null());
+        assert_eq!(job_record.extensions, record.extensions);
+        assert_eq!(job_record.aggregate_id, record.aggregate_id);
+    }
+
+    #[test]
+    fn extensions_only_mode_sanitizes_direct_delivery() {
+        let (mut record, state) = sample_record(101);
+        record.payload = json!({"secret": "value"});
+        record.extensions = Some(json!({"trace_id": "xyz"}));
+
+        let mode = PluginPayloadMode::ExtensionsOnly;
+        let owned_record = sanitized_record_for_mode(mode, &record);
+        let record_ref = owned_record
+            .as_ref()
+            .or_else(|| mode.includes_event().then_some(&record))
+            .expect("record reference is present");
+
+        let state_ref = if mode.includes_state() {
+            Some(&state)
+        } else {
+            None
+        };
+        let schema_input: Option<&AggregateSchema> = None;
+        let schema_ref = if mode.includes_schema() {
+            schema_input
+        } else {
+            None
+        };
+
+        let delivery = PluginDelivery {
+            record: Some(record_ref),
+            state: state_ref,
+            schema: schema_ref,
+        };
+
+        let record_from_delivery = delivery.record.expect("record is present");
+        assert!(record_from_delivery.payload.is_null());
+        assert_eq!(record_from_delivery.extensions, record.extensions);
+        assert!(delivery.state.is_none());
+        assert!(delivery.schema.is_none());
     }
 
     #[test]

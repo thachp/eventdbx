@@ -933,6 +933,7 @@ pub enum PluginPayloadMode {
     StateOnly,
     SchemaOnly,
     EventAndSchema,
+    ExtensionsOnly,
 }
 
 impl PluginPayloadMode {
