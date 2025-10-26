@@ -537,12 +537,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     return Ok(());
                 }
                 Err(EventError::Storage(message)) if is_lock_error(&message) => {
-                    if !config.api.rest_enabled() {
-                        bail!(
-                            "event store is locked by a running server, and the REST API is disabled.\nEnable REST (e.g. `eventdbx config --api rest`) or stop the server to continue with CLI writes."
-                        );
-                    }
-                    let record = proxy_append_via_http(
+                    let record = proxy_append_via_socket(
                         &config,
                         token.clone(),
                         &aggregate,
@@ -783,7 +778,7 @@ fn ensure_schema_for_mode(
     Ok(())
 }
 
-fn proxy_append_via_http(
+fn proxy_append_via_socket(
     config: &Config,
     token: Option<String>,
     aggregate: &str,
@@ -809,8 +804,8 @@ fn proxy_append_via_http(
         )
         .with_context(|| {
             format!(
-                "failed to append event via running server on port {}",
-                config.port
+                "failed to append event via running server socket {}",
+                config.socket.bind_addr
             )
         })
 }

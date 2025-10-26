@@ -4,9 +4,9 @@ You’ll appreciate this database system. It lets you spend less time designing 
 
 ## Overview
 
-EventDBX is an event-sourced, NoSQL write-side database designed to provide immutable, append-only storage for events across various domains. It is ideal for applications requiring detailed audit trails for compliance, complex business processes involving states, and high data integrity levels. The core engine focuses on the *write* side of CQRS—capturing and validating events, persisting aggregate state, and ensuring integrity with Merkle trees.
+EventDBX is an event-sourced, NoSQL write-side database designed to provide immutable, append-only storage for events across various domains. It is ideal for applications requiring detailed audit trails for compliance, complex business processes involving states, and high data integrity levels. The core engine focuses on the _write_ side of CQRS—capturing and validating events, persisting aggregate state, and ensuring integrity with Merkle trees.
 
-The companion plugin framework turns those events into durable jobs and delivers them to other services, letting external systems specialise in the *read* side. Whether you need to hydrate a search index, stream to analytics, feed caches, or trigger workflows, plugins let you extend EventDBX without altering the write path. Each plugin chooses the payload shape it needs (event-only, state-only, schema-only, or combinations) while the queue guarantees delivery and backoff.
+The companion plugin framework turns those events into durable jobs and delivers them to other services, letting external systems specialise in the _read_ side. Whether you need to hydrate a search index, stream to analytics, feed caches, or trigger workflows, plugins let you extend EventDBX without altering the write path. Each plugin chooses the payload shape it needs (event-only, state-only, schema-only, or combinations) while the queue guarantees delivery and backoff.
 
 ## Getting Started
 
@@ -36,15 +36,25 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    - Use `--data-dir <path>` to override the default `$HOME/.eventdbx` directory.
 
 - Restriction (schema enforcement) defaults to `default`; switch to `--restrict=off` for permissive prototyping or `--restrict=strict` to require declared schemas on every write.
-- The server owns the RocksDB lock while it is running; the CLI detects this and automatically proxies write commands through the control socket. Stop the daemon only when you need offline tasks like staging or manual maintenance.
 
-- Public REST/GraphQL/gRPC surfaces now live in the [dbx_plugins workspace](https://github.com/thachp/dbx_plugins). Deploy the `rest_api`, `graphql_api`, or `grpc_api` binaries alongside the daemon to expose those endpoints. The built-in server only retains the admin API and control socket.
+- Public REST/GraphQL/gRPC surfaces now live in the [dbx_plugins workspace](https://github.com/thachp/dbx_plugins). Install the `rest`, `graphql`, or `grpc` plugin alongside the daemon to expose those endpoints. The built-in server only retains the admin API and control socket.
+
+  ```bash
+  # install the restful api plugin
+  dbx plugin install rest
+
+  # config the api to not receive events stream
+  dbx plugin config process rest --emit-events false
+
+  # start the rest endpoint, default port is 8080
+  dbx plugin start rest
+  ```
 
 3. **Define a schema (recommended when running in restricted mode)**
 
    ```bash
    dbx schema create patient \
-     --events patient-added,patient-updated \
+     --events patient_added,patient_updated \
      --snapshot-threshold 100
    ```
 

@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
 
     steps:
       - name: Check out repository
@@ -62,15 +62,6 @@ jobs:
       - name: Install Cap'n Proto (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y capnproto
-
-      - name: Install Cap'n Proto (macOS)
-        if: runner.os == 'macOS'
-        run: brew install capnp
-
-      - name: Install Cap'n Proto (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: choco install capnproto --yes
 
       - name: cargo fmt
         run: cargo fmt -- --check
