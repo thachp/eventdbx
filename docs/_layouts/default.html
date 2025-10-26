@@ -116,6 +116,11 @@
             >Guide</a
           >
           <a
+            class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'plugins' %}text-white{% endif %}"
+            href="{{ '/plugins/' | relative_url }}"
+            >Plugins</a
+          >
+          <a
             class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'apis' %}text-white{% endif %}"
             href="{{ '/apis/' | relative_url }}"
             >APIs</a
@@ -124,11 +129,6 @@
             class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'cli' %}text-white{% endif %}"
             href="{{ '/cli/' | relative_url }}"
             >CLI</a
-          >
-          <a
-            class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'plugins' %}text-white{% endif %}"
-            href="{{ '/plugins/' | relative_url }}"
-            >Plugins</a
           >
           <a
             class="rounded-lg px-3 py-2 transition hover:text-brand"
@@ -165,7 +165,7 @@
             </li>
             <li>
               <a class="transition hover:text-white" href="{{ '/plugins/' | relative_url }}"
-                >Plugins</a
+                >Plugin Architecture</a
               >
             </li>
             <li>
