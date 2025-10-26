@@ -1224,18 +1224,9 @@ fn key_with_segments(parts: &[&str]) -> Vec<u8> {
 }
 
 fn record_store_op(operation: &'static str, status: &'static str, duration: f64) {
-    counter!(
-        "eventdbx_store_operations_total",
-        1,
-        "operation" => operation,
-        "status" => status
-    );
-    histogram!(
-        "eventdbx_store_operation_duration_seconds",
-        duration,
-        "operation" => operation,
-        "status" => status
-    );
+    let labels = [("operation", operation), ("status", status)];
+    counter!("eventdbx_store_operations_total", &labels).increment(1);
+    histogram!("eventdbx_store_operation_duration_seconds", &labels).record(duration);
 }
 
 fn hash_event(
