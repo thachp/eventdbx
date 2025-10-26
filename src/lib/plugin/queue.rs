@@ -123,6 +123,12 @@ impl PluginQueueStore {
             .write(batch)
             .map_err(|err| EventError::Storage(err.to_string()))?;
 
+        metrics::counter!(
+            "eventdbx_plugin_jobs_enqueued_total",
+            1,
+            "plugin" => plugin.to_string()
+        );
+
         Ok(record)
     }
 
@@ -184,11 +190,19 @@ impl PluginQueueStore {
     }
 
     pub fn complete_job(&self, job_id: u64) -> Result<JobRecord> {
-        self.transition_job(job_id, |job| {
+        let job = self.transition_job(job_id, |job| {
             job.status = JobStatus::Done;
             job.next_retry_at = None;
             job.last_error = None;
-        })
+        })?;
+
+        metrics::counter!(
+            "eventdbx_plugin_jobs_completed_total",
+            1,
+            "plugin" => job.plugin.clone()
+        );
+
+        Ok(job)
     }
 
     pub fn fail_job(
@@ -198,7 +212,7 @@ impl PluginQueueStore {
         now: i64,
         max_attempts: u8,
     ) -> Result<JobRecord> {
-        self.transition_job(job_id, |job| {
+        let job = self.transition_job(job_id, |job| {
             job.last_error = Some(error);
             if job.attempts >= max_attempts {
                 job.status = JobStatus::Dead;
@@ -208,7 +222,15 @@ impl PluginQueueStore {
                 let backoff = backoff_delay(job.attempts);
                 job.next_retry_at = Some(now + backoff);
             }
-        })
+        })?;
+
+        metrics::counter!(
+            "eventdbx_plugin_jobs_failed_total",
+            1,
+            "plugin" => job.plugin.clone()
+        );
+
+        Ok(job)
     }
 
     pub fn recover_stuck_jobs(
@@ -389,6 +411,26 @@ impl PluginQueueStore {
         status.processing = self.collect_jobs(JobStatus::Processing)?;
         status.done = self.collect_jobs(JobStatus::Done)?;
         status.dead = self.collect_jobs(JobStatus::Dead)?;
+        metrics::gauge!(
+            "eventdbx_plugin_queue_jobs",
+            status.pending.len() as f64,
+            "state" => "pending"
+        );
+        metrics::gauge!(
+            "eventdbx_plugin_queue_jobs",
+            status.processing.len() as f64,
+            "state" => "processing"
+        );
+        metrics::gauge!(
+            "eventdbx_plugin_queue_jobs",
+            status.done.len() as f64,
+            "state" => "done"
+        );
+        metrics::gauge!(
+            "eventdbx_plugin_queue_jobs",
+            status.dead.len() as f64,
+            "state" => "dead"
+        );
         Ok(status)
     }
 

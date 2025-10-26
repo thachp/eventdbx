@@ -72,7 +72,7 @@ interval_secs = 300
 max_done_jobs = 500
 ```
 
-Use `dbx queue clear-done --older-than-hours <hours>` for an ad-hoc cleanup when you need to reclaim space immediately.
+Use `dbx queue clear-done --older-than-hours <hours>` for an ad-hoc cleanup when you need to reclaim space immediately. Prometheus scrapes under `/metrics` now report queue depth, job outcomes, and server uptime, so you can wire alerts around stuck plugins or rising retries.
 
 ## Extending EventDBX
 

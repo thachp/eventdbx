@@ -4,7 +4,9 @@ use std::{
     sync::{Arc, OnceLock, RwLock},
 };
 
-use axum::{Json, Router, http::HeaderMap, response::IntoResponse, routing::get};
+use axum::{
+    Json, Router, http::HeaderMap, middleware::from_fn, response::IntoResponse, routing::get,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{net::TcpListener, sync::RwLock as AsyncRwLock};
 use tower_http::trace::TraceLayer;
@@ -14,6 +16,7 @@ use super::{
     admin, cli_proxy,
     config::Config,
     error::{EventError, Result},
+    observability,
     replication_capnp_client::decode_public_key_bytes,
     schema::SchemaManager,
     service::CoreContext,
@@ -96,6 +99,9 @@ impl AppState {
 }
 
 pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
+    observability::init()
+        .map_err(|err| EventError::Config(format!("failed to initialise observability: {err}")))?;
+
     let config_snapshot = config.clone();
     let shared_config = Arc::new(RwLock::new(config));
     let config_path = Arc::new(config_path);
@@ -162,7 +168,9 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     .await
     .map_err(|err| EventError::Config(format!("failed to start CLI proxy: {err}")))?;
 
-    let mut app = Router::new().route("/health", get(health));
+    let mut app = Router::new()
+        .route("/health", get(health))
+        .route("/metrics", get(observability::metrics_handler));
 
     let admin_config = config_snapshot.admin.clone();
     let mut admin_handle = None;
@@ -199,7 +207,9 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         }
     }
 
-    let app = app.layer(TraceLayer::new_for_http());
+    let app = app
+        .layer(from_fn(observability::track_http_metrics))
+        .layer(TraceLayer::new_for_http());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config_snapshot.port));
     info!(

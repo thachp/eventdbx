@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use eventdbx::observability;
 
 use crate::commands::{
     aggregate::AggregateCommands,
@@ -93,6 +94,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     logging::init()?;
+    observability::init()?;
 
     let Cli { config, command } = Cli::parse();
 

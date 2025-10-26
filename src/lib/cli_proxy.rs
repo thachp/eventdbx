@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, RwLock},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -25,6 +26,7 @@ use crate::{
     config::Config,
     control_capnp::{control_request, control_response},
     error::EventError,
+    observability,
     plugin::PluginManager,
     replication_capnp::{
         replication_hello, replication_hello_response, replication_request, replication_response,
@@ -120,6 +122,16 @@ fn control_error_code(err: &EventError) -> &'static str {
         EventError::Storage(_) => "storage",
         EventError::Io(_) => "io",
         EventError::Serialization(_) => "serialization",
+    }
+}
+
+fn control_command_name(command: &ControlCommand) -> &'static str {
+    match command {
+        ControlCommand::ListAggregates { .. } => "list_aggregates",
+        ControlCommand::GetAggregate { .. } => "get_aggregate",
+        ControlCommand::ListEvents { .. } => "list_events",
+        ControlCommand::AppendEvent { .. } => "append_event",
+        ControlCommand::VerifyAggregate { .. } => "verify_aggregate",
     }
 }
 
@@ -378,13 +390,27 @@ where
             .get_root::<control_request::Reader>()
             .context("failed to decode control request")?;
         let request_id = request.get_id();
-
-        let response_result = match parse_control_command(request) {
+        let command_start = Instant::now();
+        let (command_label, status_label, response_result) = match parse_control_command(request) {
             Ok(command) => {
-                execute_control_command(command, core.clone(), Arc::clone(&shared_config)).await
+                let label = control_command_name(&command);
+                let result =
+                    execute_control_command(command, core.clone(), Arc::clone(&shared_config))
+                        .await;
+                let status = match &result {
+                    Ok(_) => "ok",
+                    Err(err) => control_error_code(err),
+                };
+                (label, status, result)
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                let status = control_error_code(&err);
+                ("parse", status, Err(err))
+            }
         };
+
+        let duration = command_start.elapsed().as_secs_f64();
+        observability::record_capnp_control_request(command_label, status_label, duration);
 
         let response_bytes = {
             let mut response_message = capnp::message::Builder::new_default();
@@ -780,6 +806,8 @@ where
         .map_err(|err| anyhow!("failed to read handshake public key: {err}"))?
         .to_vec();
 
+    let handshake_start = Instant::now();
+
     let (accepted, response_text) = if protocol_version != REPLICATION_PROTOCOL_VERSION {
         (
             false,
@@ -819,6 +847,13 @@ where
         .await
         .context("failed to flush replication hello response")?;
 
+    let handshake_duration = handshake_start.elapsed().as_secs_f64();
+    observability::record_capnp_replication_request(
+        "hello",
+        if accepted { "accepted" } else { "rejected" },
+        handshake_duration,
+    );
+
     if !accepted {
         return Ok(());
     }
@@ -841,19 +876,29 @@ where
         let response_bytes = {
             let mut response_message = capnp::message::Builder::new_default();
             let mut response_root = response_message.init_root::<replication_response::Builder>();
+            let request_start = Instant::now();
+            let mut op_label: &'static str = "unknown";
+            let mut status_label: &'static str = "ok";
 
-            let result = message
-                .get_root::<replication_request::Reader>()
-                .map_err(|err| anyhow!("failed to decode replication request: {err}"))
-                .and_then(|request| {
-                    process_replication_request(request, &store, &schemas, &mut last_sequence)
-                })
-                .and_then(|reply| populate_replication_response(&mut response_root, reply));
+            let result: std::result::Result<(), anyhow::Error> = (|| {
+                let request = message
+                    .get_root::<replication_request::Reader>()
+                    .map_err(|err| anyhow!("failed to decode replication request: {err}"))?;
+                op_label = replication_request_name(&request)?;
+                let reply =
+                    process_replication_request(request, &store, &schemas, &mut last_sequence)?;
+                populate_replication_response(&mut response_root, reply)?;
+                Ok(())
+            })();
 
-            if let Err(err) = result {
+            if let Err(err) = &result {
+                status_label = "err";
                 let mut error = response_root.init_error();
                 error.set_message(&err.to_string());
             }
+
+            let duration = request_start.elapsed().as_secs_f64();
+            observability::record_capnp_replication_request(op_label, status_label, duration);
 
             write_message_to_words(&response_message)
         };
@@ -967,6 +1012,19 @@ fn process_replication_request(
             Ok(ReplicationReply::ApplySchemas { aggregate_count })
         }
     }
+}
+
+fn replication_request_name(request: &replication_request::Reader<'_>) -> Result<&'static str> {
+    use replication_request::Which;
+
+    let name = match request.which()? {
+        Which::ListPositions(()) => "list_positions",
+        Which::PullEvents(_) => "pull_events",
+        Which::ApplyEvents(_) => "apply_events",
+        Which::PullSchemas(()) => "pull_schemas",
+        Which::ApplySchemas(_) => "apply_schemas",
+    };
+    Ok(name)
 }
 
 fn populate_replication_response(
@@ -1095,6 +1153,7 @@ async fn process_request(
 async fn execute_cli_command(args: Vec<String>, config_path: &PathBuf) -> Result<CliCommandResult> {
     let exe = resolve_cli_executable().context("failed to resolve CLI executable")?;
 
+    let command_label = args.first().cloned().unwrap_or_else(|| "help".to_string());
     let final_args = augment_args_with_config(args, config_path);
 
     let mut command = Command::new(exe);
@@ -1102,15 +1161,33 @@ async fn execute_cli_command(args: Vec<String>, config_path: &PathBuf) -> Result
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let output = command
-        .output()
-        .await
-        .context("failed to execute CLI command")?;
+    let start = Instant::now();
+    let output = match command.output().await {
+        Ok(output) => output,
+        Err(err) => {
+            let duration = start.elapsed().as_secs_f64();
+            observability::record_cli_proxy_command(&command_label, "spawn_error", None, duration);
+            return Err(anyhow!("failed to execute CLI command: {err}"));
+        }
+    };
 
     let exit_code = output
         .status
         .code()
         .unwrap_or_else(|| if output.status.success() { 0 } else { -1 });
+
+    let status_label = if output.status.success() {
+        "ok"
+    } else {
+        "exit"
+    };
+    let duration = start.elapsed().as_secs_f64();
+    observability::record_cli_proxy_command(
+        &command_label,
+        status_label,
+        Some(exit_code),
+        duration,
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
