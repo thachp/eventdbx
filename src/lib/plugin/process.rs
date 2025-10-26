@@ -1,6 +1,7 @@
 use std::{
+    fs,
     io::{BufRead, BufReader, BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::Arc,
 };
@@ -22,6 +23,26 @@ use super::{Plugin, PluginDelivery};
 
 const CHANNEL_LABEL_STDOUT: &str = "stdout";
 const CHANNEL_LABEL_STDERR: &str = "stderr";
+
+fn sanitize_identifier(identifier: &str) -> String {
+    identifier
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+pub fn status_file_path(data_dir: &Path, identifier: &str) -> PathBuf {
+    data_dir
+        .join("plugins")
+        .join("run")
+        .join(format!("{}.pid", sanitize_identifier(identifier)))
+}
 
 pub struct ProcessPlugin {
     connection: Arc<ProcessConnection>,
@@ -47,7 +68,8 @@ impl ProcessPlugin {
                 ))
             })?;
 
-        let connection = ProcessConnection::new(identifier, config, record)?;
+        let status_path = status_file_path(data_dir, &identifier);
+        let connection = ProcessConnection::new(identifier, config, record, status_path)?;
 
         Ok(Self {
             connection: Arc::new(connection),
@@ -59,6 +81,7 @@ struct ProcessConnection {
     identifier: String,
     config: ProcessPluginConfig,
     record: InstalledPluginRecord,
+    status_path: PathBuf,
     inner: Mutex<Option<ProcessInner>>,
 }
 
@@ -73,13 +96,23 @@ impl ProcessConnection {
         identifier: String,
         config: ProcessPluginConfig,
         record: InstalledPluginRecord,
+        status_path: PathBuf,
     ) -> Result<Self> {
         let connection = Self {
             identifier,
             config,
             record,
+            status_path,
             inner: Mutex::new(None),
         };
+        if let Err(err) = connection.clear_status_file() {
+            warn!(
+                target: "eventdbx.plugin",
+                "failed to clear stale status file for {}: {}",
+                connection.identifier,
+                err
+            );
+        }
         // lazy spawn on first use
         Ok(connection)
     }
@@ -126,6 +159,14 @@ impl ProcessConnection {
                     self.identifier,
                     status
                 );
+                if let Err(err) = self.clear_status_file() {
+                    warn!(
+                        target: "eventdbx.plugin",
+                        "failed to clear status file for {}: {}",
+                        self.identifier,
+                        err
+                    );
+                }
                 *guard = None;
             }
         }
@@ -133,6 +174,14 @@ impl ProcessConnection {
     }
 
     fn restart(&self, guard: &mut Option<ProcessInner>) -> Result<()> {
+        if let Err(err) = self.clear_status_file() {
+            warn!(
+                target: "eventdbx.plugin",
+                "failed to clear status file for {} during restart: {}",
+                self.identifier,
+                err
+            );
+        }
         let mut inner = self.spawn_process()?;
         self.write_init(&mut inner)?;
         *guard = Some(inner);
@@ -177,6 +226,15 @@ impl ProcessConnection {
         }
 
         let writer = BufWriter::new(stdin);
+
+        if let Err(err) = self.write_status_file(child.id()) {
+            warn!(
+                target: "eventdbx.plugin",
+                "failed to write status file for {}: {}",
+                self.identifier,
+                err
+            );
+        }
 
         Ok(ProcessInner {
             child,
@@ -263,6 +321,34 @@ impl ProcessConnection {
         inner.writer.flush()?;
         inner.sequence = inner.sequence.wrapping_add(1);
         Ok(())
+    }
+
+    fn write_status_file(&self, pid: u32) -> std::io::Result<()> {
+        if let Some(parent) = self.status_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&self.status_path, format!("{pid}\n"))
+    }
+
+    fn clear_status_file(&self) -> std::io::Result<()> {
+        match fs::remove_file(&self.status_path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl Drop for ProcessConnection {
+    fn drop(&mut self) {
+        if let Err(err) = self.clear_status_file() {
+            warn!(
+                target: "eventdbx.plugin",
+                "failed to clear status file for {} on drop: {}",
+                self.identifier,
+                err
+            );
+        }
     }
 }
 

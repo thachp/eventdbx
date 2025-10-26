@@ -69,7 +69,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='An event-sourced, key-value, write-side database system.'
+            Description='An event-sourced, nosql, write-side database system.'
             Manufacturer='Patrick Thach'
             InstallerVersion='450'
             Languages='1033'

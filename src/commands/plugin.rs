@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, HashSet},
     env,
     ffi::OsStr,
@@ -11,6 +12,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand, ValueEnum};
+use semver::Version;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use eventdbx::config::{
@@ -20,6 +23,7 @@ use eventdbx::config::{
 use eventdbx::plugin::{
     Plugin, PluginDelivery, establish_connection, instantiate_plugin,
     registry::{self, InstalledPluginRecord, PluginSource},
+    status_file_path,
 };
 use eventdbx::store::{
     ActorClaims, AggregateState, EventMetadata, EventRecord, EventStore, payload_to_map,
@@ -39,7 +43,7 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 use tempfile::NamedTempFile;
 
-use reqwest::blocking::Client;
+use reqwest::{StatusCode, blocking::Client};
 use sha2::{Digest, Sha256};
 
 #[derive(Subcommand)]
@@ -78,9 +82,9 @@ pub struct PluginInstallArgs {
     /// Plugin version identifier being installed
     pub version: String,
 
-    /// Source URL or local file system path to the plugin bundle
+    /// Source URL or local file system path to the plugin bundle (omit to download from the registry)
     #[arg(long, short = 's')]
-    pub source: String,
+    pub source: Option<String>,
 
     /// Binary filename inside the archive (if ambiguous)
     #[arg(long = "bin")]
@@ -110,6 +114,7 @@ pub enum PayloadModeArg {
     StateOnly,
     SchemaOnly,
     EventAndSchema,
+    ExtensionsOnly,
 }
 
 impl From<PayloadModeArg> for PluginPayloadMode {
@@ -120,6 +125,7 @@ impl From<PayloadModeArg> for PluginPayloadMode {
             PayloadModeArg::StateOnly => PluginPayloadMode::StateOnly,
             PayloadModeArg::SchemaOnly => PluginPayloadMode::SchemaOnly,
             PayloadModeArg::EventAndSchema => PluginPayloadMode::EventAndSchema,
+            PayloadModeArg::ExtensionsOnly => PluginPayloadMode::ExtensionsOnly,
         }
     }
 }
@@ -132,6 +138,7 @@ impl From<PluginPayloadMode> for PayloadModeArg {
             PluginPayloadMode::StateOnly => PayloadModeArg::StateOnly,
             PluginPayloadMode::SchemaOnly => PayloadModeArg::SchemaOnly,
             PluginPayloadMode::EventAndSchema => PayloadModeArg::EventAndSchema,
+            PluginPayloadMode::ExtensionsOnly => PayloadModeArg::ExtensionsOnly,
         }
     }
 }
@@ -259,17 +266,21 @@ pub struct PluginLogConfigureArgs {
 
 #[derive(Args)]
 pub struct PluginProcessConfigureArgs {
-    /// Instance name for this process plugin
-    #[arg(long)]
-    pub name: String,
+    /// Installed plugin identifier to execute (use as `dbx plugin config process <plugin>` or `--plugin <plugin>`)
+    #[arg(long = "plugin", value_name = "PLUGIN")]
+    pub plugin_flag: Option<String>,
 
-    /// Installed plugin identifier to execute
-    #[arg(long = "plugin")]
-    pub plugin_name: String,
+    /// Installed plugin identifier to execute (positional form)
+    #[arg(value_name = "PLUGIN")]
+    pub plugin_positional: Option<String>,
 
-    /// Plugin version to select from the local registry
-    #[arg(long)]
-    pub version: String,
+    /// Plugin version to select from the local registry (defaults to the latest installed)
+    #[arg(long, value_name = "VERSION")]
+    pub version: Option<String>,
+
+    /// Instance name for this process plugin (defaults to the plugin identifier)
+    #[arg(long, value_name = "INSTANCE")]
+    pub name: Option<String>,
 
     /// Additional arguments to pass when launching the plugin (repeatable)
     #[arg(long = "arg", value_name = "ARG", action = clap::ArgAction::Append)]
@@ -290,6 +301,22 @@ pub struct PluginProcessConfigureArgs {
     /// Payload components to deliver to the plugin
     #[arg(long = "payload", value_enum)]
     pub payload: Option<PayloadModeArg>,
+}
+
+impl PluginProcessConfigureArgs {
+    fn resolved_plugin_name(&self) -> Result<&str> {
+        match (&self.plugin_flag, &self.plugin_positional) {
+            (Some(flag), Some(positional)) => {
+                if flag.trim() != positional.trim() {
+                    bail!("conflicting plugin identifiers provided (flag vs positional)");
+                }
+                Ok(flag.trim())
+            }
+            (Some(flag), None) => Ok(flag.trim()),
+            (None, Some(positional)) => Ok(positional.trim()),
+            (None, None) => bail!("plugin identifier is required"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -344,10 +371,14 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
 
     match command {
         PluginCommands::Install(args) => {
-            install_plugin_bundle(&config, args)?;
+            let config_clone = config.clone();
+            run_blocking(move || install_plugin_bundle(&config_clone, args))?;
         }
         PluginCommands::List(args) => {
-            list_plugins(&plugins, args.json)?;
+            let config_clone = config.clone();
+            let plugins_clone = plugins.clone();
+            let json = args.json;
+            run_blocking(move || list_plugins(&config_clone, &plugins_clone, json))?;
         }
         PluginCommands::Config(config_command) => match config_command {
             PluginConfigureCommands::Tcp(args) => {
@@ -534,22 +565,28 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
             }
             PluginConfigureCommands::Process(args) => {
                 let payload_mode = args.payload;
-                let instance = args.name.trim();
-                if instance.is_empty() {
-                    bail!("plugin name cannot be empty");
-                }
-
-                let plugin_name = args.plugin_name.trim();
+                let plugin_name = args.resolved_plugin_name()?;
                 if plugin_name.is_empty() {
                     bail!("plugin identifier cannot be empty");
                 }
 
-                let version = args.version.trim();
-                if version.is_empty() {
-                    bail!("plugin version cannot be empty");
+                let instance_fallback = plugin_name;
+                let instance = args
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(instance_fallback);
+
+                if instance.is_empty() {
+                    bail!("plugin name cannot be empty");
                 }
 
-                validate_process_installation(&config, plugin_name, version)?;
+                let version = resolve_process_installation_version(
+                    &config,
+                    plugin_name,
+                    args.version.as_deref(),
+                )?;
 
                 let mut env_map = BTreeMap::new();
                 for entry in &args.env {
@@ -558,7 +595,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
 
                 let process_config = ProcessPluginConfig {
                     name: plugin_name.to_string(),
-                    version: version.to_string(),
+                    version: version.clone(),
                     args: args.args.clone(),
                     env: env_map,
                     working_dir: args.working_dir.clone(),
@@ -801,6 +838,7 @@ fn install_plugin_bundle(config: &Config, args: PluginInstallArgs) -> Result<()>
     } = args;
 
     let target = current_target_triple();
+    let release_target = release_target_triple();
     let plugins_root = config.data_dir.join("plugins");
     let install_dir = plugins_root.join(&name).join(&version).join(&target);
     let registry_path = plugins_root.join("registry.json");
@@ -823,7 +861,8 @@ fn install_plugin_bundle(config: &Config, args: PluginInstallArgs) -> Result<()>
     }
     fs::create_dir_all(&install_dir)?;
 
-    let (temp_file, source_hint, source_descriptor) = fetch_plugin_source(&source)?;
+    let (temp_file, source_hint, source_descriptor) =
+        resolve_plugin_bundle_source(&name, &version, source.as_deref(), &release_target)?;
 
     if let Some(expected) = checksum.as_deref() {
         verify_checksum(temp_file.path(), expected)?;
@@ -893,6 +932,205 @@ fn install_plugin_bundle(config: &Config, args: PluginInstallArgs) -> Result<()>
 
 fn current_target_triple() -> String {
     format!("{}-{}", env::consts::OS, env::consts::ARCH)
+}
+
+fn release_target_triple() -> String {
+    let arch = env::consts::ARCH;
+    let os_suffix = match env::consts::OS {
+        "macos" => "apple-darwin",
+        "linux" => "unknown-linux-gnu",
+        "windows" => "pc-windows-msvc",
+        other => other,
+    };
+    format!("{}-{}", arch, os_suffix)
+}
+
+fn resolve_plugin_bundle_source(
+    name: &str,
+    version: &str,
+    explicit_source: Option<&str>,
+    release_target: &str,
+) -> Result<(NamedTempFile, String, PluginSource)> {
+    if let Some(source) = explicit_source {
+        return fetch_plugin_source(source);
+    }
+
+    let mut attempts: Vec<String> = Vec::new();
+    let mut last_error: Option<anyhow::Error> = None;
+
+    if let Some(remote_asset_url) = find_release_asset_download_url(name, version, release_target)?
+    {
+        attempts.push(remote_asset_url.clone());
+        match fetch_plugin_source(&remote_asset_url) {
+            Ok(result) => return Ok(result),
+            Err(err) => last_error = Some(err),
+        }
+    }
+
+    let candidates = registry_asset_candidates(name, version, release_target);
+    for candidate in &candidates {
+        attempts.push(candidate.clone());
+        match fetch_plugin_source(candidate) {
+            Ok(result) => return Ok(result),
+            Err(err) => last_error = Some(err),
+        }
+    }
+
+    if attempts.is_empty() {
+        bail!(
+            "no registry download candidates could be constructed for plugin '{}' version {}",
+            name,
+            version
+        );
+    }
+
+    let attempts_display = attempts.join(", ");
+    match last_error {
+        Some(err) => Err(err).context(format!(
+            "failed to download plugin '{}' version {} from registry (attempted: {})",
+            name, version, attempts_display
+        )),
+        None => bail!(
+            "failed to download plugin '{}' version {} from registry (attempted: {})",
+            name,
+            version,
+            attempts_display
+        ),
+    }
+}
+
+fn canonical_plugin_key(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
+}
+
+fn release_tag_for(name: &str, version: &str) -> Option<String> {
+    let plugin_slug = canonical_plugin_key(name).replace(' ', "-");
+    let version_slug = version.trim();
+    if plugin_slug.is_empty() || version_slug.is_empty() {
+        None
+    } else {
+        Some(format!("dbx_{}-{}", plugin_slug, version_slug))
+    }
+}
+
+fn find_release_asset_download_url(
+    name: &str,
+    version: &str,
+    release_target: &str,
+) -> Result<Option<String>> {
+    let Some(release_tag_guess) = release_tag_for(name, version) else {
+        return Ok(None);
+    };
+
+    let client = github_api_client()?;
+    if let Some(release) = fetch_release_by_tag(&client, &release_tag_guess)? {
+        if let Some(url) = select_asset_url(&release, name, release_target) {
+            return Ok(Some(url));
+        }
+    }
+
+    let releases: Vec<GitHubRelease> = client
+        .get("https://api.github.com/repos/thachp/dbx_plugins/releases")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .context("failed to list plugin releases from GitHub")?
+        .error_for_status()
+        .context("GitHub returned an error while listing plugin releases")?
+        .json()
+        .context("failed to decode plugin releases response from GitHub")?;
+
+    let plugin_slug = canonical_plugin_key(name).replace(' ', "-");
+    let version_slug = version.trim().to_ascii_lowercase();
+    for release in releases {
+        let tag_lower = release.tag_name.to_ascii_lowercase();
+        if tag_lower.contains(&plugin_slug) && tag_lower.contains(&version_slug) {
+            if let Some(url) = select_asset_url(&release, name, release_target) {
+                return Ok(Some(url));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn fetch_release_by_tag(client: &Client, tag: &str) -> Result<Option<GitHubRelease>> {
+    let url = format!(
+        "https://api.github.com/repos/thachp/dbx_plugins/releases/tags/{}",
+        tag
+    );
+    let response = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .with_context(|| format!("failed to request plugin release metadata for tag {}", tag))?;
+
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    if !response.status().is_success() {
+        bail!(
+            "GitHub returned {} while fetching plugin release metadata for tag {}",
+            response.status(),
+            tag
+        );
+    }
+
+    let release = response
+        .json()
+        .with_context(|| format!("failed to decode plugin release metadata for tag {}", tag))?;
+    Ok(Some(release))
+}
+
+fn select_asset_url(release: &GitHubRelease, name: &str, release_target: &str) -> Option<String> {
+    let target_lower = release_target.to_ascii_lowercase();
+    let plugin_key = canonical_plugin_key(name);
+    let plugin_slug = plugin_key.replace(' ', "-");
+
+    if let Some(asset) = release.assets.iter().find(|asset| {
+        let asset_name = asset.name.to_ascii_lowercase();
+        asset_name.contains(&target_lower)
+            && (asset_name.contains(&plugin_key) || asset_name.contains(&plugin_slug))
+    }) {
+        return Some(asset.download_url.clone());
+    }
+
+    if let Some(asset) = release
+        .assets
+        .iter()
+        .find(|asset| asset.name.to_ascii_lowercase().contains(&target_lower))
+    {
+        return Some(asset.download_url.clone());
+    }
+
+    release
+        .assets
+        .first()
+        .map(|asset| asset.download_url.clone())
+}
+
+fn registry_asset_candidates(name: &str, version: &str, release_target: &str) -> Vec<String> {
+    let plugin_slug = canonical_plugin_key(name).replace(' ', "-");
+    let version_slug = version.trim();
+    if plugin_slug.is_empty() || version_slug.is_empty() {
+        return Vec::new();
+    }
+
+    let release_tag = format!("dbx_{}-{}", plugin_slug, version_slug);
+    let asset_base = release_tag.clone();
+    let asset_plain = format!("{}{}.zip", asset_base, release_target);
+    let asset_with_dash = format!("{}-{}.zip", asset_base, release_target);
+    let base_url = "https://github.com/thachp/dbx_plugins/releases/download";
+
+    let mut candidates = vec![
+        format!("{base_url}/{}", asset_plain),
+        format!("{base_url}/{}/{}", release_tag, asset_plain),
+        format!("{base_url}/{}", asset_with_dash),
+        format!("{base_url}/{}/{}", release_tag, asset_with_dash),
+    ];
+    candidates.sort();
+    candidates.dedup();
+    candidates
 }
 
 fn fetch_plugin_source(source: &str) -> Result<(NamedTempFile, String, PluginSource)> {
@@ -1066,34 +1304,61 @@ fn locate_binary(root: &Path, binary_name: Option<&str>, plugin_name: &str) -> R
     } else if files.len() == 1 {
         files[0].clone()
     } else {
-        let exe_candidate = if env::consts::EXE_SUFFIX.is_empty() {
-            None
-        } else {
-            Some(format!("{}{}", plugin_name, env::consts::EXE_SUFFIX))
+        let exe_suffix = env::consts::EXE_SUFFIX;
+        let sanitized = plugin_name.replace('-', "_");
+
+        let mut base_names: Vec<String> = Vec::new();
+        let mut push_base = |value: String| {
+            if !value.is_empty() && !base_names.iter().any(|existing| existing == &value) {
+                base_names.push(value);
+            }
         };
-        let candidates: Vec<PathBuf> = files
-            .iter()
-            .filter(|path| {
-                let file_name = path
+
+        push_base(plugin_name.to_string());
+        if plugin_name != sanitized {
+            push_base(sanitized.clone());
+        }
+        push_base(format!("dbx_{}", sanitized));
+        push_base(format!("dbx_{}", plugin_name));
+        push_base(format!("dbx{}", sanitized));
+        push_base(format!("dbx{}", plugin_name));
+        push_base(format!("dbx-{}", sanitized));
+        push_base(format!("dbx-{}", plugin_name));
+
+        let mut candidate_names: Vec<String> = Vec::new();
+        let mut register = |value: String| {
+            if !value.is_empty() && !candidate_names.iter().any(|existing| existing == &value) {
+                candidate_names.push(value);
+            }
+        };
+
+        for base in &base_names {
+            register(base.clone());
+            if !exe_suffix.is_empty() {
+                register(format!("{}{}", base, exe_suffix));
+            }
+        }
+
+        let mut resolved: Option<PathBuf> = None;
+        for candidate in candidate_names {
+            if let Some(path) = files.iter().find(|entry| {
+                entry
                     .file_name()
                     .and_then(|value| value.to_str())
-                    .unwrap_or("");
-                file_name == plugin_name
-                    || exe_candidate
-                        .as_deref()
-                        .map(|candidate| candidate == file_name)
-                        .unwrap_or(false)
-            })
-            .cloned()
-            .collect();
-        if candidates.len() == 1 {
-            candidates[0].clone()
-        } else {
-            bail!(
+                    .map(|value| value == candidate)
+                    .unwrap_or(false)
+            }) {
+                resolved = Some(path.clone());
+                break;
+            }
+        }
+
+        resolved.ok_or_else(|| {
+            anyhow!(
                 "plugin bundle contains multiple files; specify --bin <filename>. candidates: {}",
                 display_file_list(root, &files)
-            );
-        }
+            )
+        })?
     };
 
     if !selected.starts_with(root) {
@@ -1165,6 +1430,85 @@ fn set_executable(path: &Path) -> Result<()> {
         fs::set_permissions(path, permissions)?;
     }
     Ok(())
+}
+
+fn resolve_process_installation_version(
+    config: &Config,
+    plugin_name: &str,
+    requested_version: Option<&str>,
+) -> Result<String> {
+    let target = current_target_triple();
+    let registry_path = registry::registry_path(&config.data_dir);
+    let records = load_installed_registry(&registry_path)?;
+
+    let mut matches: Vec<InstalledPluginRecord> = records
+        .into_iter()
+        .filter(|entry| entry.name == plugin_name && entry.target == target)
+        .collect();
+
+    if let Some(raw_version) = requested_version {
+        let version = raw_version.trim();
+        if version.is_empty() {
+            bail!("plugin version cannot be empty");
+        }
+        if matches.is_empty() {
+            bail!(
+                "plugin '{}' version {} is not installed",
+                plugin_name,
+                version
+            );
+        }
+        let found = matches.iter().any(|entry| entry.version == version);
+        if found {
+            return Ok(version.to_string());
+        }
+        let available = matches
+            .iter()
+            .map(|entry| entry.version.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "plugin '{}' version {} is not installed for target {}; installed versions: {}",
+            plugin_name,
+            version,
+            target,
+            available
+        );
+    }
+
+    if matches.is_empty() {
+        bail!(
+            "plugin '{}' is not installed for target {}; run `dbx plugin install` first",
+            plugin_name,
+            target
+        );
+    }
+
+    matches.sort_by(|a, b| compare_versions(&a.version, &b.version));
+    matches
+        .last()
+        .map(|entry| entry.version.clone())
+        .ok_or_else(|| {
+            anyhow!(
+                "failed to determine installed versions for '{}'",
+                plugin_name
+            )
+        })
+}
+
+fn compare_versions(a: &str, b: &str) -> Ordering {
+    match (parse_semver_loose(a), parse_semver_loose(b)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Greater,
+        (None, Some(_)) => Ordering::Less,
+        (None, None) => a.cmp(b),
+    }
+}
+
+fn parse_semver_loose(value: &str) -> Option<Version> {
+    Version::parse(value)
+        .ok()
+        .or_else(|| Version::parse(value.trim_start_matches('v')).ok())
 }
 
 pub fn replay(
@@ -1281,18 +1625,85 @@ fn replay_all(
     Ok(())
 }
 
-fn list_plugins(plugins: &[PluginDefinition], json: bool) -> Result<()> {
+fn list_plugins(config: &Config, plugins: &[PluginDefinition], json: bool) -> Result<()> {
+    let registry_path = registry::registry_path(&config.data_dir);
+    let installed_records = load_installed_registry(&registry_path)?;
+    let mut installed_by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for record in installed_records {
+        let key = canonical_plugin_key(&record.name);
+        installed_by_name
+            .entry(key)
+            .or_default()
+            .push(record.version.clone());
+    }
+    for versions in installed_by_name.values_mut() {
+        versions.sort();
+        versions.dedup();
+    }
+
+    let available = match fetch_available_plugins(&installed_by_name) {
+        Ok(list) => list,
+        Err(err) => {
+            eprintln!("warning: failed to fetch remote plugin catalog: {}", err);
+            Vec::new()
+        }
+    };
+
+    let configured_with_runtime: Vec<ConfiguredPluginInfo> = plugins
+        .iter()
+        .cloned()
+        .map(|definition| {
+            let runtime = process_instance_identifier(&definition)
+                .map(|identifier| read_process_runtime_state(&config.data_dir, &identifier));
+            ConfiguredPluginInfo {
+                definition,
+                runtime,
+            }
+        })
+        .collect();
+
     if json {
-        println!("{}", serde_json::to_string_pretty(plugins)?);
+        let mut entries: Vec<serde_json::Value> = Vec::with_capacity(configured_with_runtime.len());
+        for info in &configured_with_runtime {
+            let mut value = serde_json::to_value(&info.definition)?;
+            if let Some(runtime) = &info.runtime {
+                if let serde_json::Value::Object(ref mut map) = value {
+                    map.insert("runtime".to_string(), serde_json::to_value(runtime)?);
+                }
+            }
+            entries.push(value);
+        }
+        println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
     }
 
-    if plugins.is_empty() {
+    if configured_with_runtime.is_empty() {
         println!("(no plugins configured)");
         return Ok(());
     }
 
-    for plugin in plugins {
+    if !available.is_empty() {
+        println!("Available plugins:");
+        for entry in &available {
+            let mut details: Vec<String> = Vec::new();
+            if let Some(version) = &entry.latest_version {
+                details.push(format!("latest {}", version));
+            }
+            if !entry.installed_versions.is_empty() {
+                details.push(format!("installed {}", entry.installed_versions.join(", ")));
+            }
+            if details.is_empty() {
+                println!("  - {}", entry.name);
+            } else {
+                println!("  - {} ({})", entry.name, details.join(", "));
+            }
+        }
+        println!();
+    }
+
+    println!("Configured plugins:");
+    for info in &configured_with_runtime {
+        let plugin = &info.definition;
         let kind = plugin_kind_name(plugin.config.kind());
         let status = if plugin.enabled {
             "enabled"
@@ -1307,20 +1718,275 @@ fn list_plugins(plugins: &[PluginDefinition], json: bool) -> Result<()> {
             }
         });
 
+        let runtime_note = info
+            .runtime
+            .as_ref()
+            .map(|state| format_process_runtime(state));
+
         if let Some(name) = &plugin.name {
             match suggestion {
-                Some(hint) => println!("{} ({}) - {}{}", kind, name, status, hint),
-                None => println!("{} ({}) - {}", kind, name, status),
+                Some(hint) => match &runtime_note {
+                    Some(rt) => println!("  - {} ({}) - {}{}; {}", kind, name, status, hint, rt),
+                    None => println!("  - {} ({}) - {}{}", kind, name, status, hint),
+                },
+                None => match &runtime_note {
+                    Some(rt) => println!("  - {} ({}) - {}; {}", kind, name, status, rt),
+                    None => println!("  - {} ({}) - {}", kind, name, status),
+                },
             }
         } else {
             match suggestion {
-                Some(hint) => println!("{} - {}{}", kind, status, hint),
-                None => println!("{} - {}", kind, status),
+                Some(hint) => match &runtime_note {
+                    Some(rt) => println!("  - {} - {}{}; {}", kind, status, hint, rt),
+                    None => println!("  - {} - {}{}", kind, status, hint),
+                },
+                None => match &runtime_note {
+                    Some(rt) => println!("  - {} - {}; {}", kind, status, rt),
+                    None => println!("  - {} - {}", kind, status),
+                },
             }
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AvailablePluginStatus {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    installed_versions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ConfiguredPluginInfo {
+    definition: PluginDefinition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<ProcessRuntimeState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+enum ProcessRuntimeState {
+    Running { pid: u32 },
+    Stopped,
+    Unknown,
+}
+
+fn fetch_available_plugins(
+    installed_by_name: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<AvailablePluginStatus>> {
+    let client = github_api_client()?;
+
+    let contents: Vec<GitHubContentItem> = client
+        .get("https://api.github.com/repos/thachp/dbx_plugins/contents/plugins")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .context("failed to request plugin catalog from GitHub")?
+        .error_for_status()
+        .context("GitHub returned an error while fetching plugin catalog")?
+        .json()
+        .context("failed to decode plugin catalog response from GitHub")?;
+
+    let mut names: BTreeMap<String, String> = BTreeMap::new();
+    for item in contents {
+        if let Some(name) = normalize_plugin_catalog_entry(&item) {
+            let key = canonical_plugin_key(&name);
+            names.entry(key).or_insert(name);
+        }
+    }
+
+    let mut available: Vec<AvailablePluginStatus> = names
+        .into_iter()
+        .map(|(key, name)| -> Result<AvailablePluginStatus> {
+            let latest = fetch_manifest_version(&client, &name)?;
+            let installed_versions = installed_by_name.get(&key).cloned().unwrap_or_default();
+            Ok(AvailablePluginStatus {
+                name,
+                latest_version: latest,
+                installed_versions,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    available.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(available)
+}
+
+fn normalize_plugin_catalog_entry(item: &GitHubContentItem) -> Option<String> {
+    match item.r#type.as_str() {
+        "dir" => Some(item.name.clone()),
+        "file" => item
+            .name
+            .strip_suffix(".toml")
+            .or_else(|| item.name.strip_suffix(".json"))
+            .or_else(|| item.name.strip_suffix(".yaml"))
+            .or_else(|| item.name.strip_suffix(".yml"))
+            .map(|value| value.to_string()),
+        _ => None,
+    }
+}
+
+fn process_instance_identifier(definition: &PluginDefinition) -> Option<String> {
+    match &definition.config {
+        PluginConfig::Process(settings) => Some(
+            definition
+                .name
+                .clone()
+                .unwrap_or_else(|| settings.name.clone()),
+        ),
+        _ => None,
+    }
+}
+
+fn read_process_runtime_state(data_dir: &Path, identifier: &str) -> ProcessRuntimeState {
+    let path = status_file_path(data_dir, identifier);
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let pid_str = contents.trim();
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                ProcessRuntimeState::Running { pid }
+            } else {
+                ProcessRuntimeState::Unknown
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => ProcessRuntimeState::Stopped,
+        Err(_) => ProcessRuntimeState::Unknown,
+    }
+}
+
+fn format_process_runtime(state: &ProcessRuntimeState) -> String {
+    match state {
+        ProcessRuntimeState::Running { pid } => format!("process running (pid {})", pid),
+        ProcessRuntimeState::Stopped => "process stopped".to_string(),
+        ProcessRuntimeState::Unknown => "process status unknown".to_string(),
+    }
+}
+
+fn fetch_manifest_version(client: &Client, name: &str) -> Result<Option<String>> {
+    let raw_slug = name.trim().replace(' ', "-");
+    let canonical_slug = canonical_plugin_key(name).replace(' ', "-");
+    let mut slugs = Vec::new();
+    if !raw_slug.is_empty() {
+        slugs.push(raw_slug);
+    }
+    if !canonical_slug.is_empty() && !slugs.contains(&canonical_slug) {
+        slugs.push(canonical_slug);
+    }
+
+    if slugs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut last_error: Option<anyhow::Error> = None;
+    for slug in slugs {
+        let url = format!(
+            "https://raw.githubusercontent.com/thachp/dbx_plugins/main/plugins/{}/Cargo.toml",
+            slug
+        );
+        let response = match client
+            .get(&url)
+            .header("Accept", "application/octet-stream")
+            .send()
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                last_error = Some(anyhow!(
+                    "failed to request manifest for plugin '{}' at {}: {}",
+                    name,
+                    url,
+                    err
+                ));
+                continue;
+            }
+        };
+
+        if response.status() == StatusCode::NOT_FOUND {
+            continue;
+        }
+
+        if !response.status().is_success() {
+            last_error = Some(anyhow!(
+                "GitHub returned {} while fetching manifest for plugin '{}' at {}",
+                response.status(),
+                name,
+                url
+            ));
+            continue;
+        }
+
+        let body = match response.text() {
+            Ok(text) => text,
+            Err(err) => {
+                last_error = Some(anyhow!(
+                    "failed to read manifest response for plugin '{}' at {}: {}",
+                    name,
+                    url,
+                    err
+                ));
+                continue;
+            }
+        };
+        let manifest: toml::Value = match toml::from_str(&body) {
+            Ok(value) => value,
+            Err(err) => {
+                last_error = Some(anyhow!(
+                    "failed to parse manifest for plugin '{}' at {}: {}",
+                    name,
+                    url,
+                    err
+                ));
+                continue;
+            }
+        };
+        let version = manifest
+            .get("package")
+            .and_then(|pkg| pkg.get("version"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_string());
+
+        if version.is_some() {
+            return Ok(version);
+        }
+    }
+
+    if let Some(err) = last_error {
+        Err(err)
+    } else {
+        Ok(None)
+    }
+}
+
+fn github_api_client() -> Result<Client> {
+    Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("eventdbx-cli")
+        .build()
+        .context("failed to construct GitHub HTTP client")
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubContentItem {
+    name: String,
+    #[serde(rename = "type")]
+    r#type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubRelease {
+    #[serde(default)]
+    tag_name: String,
+    #[serde(default)]
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubAsset {
+    name: String,
+    #[serde(rename = "browser_download_url")]
+    download_url: String,
 }
 
 fn run_blocking<F, T>(f: F) -> Result<T>
@@ -1364,27 +2030,6 @@ pub(crate) fn plugin_kind_name(kind: PluginKind) -> &'static str {
         PluginKind::Http => "http",
         PluginKind::Log => "log",
         PluginKind::Process => "process",
-    }
-}
-
-fn validate_process_installation(config: &Config, plugin_name: &str, version: &str) -> Result<()> {
-    let registry_path = registry::registry_path(&config.data_dir);
-    let records = registry::load_registry(&registry_path)?;
-    let target = current_target_triple();
-
-    let found = records.iter().any(|entry| {
-        entry.name == plugin_name && entry.version == version && entry.target == target
-    });
-
-    if found {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "plugin '{}' version {} is not installed for target {}; run `dbx plugin install` first",
-            plugin_name,
-            version,
-            target
-        ))
     }
 }
 
