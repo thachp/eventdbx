@@ -13,6 +13,7 @@ pub mod plugin_capnp;
 pub mod replication;
 pub mod replication_capnp;
 pub mod replication_capnp_client;
+pub mod replication_legacy_capnp;
 pub mod restrict;
 pub mod schema;
 pub mod server;
