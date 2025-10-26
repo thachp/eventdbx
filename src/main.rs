@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use crate::commands::{
     aggregate::AggregateCommands,
     config::ConfigArgs,
-    plugin::PluginCommands,
+    plugin::{PluginCommands, PluginWorkerArgs},
     queue::QueueArgs,
     remote::RemoteCommands,
     schema::SchemaCommands,
@@ -84,6 +84,8 @@ enum Commands {
     /// Internal command used for daemonized server execution
     #[command(name = "__internal:server", hide = true)]
     InternalServer,
+    #[command(name = "__internal:plugin-worker", hide = true)]
+    InternalPluginWorker(PluginWorkerArgs),
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -119,6 +121,9 @@ async fn main() -> Result<()> {
         Commands::Backup(args) => commands::system::backup(config, args)?,
         Commands::Restore(args) => commands::system::restore(config, args)?,
         Commands::InternalServer => commands::start::run_internal(config).await?,
+        Commands::InternalPluginWorker(args) => {
+            commands::plugin::run_plugin_worker(config, args).await?
+        }
         Commands::External(argv) => {
             if !commands::upgrade::try_handle_shortcut(&argv).await? {
                 if let Some(name) = argv.first() {

@@ -41,6 +41,7 @@ struct PluginEntry {
     label: String,
     mode: PluginPayloadMode,
     plugin: Box<dyn Plugin>,
+    emit_events: bool,
 }
 
 #[derive(Clone)]
@@ -68,6 +69,7 @@ impl PluginManager {
                 label,
                 mode: definition.payload_mode,
                 plugin,
+                emit_events: definition.emit_events,
             });
         }
 
@@ -94,7 +96,7 @@ impl PluginManager {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.plugins.is_empty()
+        self.plugins.is_empty() || self.plugins.iter().all(|entry| !entry.emit_events)
     }
 
     pub fn notify_event(
@@ -103,11 +105,14 @@ impl PluginManager {
         state: &AggregateState,
         schema: Option<&AggregateSchema>,
     ) -> Result<()> {
-        if self.plugins.is_empty() {
+        if self.plugins.is_empty() || self.plugins.iter().all(|entry| !entry.emit_events) {
             return Ok(());
         }
 
         for entry in self.plugins.iter() {
+            if !entry.emit_events {
+                continue;
+            }
             if let Some(queue) = &self.queue {
                 let job_payload = build_job_payload(entry.mode, record, state, schema);
                 let payload_value = serde_json::to_value(&job_payload)?;
@@ -180,6 +185,9 @@ impl PluginManager {
     }
 
     fn process_jobs_for_plugin(&self, queue: &PluginQueueStore, entry: &PluginEntry) -> Result<()> {
+        if !entry.emit_events {
+            return Ok(());
+        }
         let now = Utc::now().timestamp_millis();
         let _ = queue.recover_stuck_jobs(&entry.label, now, self.max_attempts);
 
@@ -230,6 +238,25 @@ impl PluginManager {
     pub fn dispatch_pending(&self) -> Result<()> {
         if let Some(queue) = &self.queue {
             for entry in self.plugins.iter() {
+                if !entry.emit_events {
+                    continue;
+                }
+                self.process_jobs_for_plugin(queue, entry)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn has_label(&self, label: &str) -> bool {
+        self.plugins.iter().any(|entry| entry.label == label)
+    }
+
+    pub fn dispatch_for_label(&self, label: &str) -> Result<()> {
+        if let Some(queue) = &self.queue {
+            if let Some(entry) = self.plugins.iter().find(|entry| entry.label == label) {
+                if !entry.emit_events {
+                    return Ok(());
+                }
                 self.process_jobs_for_plugin(queue, entry)?;
             }
         }
@@ -413,6 +440,7 @@ mod tests {
                 label: "failing".into(),
                 mode: PluginPayloadMode::All,
                 plugin: Box::new(FailingPlugin),
+                emit_events: true,
             }]),
             queue: Some(queue_store.clone()),
             max_attempts: 3,
@@ -440,6 +468,7 @@ mod tests {
                 label: "failing".into(),
                 mode: PluginPayloadMode::All,
                 plugin: Box::new(FailingPlugin),
+                emit_events: true,
             }]),
             queue: Some(queue_store.clone()),
             max_attempts: 0,
@@ -458,6 +487,7 @@ mod tests {
                 label: "failing".into(),
                 mode: PluginPayloadMode::All,
                 plugin: Box::new(SuccessfulPlugin),
+                emit_events: true,
             }]),
             queue: Some(queue_store.clone()),
             max_attempts: 3,

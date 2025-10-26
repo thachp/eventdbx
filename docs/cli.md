@@ -68,12 +68,15 @@ Staging (`--stage`) records events to `~/.eventdbx/staged_events.json` until you
 ## Plugins & queues
 
 - `dbx plugin install <plugin> <version> --source <path|url> [--bin <file>] [--checksum <sha256>] [--force]`
-- `dbx plugin config <type> …` – Configure `tcp`, `http`, `capnp`, `log`, or `process` emitters. Every `plugin config` command accepts `--payload <all|event-only|state-only|schema-only|event-and-schema>` so each plugin receives only the portions of the job it needs.
+- `dbx plugin config <type> …` – Configure `tcp`, `http`, `capnp`, `log`, or `process` emitters. Every `plugin config` command accepts `--payload <all|event-only|state-only|schema-only|event-and-schema>` so each plugin receives only the portions of the job it needs. For process plugins, add `--emit-events=<true|false>` when you need the worker running but do not want it to enqueue events.
 - `dbx plugin enable <name>` / `dbx plugin disable <name>`
-- `dbx plugin remove <name>`
+- `dbx plugin test [<name>…]`
+- `dbx plugin start <name> [--foreground]`
+- `dbx plugin stop <name>`
+- `dbx plugin status [<name>]`
+- `dbx plugin remove <name> [--disable]`
 - `dbx plugin list`
 - `dbx plugin replay <plugin> <aggregate> [<aggregate_id>]`
-- `dbx plugin test`
 - `dbx queue`
 - `dbx queue clear`
 - `dbx queue retry [--event-id <job-id>]`
