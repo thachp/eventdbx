@@ -70,6 +70,7 @@ impl ProcessPlugin {
 
         let status_path = status_file_path(data_dir, &identifier);
         let connection = ProcessConnection::new(identifier, config, record, status_path)?;
+        connection.ensure_started()?;
 
         Ok(Self {
             connection: Arc::new(connection),
@@ -113,8 +114,16 @@ impl ProcessConnection {
                 err
             );
         }
-        // lazy spawn on first use
         Ok(connection)
+    }
+
+    fn ensure_started(&self) -> Result<()> {
+        let mut guard = self.inner.lock();
+        self.ensure_running(&mut guard)?;
+        if guard.is_none() {
+            self.restart(&mut guard)?;
+        }
+        Ok(())
     }
 
     fn send_event(

@@ -41,9 +41,11 @@ Plugins receive payloads as JSON envelopes (HTTP/TCP) or Cap’n Proto messages 
 - **TCP** – Streams JSON lines over a raw TCP socket.
 - **Cap’n Proto** – Sends Cap’n Proto messages (handy for low-latency services written in Rust/C++).
 - **Log** – Writes event/state/schema data to the EventDBX log sink for debugging or audit transcripts.
-- **Process** – Supervises an executable installed via `dbx plugin install`; the binary receives Cap’n Proto frames on stdin/stdout.
+- **Process** – Supervises an executable installed via `dbx plugin install`; the binary receives Cap'n Proto frames on stdin/stdout.
 
 All of these live in the [dbx_plugins workspace](https://github.com/thachp/dbx_plugins). Use those implementations as templates for new connectors.
+
+Need the binary running but don't want it to consume events (for example, the REST surface that simply exposes state)? Configure the process plugin with `--emit-events=false`. The supervisor still keeps the worker alive, but the queue will skip enqueuing payloads for that instance.
 
 ## Inspecting and managing the queue
 

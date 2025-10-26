@@ -6,12 +6,15 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    time::Duration,
+    process::{Command, Stdio},
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum, builder::BoolValueParser};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -21,7 +24,7 @@ use eventdbx::config::{
     PluginKind, PluginPayloadMode, ProcessPluginConfig, TcpPluginConfig, load_or_default,
 };
 use eventdbx::plugin::{
-    Plugin, PluginDelivery, establish_connection, instantiate_plugin,
+    Plugin, PluginDelivery, PluginManager, establish_connection, instantiate_plugin,
     registry::{self, InstalledPluginRecord, PluginSource},
     status_file_path,
 };
@@ -34,7 +37,6 @@ use eventdbx::{
     snowflake::SnowflakeId,
 };
 use std::any::Any;
-use std::thread;
 
 use tokio::runtime::Handle;
 use zip::ZipArchive;
@@ -51,6 +53,15 @@ pub enum PluginCommands {
     /// Install a plugin binary into the local registry
     #[command(name = "install")]
     Install(PluginInstallArgs),
+    /// Start a managed process plugin worker
+    #[command(name = "start")]
+    Start(PluginStartArgs),
+    /// Stop a managed process plugin worker
+    #[command(name = "stop")]
+    Stop(PluginStopArgs),
+    /// Show the status of a managed process plugin worker
+    #[command(name = "status")]
+    Status(PluginStatusArgs),
     /// Configure plugins
     #[command(subcommand)]
     Config(PluginConfigureCommands),
@@ -68,7 +79,7 @@ pub enum PluginCommands {
     Replay(PluginReplayArgs),
     /// Send a sample event to all enabled plugins
     #[command(name = "test")]
-    Test,
+    Test(PluginTestArgs),
     /// List enabled plugins
     #[command(name = "list")]
     List(PluginListArgs),
@@ -79,8 +90,9 @@ pub struct PluginInstallArgs {
     /// Unique plugin name (e.g. `search`)
     pub name: String,
 
-    /// Plugin version identifier being installed
-    pub version: String,
+    /// Plugin version identifier being installed (defaults to the latest registry version)
+    #[arg(value_name = "VERSION")]
+    pub version: Option<String>,
 
     /// Source URL or local file system path to the plugin bundle (omit to download from the registry)
     #[arg(long, short = 's')]
@@ -99,11 +111,48 @@ pub struct PluginInstallArgs {
     pub force: bool,
 }
 
+#[derive(Args, Clone, Debug)]
+pub struct PluginStartArgs {
+    /// Name of the process plugin instance to start
+    pub name: String,
+
+    /// Run the worker in the foreground (do not daemonize)
+    #[arg(long, default_value_t = false)]
+    pub foreground: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginStopArgs {
+    /// Name of the process plugin instance to stop
+    pub name: String,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginStatusArgs {
+    /// Optional process plugin name; omit to show every process plugin
+    pub name: Option<String>,
+}
+
+#[derive(Args, Clone, Debug)]
+#[command(hide = true)]
+pub struct PluginWorkerArgs {
+    /// Identifier of the process plugin instance to supervise
+    #[arg(long)]
+    pub name: String,
+}
+
 #[derive(Args, Default)]
 pub struct PluginListArgs {
     /// Emit JSON output
     #[arg(long, default_value_t = false)]
     pub json: bool,
+}
+
+#[derive(Args, Clone, Debug, Default)]
+pub struct PluginTestArgs {
+    /// Optional plugin names to target (defaults to all enabled plugins)
+    #[arg(value_name = "NAME")]
+    pub names: Vec<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -301,6 +350,10 @@ pub struct PluginProcessConfigureArgs {
     /// Payload components to deliver to the plugin
     #[arg(long = "payload", value_enum)]
     pub payload: Option<PayloadModeArg>,
+
+    /// Control whether events should be queued for this plugin (`true` or `false`)
+    #[arg(long = "emit-events", value_parser = BoolValueParser::new(), value_name = "true|false")]
+    pub emit_events: Option<bool>,
 }
 
 impl PluginProcessConfigureArgs {
@@ -341,6 +394,10 @@ pub struct PluginDisableArgs {
 pub struct PluginRemoveArgs {
     /// Name of the plugin instance to remove
     pub name: String,
+
+    /// Disable the plugin before removing it (if currently enabled)
+    #[arg(long, default_value_t = false)]
+    pub disable: bool,
 }
 
 #[derive(Args)]
@@ -374,6 +431,15 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
             let config_clone = config.clone();
             run_blocking(move || install_plugin_bundle(&config_clone, args))?;
         }
+        PluginCommands::Start(args) => {
+            start_process_worker(path.clone(), &config, &plugins, args)?;
+        }
+        PluginCommands::Stop(args) => {
+            stop_process_worker(&config, &plugins, args)?;
+        }
+        PluginCommands::Status(args) => {
+            process_worker_status(&config, &plugins, args)?;
+        }
         PluginCommands::List(args) => {
             let config_clone = config.clone();
             let plugins_clone = plugins.clone();
@@ -405,6 +471,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                         ensure_unique_plugin_name(&plugins, name)?;
                         plugins.push(PluginDefinition {
                             enabled: !args.disable,
+                            emit_events: true,
                             name: Some(name_owned.clone()),
                             payload_mode: payload_mode.unwrap_or_default().into(),
                             config: PluginConfig::Tcp(TcpPluginConfig {
@@ -449,6 +516,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                         ensure_unique_plugin_name(&plugins, name)?;
                         plugins.push(PluginDefinition {
                             enabled: !args.disable,
+                            emit_events: true,
                             name: Some(name_owned.clone()),
                             payload_mode: payload_mode.unwrap_or_default().into(),
                             config: PluginConfig::Capnp(CapnpPluginConfig {
@@ -498,6 +566,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                         ensure_unique_plugin_name(&plugins, name)?;
                         plugins.push(PluginDefinition {
                             enabled: !args.disable,
+                            emit_events: true,
                             name: Some(name_owned.clone()),
                             payload_mode: payload_mode.unwrap_or_default().into(),
                             config: PluginConfig::Http(HttpPluginConfig {
@@ -543,6 +612,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                         ensure_unique_plugin_name(&plugins, name)?;
                         plugins.push(PluginDefinition {
                             enabled: !args.disable,
+                            emit_events: true,
                             name: Some(name_owned.clone()),
                             payload_mode: payload_mode.unwrap_or_default().into(),
                             config: PluginConfig::Log(LogPluginConfig {
@@ -612,11 +682,15 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                         if let Some(mode) = payload_mode {
                             plugin.payload_mode = mode.into();
                         }
+                        if let Some(flag) = args.emit_events {
+                            plugin.emit_events = flag;
+                        }
                     }
                     None => {
                         ensure_unique_plugin_name(&plugins, instance)?;
                         plugins.push(PluginDefinition {
                             enabled: !args.disable,
+                            emit_events: args.emit_events.unwrap_or(true),
                             name: Some(instance_owned.clone()),
                             payload_mode: payload_mode.unwrap_or_default().into(),
                             config: PluginConfig::Process(process_config),
@@ -698,17 +772,25 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 .position(|definition| definition.name.as_deref() == Some(name))
                 .ok_or_else(|| anyhow!("no plugin named '{}' is configured", name))?;
 
-            if plugins[index].enabled {
+            let was_enabled = plugins[index].enabled;
+            if was_enabled && !args.disable {
                 bail!(
-                    "disable plugin '{}' before removing it (use plugin disable {})",
+                    "disable plugin '{}' before removing it (use plugin disable {} or pass --disable)",
                     name,
                     name
                 );
             }
 
+            if was_enabled && args.disable {
+                plugins[index].enabled = false;
+            }
+
             plugins.remove(index);
             config.ensure_data_dir()?;
             config.save_plugins(&plugins)?;
+            if was_enabled && args.disable {
+                println!("Plugin '{}' disabled", name);
+            }
             println!("Plugin '{}' removed", name);
         }
         PluginCommands::Replay(args) => {
@@ -719,106 +801,8 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 args.aggregate_id,
             )?;
         }
-        PluginCommands::Test => {
-            let enabled: Vec<PluginDefinition> = plugins
-                .iter()
-                .filter(|definition| definition.enabled)
-                .cloned()
-                .collect();
-
-            if enabled.is_empty() {
-                println!("(no plugins enabled)");
-                return Ok(());
-            }
-
-            let mut aggregate_state_map = BTreeMap::new();
-            aggregate_state_map.insert("status".to_string(), "inactive".to_string());
-            aggregate_state_map.insert("comment".to_string(), "Archived via API".to_string());
-
-            let aggregate_state = AggregateState {
-                aggregate_type: "patient".to_string(),
-                aggregate_id: "p-001".to_string(),
-                version: 5,
-                state: aggregate_state_map.clone(),
-                merkle_root: "deadbeef…".to_string(),
-                archived: false,
-            };
-
-            let record = EventRecord {
-                aggregate_type: "patient".to_string(),
-                aggregate_id: "p-001".to_string(),
-                event_type: "patient-updated".to_string(),
-                payload: json!({
-                    "status": "inactive",
-                    "comment": "Archived via API"
-                }),
-                extensions: None,
-                metadata: EventMetadata {
-                    event_id: SnowflakeId::from_u64(1_234_567_890),
-                    created_at: DateTime::parse_from_rfc3339("2024-12-01T17:22:43.512345Z")
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(|_| Utc::now()),
-                    issued_by: Some(ActorClaims {
-                        group: "admin".to_string(),
-                        user: "jane".to_string(),
-                    }),
-                    note: None,
-                },
-                version: 5,
-                hash: "cafe…".to_string(),
-                merkle_root: "deadbeef…".to_string(),
-            };
-
-            let mut successes = 0;
-            let mut failures = 0;
-
-            for definition in enabled {
-                let label = match &definition.name {
-                    Some(name) => {
-                        format!("{} ({})", plugin_kind_name(definition.config.kind()), name)
-                    }
-                    None => plugin_kind_name(definition.config.kind()).to_string(),
-                };
-
-                let definition_clone = definition.clone();
-                let record_clone = record.clone();
-                let state_clone = aggregate_state.clone();
-                let cfg = config.clone();
-
-                let result = run_blocking(move || {
-                    establish_connection(&definition_clone).map_err(anyhow::Error::from)?;
-                    let plugin = instantiate_plugin(&definition_clone, &cfg);
-                    let payload_mode = definition_clone.payload_mode;
-                    let delivery = PluginDelivery {
-                        record: payload_mode.includes_event().then_some(&record_clone),
-                        state: payload_mode.includes_state().then_some(&state_clone),
-                        schema: None,
-                    };
-                    plugin.notify_event(delivery).map_err(anyhow::Error::from)
-                });
-
-                match result {
-                    Ok(()) => {
-                        println!("{} - ok", label);
-                        successes += 1;
-                    }
-                    Err(err) => {
-                        println!("{} - FAILED ({})", label, err);
-                        failures += 1;
-                    }
-                }
-            }
-
-            println!(
-                "Tested {} plugin(s): {} succeeded, {} failed",
-                successes + failures,
-                successes,
-                failures
-            );
-
-            if failures > 0 {
-                return Err(anyhow!("plugin test failed for {} plugin(s)", failures));
-            }
+        PluginCommands::Test(args) => {
+            run_plugin_test(&config, &plugins, args)?;
         }
     }
 
@@ -837,10 +821,15 @@ fn install_plugin_bundle(config: &Config, args: PluginInstallArgs) -> Result<()>
         force,
     } = args;
 
+    let resolved_version = resolve_install_version(&name, version.as_deref(), source.as_deref())?;
+
     let target = current_target_triple();
     let release_target = release_target_triple();
     let plugins_root = config.data_dir.join("plugins");
-    let install_dir = plugins_root.join(&name).join(&version).join(&target);
+    let install_dir = plugins_root
+        .join(&name)
+        .join(&resolved_version)
+        .join(&target);
     let registry_path = plugins_root.join("registry.json");
 
     if install_dir.exists() {
@@ -848,7 +837,7 @@ fn install_plugin_bundle(config: &Config, args: PluginInstallArgs) -> Result<()>
             bail!(
                 "plugin '{}' v{} for target {} is already installed; rerun with --force to overwrite",
                 name,
-                version,
+                resolved_version,
                 target
             );
         }
@@ -862,7 +851,7 @@ fn install_plugin_bundle(config: &Config, args: PluginInstallArgs) -> Result<()>
     fs::create_dir_all(&install_dir)?;
 
     let (temp_file, source_hint, source_descriptor) =
-        resolve_plugin_bundle_source(&name, &version, source.as_deref(), &release_target)?;
+        resolve_plugin_bundle_source(&name, &resolved_version, source.as_deref(), &release_target)?;
 
     if let Some(expected) = checksum.as_deref() {
         verify_checksum(temp_file.path(), expected)?;
@@ -896,12 +885,12 @@ fn install_plugin_bundle(config: &Config, args: PluginInstallArgs) -> Result<()>
 
     let mut registry = load_installed_registry(&registry_path)?;
     registry.retain(|record| {
-        !(record.name == name && record.version == version && record.target == target)
+        !(record.name == name && record.version == resolved_version && record.target == target)
     });
 
     registry.push(InstalledPluginRecord {
         name: name.clone(),
-        version: version.clone(),
+        version: resolved_version.clone(),
         target: target.clone(),
         install_dir: install_dir.clone(),
         binary_path: binary_path.clone(),
@@ -922,12 +911,730 @@ fn install_plugin_bundle(config: &Config, args: PluginInstallArgs) -> Result<()>
     println!(
         "installed plugin '{}' v{} for {} at {}",
         name,
-        version,
+        resolved_version,
         target,
         binary_path.display()
     );
 
     Ok(())
+}
+
+fn resolve_install_version(
+    name: &str,
+    explicit_version: Option<&str>,
+    source: Option<&str>,
+) -> Result<String> {
+    if let Some(version) = explicit_version {
+        let trimmed = version.trim();
+        if trimmed.is_empty() {
+            bail!("plugin version cannot be empty");
+        }
+        return Ok(trimmed.to_string());
+    }
+
+    if source.is_some() {
+        bail!("plugin version must be specified when installing from a custom source");
+    }
+
+    let client = github_api_client()?;
+    let Some(latest) = fetch_manifest_version(&client, name)? else {
+        bail!("failed to determine latest version for plugin '{}'", name);
+    };
+    Ok(latest)
+}
+
+fn start_process_worker(
+    config_path: PathBuf,
+    config: &Config,
+    plugins: &[PluginDefinition],
+    args: PluginStartArgs,
+) -> Result<()> {
+    let PluginStartArgs { name, foreground } = args;
+    let instance = name.trim();
+    if instance.is_empty() {
+        bail!("plugin name cannot be empty");
+    }
+    let (plugin, settings) = locate_process_plugin(plugins, instance)
+        .ok_or_else(|| anyhow!("no process plugin named '{}' is configured", name))?;
+
+    if !plugin.enabled {
+        bail!(
+            "process plugin '{}' is disabled; enable it before starting the worker",
+            name
+        );
+    }
+
+    let identifier = resolve_process_identifier(plugin, settings);
+    let worker_pid_path = process_worker_pid_path(&config.data_dir, &identifier);
+
+    if let Some(existing_pid) = read_pid_file(&worker_pid_path)? {
+        if is_pid_running(existing_pid) {
+            println!(
+                "Process plugin '{}' worker is already running (pid {})",
+                identifier, existing_pid
+            );
+            return Ok(());
+        }
+        let _ = fs::remove_file(&worker_pid_path);
+    }
+
+    let mut command = Command::new(env::current_exe()?);
+    command.arg("--config").arg(config_path);
+    command.arg("__internal:plugin-worker");
+    command.arg("--name");
+    command.arg(&identifier);
+
+    if !foreground {
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::null());
+        command.stderr(Stdio::null());
+    }
+
+    if foreground {
+        let status = command
+            .status()
+            .with_context(|| format!("failed to run worker for '{}'", identifier))?;
+        if status.success() {
+            Ok(())
+        } else {
+            bail!("plugin worker exited with status {}", status);
+        }
+    } else {
+        let child = command
+            .spawn()
+            .with_context(|| format!("failed to start worker for '{}'", identifier))?;
+        let spawned_pid = child.id();
+        drop(child);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Some(pid) = read_pid_file(&worker_pid_path)? {
+                if pid == spawned_pid || is_pid_running(pid) {
+                    println!(
+                        "Process plugin '{}' worker started (pid {})",
+                        identifier, pid
+                    );
+                    return Ok(());
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        bail!(
+            "plugin worker did not report readiness; check logs for '{}'",
+            identifier
+        );
+    }
+}
+
+fn stop_process_worker(
+    config: &Config,
+    plugins: &[PluginDefinition],
+    args: PluginStopArgs,
+) -> Result<()> {
+    let PluginStopArgs { name } = args;
+    let instance = name.trim();
+    if instance.is_empty() {
+        bail!("plugin name cannot be empty");
+    }
+    let (plugin, settings) = locate_process_plugin(plugins, instance)
+        .ok_or_else(|| anyhow!("no process plugin named '{}' is configured", name))?;
+
+    let identifier = resolve_process_identifier(plugin, settings);
+    let worker_pid_path = process_worker_pid_path(&config.data_dir, &identifier);
+    let runtime_pid_path = status_file_path(&config.data_dir, &identifier);
+
+    if let Some(pid) = read_pid_file(&worker_pid_path)? {
+        if is_pid_running(pid) {
+            terminate_pid(pid)?;
+            if !wait_for_exit(pid, Duration::from_secs(5)) {
+                #[cfg(unix)]
+                {
+                    force_kill_pid(pid)?;
+                    if !wait_for_exit(pid, Duration::from_secs(2)) {
+                        bail!("failed to stop plugin worker (pid {})", pid);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    bail!("failed to stop plugin worker (pid {})", pid);
+                }
+            }
+        }
+        let _ = fs::remove_file(&worker_pid_path);
+        println!(
+            "Stopped process plugin '{}' worker (pid {})",
+            identifier, pid
+        );
+    } else {
+        println!("Process plugin '{}' worker is not running", identifier);
+    }
+
+    if let Some(runtime_pid) = read_pid_file(&runtime_pid_path)? {
+        if is_pid_running(runtime_pid) {
+            terminate_pid(runtime_pid)?;
+            if !wait_for_exit(runtime_pid, Duration::from_secs(5)) {
+                #[cfg(unix)]
+                {
+                    force_kill_pid(runtime_pid)?;
+                    if !wait_for_exit(runtime_pid, Duration::from_secs(2)) {
+                        bail!("failed to stop plugin runtime (pid {})", runtime_pid);
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    bail!("failed to stop plugin runtime (pid {})", runtime_pid);
+                }
+            }
+        }
+        let _ = fs::remove_file(&runtime_pid_path);
+        println!(
+            "Stopped process plugin '{}' runtime (pid {})",
+            identifier, runtime_pid
+        );
+    }
+
+    Ok(())
+}
+
+fn process_worker_status(
+    config: &Config,
+    plugins: &[PluginDefinition],
+    args: PluginStatusArgs,
+) -> Result<()> {
+    let maybe_name = args
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(instance) = maybe_name {
+        let (plugin, settings) = locate_process_plugin(plugins, instance)
+            .ok_or_else(|| anyhow!("no process plugin named '{}' is configured", instance))?;
+        print_process_status(config, plugin, settings)?;
+    } else {
+        let mut printed_any = false;
+        for definition in plugins {
+            if let PluginConfig::Process(settings) = &definition.config {
+                if printed_any {
+                    println!();
+                }
+                print_process_status(config, definition, settings)?;
+                printed_any = true;
+            }
+        }
+        if !printed_any {
+            println!("(no process plugins configured)");
+        }
+    }
+
+    Ok(())
+}
+
+fn print_process_status(
+    config: &Config,
+    definition: &PluginDefinition,
+    settings: &ProcessPluginConfig,
+) -> Result<()> {
+    let identifier = resolve_process_identifier(definition, settings);
+    let status_path = status_file_path(&config.data_dir, &identifier);
+    let worker_pid_path = process_worker_pid_path(&config.data_dir, &identifier);
+
+    let status = read_process_runtime_state(&config.data_dir, &identifier);
+    let label = match status {
+        ProcessRuntimeState::Running { pid } => format!("running (pid {})", pid),
+        ProcessRuntimeState::Stopped => "stopped".to_string(),
+        ProcessRuntimeState::Unknown => "unknown".to_string(),
+    };
+
+    let worker_pid = read_pid_file(&worker_pid_path)?.filter(|pid| is_pid_running(*pid));
+
+    println!("Process plugin: {}", identifier);
+    println!("  enabled: {}", definition.enabled);
+    println!("  emit events: {}", definition.emit_events);
+    println!("  status: {}", label);
+    println!("  runtime pid file: {}", status_path.display());
+    println!(
+        "  worker pid file: {}{}",
+        worker_pid_path.display(),
+        worker_pid
+            .map(|pid| format!(" (pid {})", pid))
+            .unwrap_or_default()
+    );
+
+    Ok(())
+}
+
+fn run_plugin_test(
+    config: &Config,
+    plugins: &[PluginDefinition],
+    args: PluginTestArgs,
+) -> Result<()> {
+    let targets: Vec<PluginDefinition> = if args.names.is_empty() {
+        plugins
+            .iter()
+            .filter(|definition| definition.enabled && definition.emit_events)
+            .cloned()
+            .collect()
+    } else {
+        let mut collected = Vec::new();
+        for raw in &args.names {
+            let name = raw.trim();
+            if name.is_empty() {
+                bail!("plugin name cannot be empty");
+            }
+            let definition = plugins
+                .iter()
+                .find(|candidate| candidate.name.as_deref() == Some(name))
+                .ok_or_else(|| anyhow!("no plugin named '{}' is configured", name))?;
+            if !definition.emit_events {
+                bail!(
+                    "plugin '{}' has event delivery disabled; reconfigure with --emit-events=true to test",
+                    name
+                );
+            }
+            if !definition.enabled {
+                bail!("plugin '{}' is disabled; enable it before testing", name);
+            }
+            collected.push(definition.clone());
+        }
+        collected
+    };
+
+    if targets.is_empty() {
+        println!("(no plugins enabled)");
+        return Ok(());
+    }
+
+    let mut aggregate_state_map = BTreeMap::new();
+    aggregate_state_map.insert("status".to_string(), "inactive".to_string());
+    aggregate_state_map.insert("comment".to_string(), "Archived via API".to_string());
+
+    let aggregate_state = AggregateState {
+        aggregate_type: "patient".to_string(),
+        aggregate_id: "p-001".to_string(),
+        version: 5,
+        state: aggregate_state_map.clone(),
+        merkle_root: "deadbeef…".to_string(),
+        archived: false,
+    };
+
+    let record = EventRecord {
+        aggregate_type: "patient".to_string(),
+        aggregate_id: "p-001".to_string(),
+        event_type: "patient-updated".to_string(),
+        payload: json!({
+            "status": "inactive",
+            "comment": "Archived via API"
+        }),
+        extensions: None,
+        metadata: EventMetadata {
+            event_id: SnowflakeId::from_u64(1_234_567_890),
+            created_at: DateTime::parse_from_rfc3339("2024-12-01T17:22:43.512345Z")
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+            issued_by: Some(ActorClaims {
+                group: "admin".to_string(),
+                user: "jane".to_string(),
+            }),
+            note: None,
+        },
+        version: 5,
+        hash: "cafe…".to_string(),
+        merkle_root: "deadbeef…".to_string(),
+    };
+
+    let mut successes = 0;
+    let mut failures = 0;
+
+    for definition in targets {
+        let label = match &definition.name {
+            Some(name) => format!("{} ({})", plugin_kind_name(definition.config.kind()), name),
+            None => plugin_kind_name(definition.config.kind()).to_string(),
+        };
+
+        let definition_clone = definition.clone();
+        let record_clone = record.clone();
+        let state_clone = aggregate_state.clone();
+        let cfg = config.clone();
+
+        let result = run_blocking(move || {
+            establish_connection(&definition_clone).map_err(anyhow::Error::from)?;
+            let plugin = instantiate_plugin(&definition_clone, &cfg);
+            let payload_mode = definition_clone.payload_mode;
+            let delivery = PluginDelivery {
+                record: payload_mode.includes_event().then_some(&record_clone),
+                state: payload_mode.includes_state().then_some(&state_clone),
+                schema: None,
+            };
+            plugin.notify_event(delivery).map_err(anyhow::Error::from)
+        });
+
+        match result {
+            Ok(()) => {
+                println!("{} - ok", label);
+                successes += 1;
+            }
+            Err(err) => {
+                println!("{} - FAILED ({})", label, err);
+                failures += 1;
+            }
+        }
+    }
+
+    println!(
+        "Tested {} plugin(s): {} succeeded, {} failed",
+        successes + failures,
+        successes,
+        failures
+    );
+
+    if failures > 0 {
+        return Err(anyhow!("plugin test failed for {} plugin(s)", failures));
+    }
+
+    Ok(())
+}
+
+fn locate_process_plugin<'a>(
+    plugins: &'a [PluginDefinition],
+    name: &str,
+) -> Option<(&'a PluginDefinition, &'a ProcessPluginConfig)> {
+    plugins
+        .iter()
+        .find_map(|definition| match &definition.config {
+            PluginConfig::Process(settings) => {
+                let matches_instance = definition
+                    .name
+                    .as_deref()
+                    .map(|value| value == name)
+                    .unwrap_or(false);
+                let matches_plugin = settings.name == name;
+                if matches_instance || matches_plugin {
+                    Some((definition, settings))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+}
+
+fn locate_process_plugin_by_identifier<'a>(
+    plugins: &'a [PluginDefinition],
+    identifier: &str,
+) -> Option<(&'a PluginDefinition, &'a ProcessPluginConfig)> {
+    plugins
+        .iter()
+        .find_map(|definition| match &definition.config {
+            PluginConfig::Process(settings) => {
+                let resolved = resolve_process_identifier(definition, settings);
+                if resolved == identifier {
+                    Some((definition, settings))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+}
+
+fn resolve_process_identifier(
+    definition: &PluginDefinition,
+    settings: &ProcessPluginConfig,
+) -> String {
+    definition
+        .name
+        .clone()
+        .unwrap_or_else(|| settings.name.clone())
+}
+
+fn process_worker_pid_path(data_dir: &Path, identifier: &str) -> PathBuf {
+    let status_path = status_file_path(data_dir, identifier);
+    let stem = status_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(identifier);
+    let parent = status_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| data_dir.join("plugins").join("run"));
+    parent.join(format!("{stem}.worker"))
+}
+
+fn read_pid_file(path: &Path) -> Result<Option<u32>> {
+    match fs::read_to_string(path) {
+        Ok(contents) => {
+            let trimmed = contents.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                let pid = trimmed
+                    .parse::<u32>()
+                    .with_context(|| format!("failed to parse pid file {}", path.display()))?;
+                Ok(Some(pid))
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn write_pid_file(path: &Path, pid: u32) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(path, format!("{pid}\n"))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn is_pid_running(pid: u32) -> bool {
+    process_is_running(pid)
+}
+
+fn terminate_pid(pid: u32) -> Result<()> {
+    terminate_process(pid)
+}
+
+#[cfg(unix)]
+fn force_kill_pid(pid: u32) -> Result<()> {
+    force_kill_process(pid)
+}
+
+#[cfg(not(unix))]
+fn force_kill_pid(_pid: u32) -> Result<()> {
+    Ok(())
+}
+
+pub async fn run_plugin_worker(config_path: Option<PathBuf>, args: PluginWorkerArgs) -> Result<()> {
+    use tokio::{signal, task, time};
+
+    let (config, _) = load_or_default(config_path)?;
+    let plugins = config.load_plugins()?;
+    let identifier = args.name;
+
+    let (definition, _settings) = locate_process_plugin_by_identifier(&plugins, &identifier)
+        .ok_or_else(|| anyhow!("no process plugin named '{}' is configured", identifier))?;
+
+    if !definition.enabled {
+        bail!(
+            "process plugin '{}' is disabled; enable it before starting the worker",
+            identifier
+        );
+    }
+
+    let label = match definition.name.as_deref() {
+        Some(name) if !name.trim().is_empty() => {
+            format!("{} ({})", plugin_kind_name(PluginKind::Process), name)
+        }
+        _ => plugin_kind_name(PluginKind::Process).to_string(),
+    };
+
+    let worker_pid_path = process_worker_pid_path(&config.data_dir, &identifier);
+    write_pid_file(&worker_pid_path, std::process::id() as u32)?;
+    let _guard = WorkerPidGuard {
+        path: worker_pid_path.clone(),
+    };
+
+    let manager = PluginManager::from_config(&config)?;
+    if !manager.has_label(&label) {
+        bail!("process plugin '{}' is not enabled", identifier);
+    }
+
+    let manager = Arc::new(manager);
+    let label = Arc::new(label);
+
+    println!(
+        "Process plugin '{}' worker running (pid {})",
+        identifier,
+        std::process::id()
+    );
+
+    // Initial dispatch to ensure the process is started and recover any stuck jobs.
+    {
+        let manager_clone: Arc<PluginManager> = Arc::clone(&manager);
+        let label_clone = Arc::clone(&label);
+        let label_name = Arc::clone(&label);
+        let result =
+            task::spawn_blocking(move || manager_clone.dispatch_for_label(label_clone.as_ref()))
+                .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    target: "eventdbx.plugin",
+                    "initial dispatch for '{}' failed: {}",
+                    label_name.as_ref(),
+                    err
+                );
+            }
+            Err(join_err) => {
+                return Err(anyhow!("plugin worker task failed: {}", join_err));
+            }
+        }
+    }
+
+    let mut interval = time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                println!("Process plugin '{}' worker shutting down", identifier);
+                break;
+            }
+            _ = interval.tick() => {
+                let manager_clone: Arc<PluginManager> = Arc::clone(&manager);
+                let label_clone = Arc::clone(&label);
+                let label_name = Arc::clone(&label);
+                let result = task::spawn_blocking(move || {
+                    manager_clone.dispatch_for_label(label_clone.as_ref())
+                }).await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        tracing::warn!(
+                            target: "eventdbx.plugin",
+                            "dispatch for '{}' failed: {}",
+                            label_name.as_ref(),
+                            err
+                        );
+                    }
+                    Err(join_err) => {
+                        return Err(anyhow!("plugin worker task failed: {}", join_err));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+struct WorkerPidGuard {
+    path: PathBuf,
+}
+
+impl Drop for WorkerPidGuard {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_file(&self.path) {
+            if err.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(
+                    target: "eventdbx.plugin",
+                    "failed to remove worker pid file {}: {}",
+                    self.path.display(),
+                    err
+                );
+            }
+        }
+    }
+}
+
+fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !process_is_running(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return !process_is_running(pid);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    unsafe {
+        if libc::kill(pid as libc::pid_t, 0) == 0 {
+            true
+        } else {
+            let err = io::Error::last_os_error();
+            !matches!(err.raw_os_error(), Some(libc::ESRCH))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            false
+        } else {
+            CloseHandle(handle);
+            true
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_running(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn terminate_process(pid: u32) -> Result<()> {
+    unsafe {
+        if libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 {
+            Ok(())
+        } else {
+            let err = io::Error::last_os_error();
+            if matches!(err.raw_os_error(), Some(libc::ESRCH)) {
+                Ok(())
+            } else {
+                Err(anyhow!("failed to send SIGTERM to pid {pid}: {err}"))
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn terminate_process(pid: u32) -> Result<()> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle == 0 {
+            return Err(anyhow!("failed to open process {pid} for termination"));
+        }
+        let result = TerminateProcess(handle, 0);
+        CloseHandle(handle);
+        if result == 0 {
+            return Err(anyhow!("failed to terminate process {pid}"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process(pid: u32) -> Result<()> {
+    Err(anyhow!(
+        "process control is not supported on this platform (pid {pid})"
+    ))
+}
+
+#[cfg(unix)]
+fn force_kill_process(pid: u32) -> Result<()> {
+    unsafe {
+        if libc::kill(pid as libc::pid_t, libc::SIGKILL) == 0 {
+            Ok(())
+        } else {
+            let err = io::Error::last_os_error();
+            if matches!(err.raw_os_error(), Some(libc::ESRCH)) {
+                Ok(())
+            } else {
+                Err(anyhow!("failed to send SIGKILL to pid {pid}: {err}"))
+            }
+        }
+    }
 }
 
 fn current_target_triple() -> String {
@@ -1718,33 +2425,27 @@ fn list_plugins(config: &Config, plugins: &[PluginDefinition], json: bool) -> Re
             }
         });
 
-        let runtime_note = info
-            .runtime
-            .as_ref()
-            .map(|state| format_process_runtime(state));
+        let runtime_note = info.runtime.as_ref().and_then(|state| match state {
+            ProcessRuntimeState::Stopped => None,
+            _ => Some(format_process_runtime(state)),
+        });
+
+        let mut detail = status.to_string();
+        if let Some(hint) = &suggestion {
+            detail.push_str(hint);
+        }
+        if let Some(rt) = &runtime_note {
+            detail.push_str("; ");
+            detail.push_str(rt);
+        }
+        if !plugin.emit_events {
+            detail.push_str("; event delivery disabled");
+        }
 
         if let Some(name) = &plugin.name {
-            match suggestion {
-                Some(hint) => match &runtime_note {
-                    Some(rt) => println!("  - {} ({}) - {}{}; {}", kind, name, status, hint, rt),
-                    None => println!("  - {} ({}) - {}{}", kind, name, status, hint),
-                },
-                None => match &runtime_note {
-                    Some(rt) => println!("  - {} ({}) - {}; {}", kind, name, status, rt),
-                    None => println!("  - {} ({}) - {}", kind, name, status),
-                },
-            }
+            println!("  - {} ({}) - {}", kind, name, detail);
         } else {
-            match suggestion {
-                Some(hint) => match &runtime_note {
-                    Some(rt) => println!("  - {} - {}{}; {}", kind, status, hint, rt),
-                    None => println!("  - {} - {}{}", kind, status, hint),
-                },
-                None => match &runtime_note {
-                    Some(rt) => println!("  - {} - {}; {}", kind, status, rt),
-                    None => println!("  - {} - {}", kind, status),
-                },
-            }
+            println!("  - {} - {}", kind, detail);
         }
     }
 

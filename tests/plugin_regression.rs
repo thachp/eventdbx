@@ -51,6 +51,7 @@ async fn http_plugin_posts_event_payload() -> Result<()> {
     let endpoint = format!("http://{}/hook", addr);
     let plugin_definition = PluginDefinition {
         enabled: true,
+        emit_events: true,
         name: Some("http-regression".to_string()),
         payload_mode: PluginPayloadMode::All,
         config: PluginConfig::Http(HttpPluginConfig {

@@ -886,11 +886,17 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginDefinition {
     pub enabled: bool,
+    #[serde(default = "default_emit_events")]
+    pub emit_events: bool,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default = "default_plugin_payload_mode")]
     pub payload_mode: PluginPayloadMode,
     pub config: PluginConfig,
+}
+
+fn default_emit_events() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
