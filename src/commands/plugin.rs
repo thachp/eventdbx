@@ -266,9 +266,13 @@ pub struct PluginLogConfigureArgs {
 
 #[derive(Args)]
 pub struct PluginProcessConfigureArgs {
-    /// Installed plugin identifier to execute
+    /// Installed plugin identifier to execute (use as `dbx plugin config process <plugin>` or `--plugin <plugin>`)
+    #[arg(long = "plugin", value_name = "PLUGIN")]
+    pub plugin_flag: Option<String>,
+
+    /// Installed plugin identifier to execute (positional form)
     #[arg(value_name = "PLUGIN")]
-    pub plugin_name: String,
+    pub plugin_positional: Option<String>,
 
     /// Plugin version to select from the local registry (defaults to the latest installed)
     #[arg(long, value_name = "VERSION")]
@@ -297,6 +301,22 @@ pub struct PluginProcessConfigureArgs {
     /// Payload components to deliver to the plugin
     #[arg(long = "payload", value_enum)]
     pub payload: Option<PayloadModeArg>,
+}
+
+impl PluginProcessConfigureArgs {
+    fn resolved_plugin_name(&self) -> Result<&str> {
+        match (&self.plugin_flag, &self.plugin_positional) {
+            (Some(flag), Some(positional)) => {
+                if flag.trim() != positional.trim() {
+                    bail!("conflicting plugin identifiers provided (flag vs positional)");
+                }
+                Ok(flag.trim())
+            }
+            (Some(flag), None) => Ok(flag.trim()),
+            (None, Some(positional)) => Ok(positional.trim()),
+            (None, None) => bail!("plugin identifier is required"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -545,7 +565,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
             }
             PluginConfigureCommands::Process(args) => {
                 let payload_mode = args.payload;
-                let plugin_name = args.plugin_name.trim();
+                let plugin_name = args.resolved_plugin_name()?;
                 if plugin_name.is_empty() {
                     bail!("plugin identifier cannot be empty");
                 }
@@ -1426,18 +1446,17 @@ fn resolve_process_installation_version(
         .filter(|entry| entry.name == plugin_name && entry.target == target)
         .collect();
 
-    if matches.is_empty() {
-        bail!(
-            "plugin '{}' is not installed for target {}; run `dbx plugin install` first",
-            plugin_name,
-            target
-        );
-    }
-
     if let Some(raw_version) = requested_version {
         let version = raw_version.trim();
         if version.is_empty() {
             bail!("plugin version cannot be empty");
+        }
+        if matches.is_empty() {
+            bail!(
+                "plugin '{}' version {} is not installed",
+                plugin_name,
+                version
+            );
         }
         let found = matches.iter().any(|entry| entry.version == version);
         if found {
@@ -1454,6 +1473,14 @@ fn resolve_process_installation_version(
             version,
             target,
             available
+        );
+    }
+
+    if matches.is_empty() {
+        bail!(
+            "plugin '{}' is not installed for target {}; run `dbx plugin install` first",
+            plugin_name,
+            target
         );
     }
 
@@ -1636,11 +1663,22 @@ fn list_plugins(config: &Config, plugins: &[PluginDefinition], json: bool) -> Re
         .collect();
 
     if json {
-        let response = PluginListResponse {
-            configured: configured_with_runtime.clone(),
-            available: available.clone(),
-        };
-        println!("{}", serde_json::to_string_pretty(&response)?);
+        let mut entries: Vec<serde_json::Value> = Vec::with_capacity(configured_with_runtime.len());
+        for info in &configured_with_runtime {
+            let mut value = serde_json::to_value(&info.definition)?;
+            if let Some(runtime) = &info.runtime {
+                if let serde_json::Value::Object(ref mut map) = value {
+                    map.insert("runtime".to_string(), serde_json::to_value(runtime)?);
+                }
+            }
+            entries.push(value);
+        }
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    if configured_with_runtime.is_empty() {
+        println!("(no plugins configured)");
         return Ok(());
     }
 
@@ -1661,11 +1699,6 @@ fn list_plugins(config: &Config, plugins: &[PluginDefinition], json: bool) -> Re
             }
         }
         println!();
-    }
-
-    if configured_with_runtime.is_empty() {
-        println!("(no plugins configured)");
-        return Ok(());
     }
 
     println!("Configured plugins:");
@@ -1732,12 +1765,6 @@ struct ConfiguredPluginInfo {
     definition: PluginDefinition,
     #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<ProcessRuntimeState>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PluginListResponse {
-    configured: Vec<ConfiguredPluginInfo>,
-    available: Vec<AvailablePluginStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]

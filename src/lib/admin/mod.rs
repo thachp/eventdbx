@@ -586,27 +586,33 @@ async fn disable_plugin(
 }
 
 #[derive(Deserialize)]
-struct PluginListEnvelope {
-    configured: Vec<ConfiguredPluginInfo>,
-}
-
-#[derive(Deserialize)]
 struct ConfiguredPluginInfo {
     definition: PluginDefinition,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PluginListPayload {
+    Simple(Vec<PluginDefinition>),
+    Envelope {
+        configured: Vec<ConfiguredPluginInfo>,
+    },
+}
+
 async fn fetch_plugins() -> Result<Vec<PluginDefinition>> {
-    let envelope: PluginListEnvelope = run_cli_json(vec![
+    let payload: PluginListPayload = run_cli_json(vec![
         "plugin".to_string(),
         "list".to_string(),
         "--json".to_string(),
     ])
     .await?;
-    Ok(envelope
-        .configured
-        .into_iter()
-        .map(|info| info.definition)
-        .collect())
+    let configured = match payload {
+        PluginListPayload::Simple(definitions) => definitions,
+        PluginListPayload::Envelope { configured } => {
+            configured.into_iter().map(|info| info.definition).collect()
+        }
+    };
+    Ok(configured)
 }
 
 fn build_plugin_config_args(name: &str, request: &PluginUpsertRequest) -> Result<Vec<String>> {
