@@ -661,28 +661,27 @@ impl EventStore {
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Vec<EventRecord>> {
-        // Ensure aggregate exists
-        if self.load_meta(aggregate_type, aggregate_id)?.is_none() {
-            return Err(EventError::AggregateNotFound);
+        self.list_events_paginated(aggregate_type, aggregate_id, 0, None)
+    }
+
+    pub fn list_events_paginated(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        skip: usize,
+        take: Option<usize>,
+    ) -> Result<Vec<EventRecord>> {
+        match self.aggregate_version(aggregate_type, aggregate_id)? {
+            Some(_) => {}
+            None => return Err(EventError::AggregateNotFound),
         }
 
-        let prefix = event_prefix(aggregate_type, aggregate_id);
-        let iter = self
-            .db
-            .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
-
-        let mut events = Vec::new();
-        for item in iter {
-            let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
-            if !key.starts_with(prefix.as_slice()) {
-                break;
-            }
-            let record: EventRecord = serde_json::from_slice(&value)?;
-            let record = self.decode_record(record)?;
-            events.push(record);
+        if matches!(take, Some(0)) {
+            return Ok(Vec::new());
         }
 
-        Ok(events)
+        let from_version = skip as u64;
+        self.events_after(aggregate_type, aggregate_id, from_version, take)
     }
 
     pub fn events_after(

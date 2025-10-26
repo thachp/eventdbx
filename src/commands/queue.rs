@@ -1,7 +1,7 @@
 use std::{io::Write, path::PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::{TimeZone, Utc};
+use chrono::{Duration, TimeZone, Utc};
 use clap::{Args, Subcommand};
 
 use eventdbx::{
@@ -26,6 +26,9 @@ pub enum QueueAction {
     /// Remove all dead entries from the queue
     #[command(name = "clear")]
     Clear,
+    /// Remove completed entries from the queue
+    #[command(name = "clear-done")]
+    ClearDone(QueueClearDoneArgs),
     /// Retry dead entries, optionally filtering by job id
     #[command(name = "retry")]
     Retry(QueueRetryArgs),
@@ -36,6 +39,13 @@ pub struct QueueRetryArgs {
     /// Retry only the dead entry with this job id
     #[arg(long)]
     pub event_id: Option<SnowflakeId>,
+}
+
+#[derive(Args, Clone, Copy)]
+pub struct QueueClearDoneArgs {
+    /// Only clear done jobs created more than this many hours ago
+    #[arg(long, value_name = "HOURS")]
+    pub older_than_hours: Option<u64>,
 }
 
 pub fn execute(config_path: Option<PathBuf>, args: QueueArgs) -> Result<()> {
@@ -71,13 +81,47 @@ pub fn execute(config_path: Option<PathBuf>, args: QueueArgs) -> Result<()> {
                 return Ok(());
             }
 
-            if !confirm_clear_dead(dead_count)? {
+            if !confirm_clear("dead", dead_count)? {
                 println!("clear cancelled");
                 return Ok(());
             }
 
             let cleared = queue_store.clear_dead().map_err(anyhow::Error::from)?;
             println!("cleared {} dead job(s) from the plugin queue", cleared);
+        }
+        Some(QueueAction::ClearDone(opts)) => {
+            let status = queue_store.status().map_err(anyhow::Error::from)?;
+            let cutoff_millis = opts.older_than_hours.map(|hours| {
+                let bounded = std::cmp::min(hours, i64::MAX as u64) as i64;
+                Utc::now()
+                    .checked_sub_signed(Duration::hours(bounded))
+                    .unwrap_or_else(|| Utc.timestamp_millis_opt(0).single().unwrap())
+                    .timestamp_millis()
+            });
+
+            let done: Vec<_> = status
+                .done
+                .into_iter()
+                .filter(|job| match cutoff_millis {
+                    Some(cutoff) => job.created_at < cutoff,
+                    None => true,
+                })
+                .collect();
+
+            if done.is_empty() {
+                println!("no done plugin jobs match the provided criteria");
+                return Ok(());
+            }
+
+            if !confirm_clear("done", done.len())? {
+                println!("clear cancelled");
+                return Ok(());
+            }
+
+            let cleared = queue_store
+                .clear_done(cutoff_millis)
+                .map_err(anyhow::Error::from)?;
+            println!("cleared {} done job(s) from the plugin queue", cleared);
         }
         Some(QueueAction::Retry(retry_args)) => {
             retry_dead_jobs(&config, &queue_store, retry_args.event_id)?;
@@ -187,10 +231,10 @@ fn retry_dead_jobs(
     Ok(())
 }
 
-fn confirm_clear_dead(dead_count: usize) -> Result<bool> {
+fn confirm_clear(kind: &str, count: usize) -> Result<bool> {
     print!(
-        "This will remove {} dead plugin job(s). Type 'clear' to confirm: ",
-        dead_count
+        "This will remove {} {} plugin job(s). Type 'clear' to confirm: ",
+        count, kind
     );
     std::io::stdout().flush()?;
     let mut input = String::new();
