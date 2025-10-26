@@ -587,7 +587,12 @@ async fn disable_plugin(
 
 #[derive(Deserialize)]
 struct PluginListEnvelope {
-    configured: Vec<PluginDefinition>,
+    configured: Vec<ConfiguredPluginInfo>,
+}
+
+#[derive(Deserialize)]
+struct ConfiguredPluginInfo {
+    definition: PluginDefinition,
 }
 
 async fn fetch_plugins() -> Result<Vec<PluginDefinition>> {
@@ -597,7 +602,11 @@ async fn fetch_plugins() -> Result<Vec<PluginDefinition>> {
         "--json".to_string(),
     ])
     .await?;
-    Ok(envelope.configured)
+    Ok(envelope
+        .configured
+        .into_iter()
+        .map(|info| info.definition)
+        .collect())
 }
 
 fn build_plugin_config_args(name: &str, request: &PluginUpsertRequest) -> Result<Vec<String>> {
