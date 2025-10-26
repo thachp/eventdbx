@@ -7,6 +7,7 @@ pub mod control_capnp;
 pub mod encryption;
 pub mod error;
 pub mod merkle;
+pub mod observability;
 pub mod plugin;
 pub mod plugin_capnp;
 pub mod replication;

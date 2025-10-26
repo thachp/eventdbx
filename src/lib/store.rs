@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     str,
+    time::Instant,
 };
 
 use chrono::{DateTime, Utc};
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use json_patch::Patch;
+use metrics::{counter, histogram};
 
 use super::{
     encryption::{self, Encryptor},
@@ -691,32 +693,42 @@ impl EventStore {
         from_version: u64,
         limit: Option<usize>,
     ) -> Result<Vec<EventRecord>> {
-        let start_key = event_key(aggregate_type, aggregate_id, from_version + 1);
-        let prefix = event_prefix(aggregate_type, aggregate_id);
-        let iter = self
-            .db
-            .iterator(IteratorMode::From(start_key.as_slice(), Direction::Forward));
+        let start = Instant::now();
+        let result = (|| {
+            let start_key = event_key(aggregate_type, aggregate_id, from_version + 1);
+            let prefix = event_prefix(aggregate_type, aggregate_id);
+            let iter = self
+                .db
+                .iterator(IteratorMode::From(start_key.as_slice(), Direction::Forward));
 
-        let mut events = Vec::new();
-        for item in iter {
-            let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
-            if !key.starts_with(prefix.as_slice()) {
-                break;
-            }
-            let record: EventRecord = serde_json::from_slice(&value)?;
-            let record = self.decode_record(record)?;
-            if record.version <= from_version {
-                continue;
-            }
-            events.push(record);
-            if let Some(limit) = limit {
-                if events.len() >= limit {
+            let mut events = Vec::new();
+            for item in iter {
+                let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+                if !key.starts_with(prefix.as_slice()) {
                     break;
                 }
+                let record: EventRecord = serde_json::from_slice(&value)?;
+                let record = self.decode_record(record)?;
+                if record.version <= from_version {
+                    continue;
+                }
+                events.push(record);
+                if let Some(limit) = limit {
+                    if events.len() >= limit {
+                        break;
+                    }
+                }
             }
-        }
 
-        Ok(events)
+            Ok(events)
+        })();
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_iter_events",
+            if result.is_ok() { "ok" } else { "err" },
+            duration,
+        );
+        result
     }
 
     pub fn aggregate_version(
@@ -729,28 +741,38 @@ impl EventStore {
     }
 
     pub fn list_aggregate_ids(&self, aggregate_type: &str) -> Result<Vec<String>> {
-        let mut prefix = key_with_segments(&[PREFIX_META, aggregate_type]);
-        prefix.push(SEP);
+        let start = Instant::now();
+        let result = (|| {
+            let mut prefix = key_with_segments(&[PREFIX_META, aggregate_type]);
+            prefix.push(SEP);
 
-        let iter = self
-            .db
-            .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+            let iter = self
+                .db
+                .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
 
-        let mut ids = Vec::new();
-        for item in iter {
-            let (key, _) = item.map_err(|err| EventError::Storage(err.to_string()))?;
-            if !key.starts_with(prefix.as_slice()) {
-                break;
+            let mut ids = Vec::new();
+            for item in iter {
+                let (key, _) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+                if !key.starts_with(prefix.as_slice()) {
+                    break;
+                }
+                let remainder = &key[prefix.len()..];
+                if remainder.is_empty() {
+                    continue;
+                }
+                let id = std::str::from_utf8(remainder)
+                    .map_err(|err| EventError::Storage(err.to_string()))?;
+                ids.push(id.to_string());
             }
-            let remainder = &key[prefix.len()..];
-            if remainder.is_empty() {
-                continue;
-            }
-            let id = std::str::from_utf8(remainder)
-                .map_err(|err| EventError::Storage(err.to_string()))?;
-            ids.push(id.to_string());
-        }
-        Ok(ids)
+            Ok(ids)
+        })();
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_iter_meta_ids",
+            if result.is_ok() { "ok" } else { "err" },
+            duration,
+        );
+        result
     }
 
     pub fn verify(&self, aggregate_type: &str, aggregate_id: &str) -> Result<String> {
@@ -898,9 +920,18 @@ impl EventStore {
     }
 
     fn write_batch(&self, batch: WriteBatch) -> Result<()> {
-        self.db
+        let start = Instant::now();
+        let result = self
+            .db
             .write(batch)
-            .map_err(|err| EventError::Storage(err.to_string()))
+            .map_err(|err| EventError::Storage(err.to_string()));
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_write",
+            if result.is_ok() { "ok" } else { "err" },
+            duration,
+        );
+        result
     }
 
     pub fn aggregates(&self) -> Vec<AggregateState> {
@@ -908,12 +939,14 @@ impl EventStore {
     }
 
     pub fn aggregates_paginated(&self, skip: usize, take: Option<usize>) -> Vec<AggregateState> {
+        let start = Instant::now();
         let prefix = meta_prefix();
         let iter = self
             .db
             .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
         let mut items = Vec::new();
         let mut skipped = 0usize;
+        let mut status = "ok";
 
         for item in iter {
             let Ok((key, value)) = item else {
@@ -933,7 +966,10 @@ impl EventStore {
 
             let state = match self.load_state_map(&meta.aggregate_type, &meta.aggregate_id) {
                 Ok(state) => state,
-                Err(_) => continue,
+                Err(_) => {
+                    status = "err";
+                    continue;
+                }
             };
 
             if skipped < skip {
@@ -957,47 +993,69 @@ impl EventStore {
             }
         }
 
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op("rocksdb_iter_meta", status, duration);
         items
     }
 
     pub fn aggregate_positions(&self) -> Result<Vec<AggregatePositionEntry>> {
-        let prefix = meta_prefix();
-        let iter = self
-            .db
-            .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
-        let mut items = Vec::new();
+        let start = Instant::now();
+        let result = (|| {
+            let prefix = meta_prefix();
+            let iter = self
+                .db
+                .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+            let mut items = Vec::new();
 
-        for item in iter {
-            let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
-            if !key.starts_with(prefix.as_slice()) {
-                break;
+            for item in iter {
+                let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+                if !key.starts_with(prefix.as_slice()) {
+                    break;
+                }
+                if key.len() > prefix.len() && key[prefix.len()] != SEP {
+                    break;
+                }
+
+                let meta: AggregateMeta = serde_json::from_slice(&value)?;
+                items.push(AggregatePositionEntry {
+                    aggregate_type: meta.aggregate_type,
+                    aggregate_id: meta.aggregate_id,
+                    version: meta.version,
+                });
             }
-            if key.len() > prefix.len() && key[prefix.len()] != SEP {
-                break;
-            }
 
-            let meta: AggregateMeta = serde_json::from_slice(&value)?;
-            items.push(AggregatePositionEntry {
-                aggregate_type: meta.aggregate_type,
-                aggregate_id: meta.aggregate_id,
-                version: meta.version,
-            });
-        }
-
-        Ok(items)
+            Ok(items)
+        })();
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_iter_meta_positions",
+            if result.is_ok() { "ok" } else { "err" },
+            duration,
+        );
+        result
     }
 
     fn load_meta(&self, aggregate_type: &str, aggregate_id: &str) -> Result<Option<AggregateMeta>> {
-        let key = meta_key(aggregate_type, aggregate_id);
-        let value = self
-            .db
-            .get(key)
-            .map_err(|err| EventError::Storage(err.to_string()))?;
-        if let Some(value) = value {
-            Ok(Some(serde_json::from_slice(&value)?))
-        } else {
-            Ok(None)
-        }
+        let start = Instant::now();
+        let result = (|| {
+            let key = meta_key(aggregate_type, aggregate_id);
+            let value = self
+                .db
+                .get(key)
+                .map_err(|err| EventError::Storage(err.to_string()))?;
+            if let Some(value) = value {
+                Ok(Some(serde_json::from_slice(&value)?))
+            } else {
+                Ok(None)
+            }
+        })();
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_get_meta",
+            if result.is_ok() { "ok" } else { "err" },
+            duration,
+        );
+        result
     }
 
     pub fn create_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<()> {
@@ -1014,19 +1072,37 @@ impl EventStore {
         let meta = AggregateMeta::new(aggregate_type.to_string(), aggregate_id.to_string());
         let state: BTreeMap<String, String> = BTreeMap::new();
 
-        self.db
+        let start_meta = Instant::now();
+        let meta_result = self
+            .db
             .put(
                 meta_key(aggregate_type, aggregate_id),
                 serde_json::to_vec(&meta)?,
             )
-            .map_err(|err| EventError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()));
+        let duration_meta = start_meta.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_put_meta",
+            if meta_result.is_ok() { "ok" } else { "err" },
+            duration_meta,
+        );
+        meta_result?;
 
-        self.db
+        let start_state = Instant::now();
+        let state_result = self
+            .db
             .put(
                 state_key(aggregate_type, aggregate_id),
                 serde_json::to_vec(&state)?,
             )
-            .map_err(|err| EventError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()));
+        let duration_state = start_state.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_put_state",
+            if state_result.is_ok() { "ok" } else { "err" },
+            duration_state,
+        );
+        state_result?;
 
         Ok(())
     }
@@ -1046,13 +1122,31 @@ impl EventStore {
             )));
         }
 
-        self.db
+        let start_meta = Instant::now();
+        let meta_result = self
+            .db
             .delete(meta_key(aggregate_type, aggregate_id))
-            .map_err(|err| EventError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()));
+        let duration_meta = start_meta.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_delete_meta",
+            if meta_result.is_ok() { "ok" } else { "err" },
+            duration_meta,
+        );
+        meta_result?;
 
-        self.db
+        let start_state = Instant::now();
+        let state_result = self
+            .db
             .delete(state_key(aggregate_type, aggregate_id))
-            .map_err(|err| EventError::Storage(err.to_string()))?;
+            .map_err(|err| EventError::Storage(err.to_string()));
+        let duration_state = start_state.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_delete_state",
+            if state_result.is_ok() { "ok" } else { "err" },
+            duration_state,
+        );
+        state_result?;
 
         Ok(())
     }
@@ -1062,16 +1156,26 @@ impl EventStore {
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<BTreeMap<String, String>> {
-        let key = state_key(aggregate_type, aggregate_id);
-        let value = self
-            .db
-            .get(key)
-            .map_err(|err| EventError::Storage(err.to_string()))?;
-        if let Some(value) = value {
-            self.decode_state_map(&value)
-        } else {
-            Ok(BTreeMap::new())
-        }
+        let start = Instant::now();
+        let result = (|| {
+            let key = state_key(aggregate_type, aggregate_id);
+            let value = self
+                .db
+                .get(key)
+                .map_err(|err| EventError::Storage(err.to_string()))?;
+            if let Some(value) = value {
+                self.decode_state_map(&value)
+            } else {
+                Ok(BTreeMap::new())
+            }
+        })();
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_get_state",
+            if result.is_ok() { "ok" } else { "err" },
+            duration,
+        );
+        result
     }
 }
 
@@ -1117,6 +1221,21 @@ fn key_with_segments(parts: &[&str]) -> Vec<u8> {
         key.extend_from_slice(part.as_bytes());
     }
     key
+}
+
+fn record_store_op(operation: &'static str, status: &'static str, duration: f64) {
+    counter!(
+        "eventdbx_store_operations_total",
+        1,
+        "operation" => operation,
+        "status" => status
+    );
+    histogram!(
+        "eventdbx_store_operation_duration_seconds",
+        duration,
+        "operation" => operation,
+        "status" => status
+    );
 }
 
 fn hash_event(
