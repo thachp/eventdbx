@@ -77,7 +77,7 @@ pub enum PluginCommands {
     /// Replay stored events through a plugin
     #[command(name = "replay")]
     Replay(PluginReplayArgs),
-    /// Send a sample event to enabled plugins
+    /// Send a sample event to all enabled plugins
     #[command(name = "test")]
     Test(PluginTestArgs),
     /// List enabled plugins
@@ -1202,7 +1202,7 @@ fn run_plugin_test(
     };
 
     if targets.is_empty() {
-        println!("(no plugins enabled for event delivery)");
+        println!("(no plugins enabled)");
         return Ok(());
     }
 
