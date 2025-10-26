@@ -1305,8 +1305,14 @@ fn aggregate_verify_unknown_fails() -> Result<()> {
 }
 
 #[test]
-fn aggregate_apply_requires_schema() -> Result<()> {
+fn aggregate_apply_requires_schema_in_strict_mode() -> Result<()> {
     let cli = CliTest::new()?;
+    let _ = cli.run(&["config"])?;
+    let config_path = cli.home.join(".eventdbx").join("config.toml");
+    let mut config_contents =
+        fs::read_to_string(&config_path).context("failed to read config.toml")?;
+    config_contents = config_contents.replace("restrict = \"default\"", "restrict = \"strict\"");
+    fs::write(&config_path, config_contents).context("failed to update restrict mode")?;
     let failure = cli.run_failure(&[
         "aggregate",
         "apply",
@@ -1324,6 +1330,21 @@ fn aggregate_apply_requires_schema() -> Result<()> {
         failure.stdout,
         failure.stderr
     );
+    Ok(())
+}
+
+#[test]
+fn aggregate_apply_allows_missing_schema_in_default_mode() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&[
+        "aggregate",
+        "apply",
+        "order",
+        "order-1",
+        "order_created",
+        "--field",
+        "status=created",
+    ])?;
     Ok(())
 }
 

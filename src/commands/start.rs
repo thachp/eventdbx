@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     io::{self, Write},
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -179,10 +180,12 @@ pub fn status(config_path: Option<PathBuf>) -> Result<()> {
         Some(record) => {
             let pid = record.pid;
             if process_is_running(pid) {
+                let socket_port =
+                    resolve_socket_port(&config.socket.bind_addr).unwrap_or(config.port);
                 if let Some(started_at) = record.started_at {
                     println!(
                         "EventDBX server is running on port {} (pid {}) — restrict={} — up for {} (since {})",
-                        config.port,
+                        socket_port,
                         pid,
                         config.restrict,
                         describe_uptime(started_at),
@@ -191,7 +194,7 @@ pub fn status(config_path: Option<PathBuf>) -> Result<()> {
                 } else {
                     println!(
                         "EventDBX server is running on port {} (pid {}) — restrict={}",
-                        config.port, pid, config.restrict
+                        socket_port, pid, config.restrict
                     );
                 }
             } else {
@@ -310,9 +313,11 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
 
     drop(child);
 
+    let socket_port = resolve_socket_port(&config.socket.bind_addr).unwrap_or(config.port);
+
     println!(
         "EventDBX server is running on port {} (pid {}) since {} (restrict={})",
-        config.port,
+        socket_port,
         pid,
         started_at.to_rfc3339(),
         restrict_mode
@@ -495,6 +500,18 @@ fn force_kill_process(pid: u32) -> Result<()> {
             }
         }
     }
+}
+
+fn resolve_socket_port(bind_addr: &str) -> Option<u16> {
+    bind_addr
+        .parse::<SocketAddr>()
+        .map(|addr| addr.port())
+        .ok()
+        .or_else(|| {
+            bind_addr
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.trim().parse::<u16>().ok())
+        })
 }
 
 fn describe_uptime(started_at: chrono::DateTime<chrono::Utc>) -> String {
