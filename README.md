@@ -44,9 +44,9 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
   dbx plugin install rest
 
   # config the api to not receive events stream
-  dbx plugin config process rest --emit-events true
+  dbx plugin config process rest --emit-events false
 
-  # start the rest endpoint
+  # start the rest endpoint, default port is 8080
   dbx plugin start rest
   ```
 
