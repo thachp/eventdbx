@@ -1,104 +1,209 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% if page.title %}{{ page.title }} | {% endif %}{{ site.title }}</title>
-    <meta name="description" content="{% if page.description %}{{ page.description }}{% else %}{{ site.description }}{% endif %}">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <meta
+      name="description"
+      content="{% if page.description %}{{ page.description }}{% else %}{{ site.description }}{% endif %}"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
     <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: {
-                        brand: {
-                            DEFAULT: "#ff4f6d",
-                            50: "#fff0f3",
-                            100: "#ffd8e0",
-                            200: "#ffb0c2",
-                            300: "#ff88a3",
-                            400: "#ff607f",
-                            500: "#ff4f6d",
-                            600: "#e63b59",
-                            700: "#c12945",
-                            800: "#9b1c38",
-                            900: "#701229"
-                        }
-                    },
-                    fontFamily: {
-                        sans: ["Inter", "-apple-system", "BlinkMacSystemFont", "\"Segoe UI\"", "Helvetica", "Arial", "sans-serif"],
-                        mono: ["JetBrains Mono", "\"Fira Mono\"", "Menlo", "monospace"]
-                    },
-                    boxShadow: {
-                        glow: "0 25px 60px rgba(255, 79, 109, 0.35)"
-                    }
-                }
-            }
-        };
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              brand: {
+                DEFAULT: '#ff4f6d',
+                50: '#fff0f3',
+                100: '#ffd8e0',
+                200: '#ffb0c2',
+                300: '#ff88a3',
+                400: '#ff607f',
+                500: '#ff4f6d',
+                600: '#e63b59',
+                700: '#c12945',
+                800: '#9b1c38',
+                900: '#701229',
+              },
+            },
+            fontFamily: {
+              sans: [
+                'Inter',
+                '-apple-system',
+                'BlinkMacSystemFont',
+                '"Segoe UI"',
+                'Helvetica',
+                'Arial',
+                'sans-serif',
+              ],
+              mono: ['JetBrains Mono', '"Fira Mono"', 'Menlo', 'monospace'],
+            },
+            boxShadow: {
+              glow: '0 25px 60px rgba(255, 79, 109, 0.35)',
+            },
+          },
+        },
+      };
     </script>
     <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
-    <link rel="stylesheet" href="{{ '/assets/styles.css' | relative_url }}">
+    <link rel="stylesheet" href="{{ '/assets/styles.css' | relative_url }}" />
     <script defer src="{{ '/assets/script.js' | relative_url }}"></script>
-</head>
-<body class="font-sans bg-slate-950 text-slate-100 min-h-screen flex flex-col" style="background-image: radial-gradient(circle at top right, rgba(255, 79, 109, 0.2), transparent 45%), linear-gradient(180deg, #0b1324 0%, #0e162c 100%);">
+  </head>
+  <body
+    class="font-sans bg-slate-950 text-slate-100 min-h-screen flex flex-col"
+    style="
+      background-image: radial-gradient(
+          circle at top right,
+          rgba(255, 79, 109, 0.2),
+          transparent 45%
+        ),
+        linear-gradient(180deg, #0b1324 0%, #0e162c 100%);
+    "
+  >
     <header class="sticky top-0 z-50 border-b border-white/10 bg-slate-950/70 backdrop-blur">
-        <div class="relative mx-auto flex h-20 w-full max-w-6xl items-center px-6">
-            <a class="flex items-center gap-3 text-lg font-semibold tracking-tight text-white" href="{{ '/' | relative_url }}">
-                <span class="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-brand to-brand-400 text-slate-950 font-bold">E</span>
-                {{ site.title }}
-            </a>
-            <button class="nav-toggle absolute right-6 flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-slate-900/60 text-white transition hover:border-brand/60 hover:text-brand md:hidden" type="button" aria-label="Toggle navigation" aria-expanded="false" data-nav-toggle>
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                    <path fill-rule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd" />
-                </svg>
-                <span class="sr-only">Toggle navigation</span>
-            </button>
-            <nav class="hidden flex-col gap-3 rounded-2xl border border-white/10 bg-slate-950/95 p-6 text-sm font-medium text-slate-200 shadow-2xl backdrop-blur-xl transition md:static md:ml-auto md:flex md:flex-row md:items-center md:gap-8 md:border-0 md:bg-transparent md:p-0 md:text-base md:text-slate-200 md:shadow-none" data-mobile-nav>
-                <a class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'home' %}text-white{% endif %}" href="{{ '/' | relative_url }}">Home</a>
-                <a class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'guides' %}text-white{% endif %}" href="{{ '/getting-started/' | relative_url }}">Guide</a>
-                <a class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'apis' %}text-white{% endif %}" href="{{ '/apis/' | relative_url }}">APIs</a>
-                <a class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'cli' %}text-white{% endif %}" href="{{ '/cli/' | relative_url }}">CLI</a>
-                <a class="rounded-lg px-3 py-2 transition hover:text-brand" href="https://github.com/thachp/eventdbx">GitHub</a>
-            </nav>
-        </div>
+      <div class="relative mx-auto flex h-20 w-full max-w-6xl items-center px-6">
+        <a
+          class="flex items-center gap-3 text-lg font-semibold tracking-tight text-white"
+          href="{{ '/' | relative_url }}"
+        >
+          <span
+            class="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-brand to-brand-400 text-slate-950 font-bold"
+            >E</span
+          >
+          {{ site.title }}
+        </a>
+        <button
+          class="nav-toggle absolute right-6 flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-slate-900/60 text-white transition hover:border-brand/60 hover:text-brand md:hidden"
+          type="button"
+          aria-label="Toggle navigation"
+          aria-expanded="false"
+          data-nav-toggle
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            class="h-5 w-5"
+            viewBox="0 0 20 20"
+            fill="currentColor"
+          >
+            <path
+              fill-rule="evenodd"
+              d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z"
+              clip-rule="evenodd"
+            />
+          </svg>
+          <span class="sr-only">Toggle navigation</span>
+        </button>
+        <nav
+          class="hidden flex-col gap-3 rounded-2xl border border-white/10 bg-slate-950/95 p-6 text-sm font-medium text-slate-200 shadow-2xl backdrop-blur-xl transition md:static md:ml-auto md:flex md:flex-row md:items-center md:gap-8 md:border-0 md:bg-transparent md:p-0 md:text-base md:text-slate-200 md:shadow-none"
+          data-mobile-nav
+        >
+          <a
+            class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'home' %}text-white{% endif %}"
+            href="{{ '/' | relative_url }}"
+            >Home</a
+          >
+          <a
+            class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'guides' %}text-white{% endif %}"
+            href="{{ '/getting-started/' | relative_url }}"
+            >Guide</a
+          >
+          <a
+            class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'apis' %}text-white{% endif %}"
+            href="{{ '/apis/' | relative_url }}"
+            >APIs</a
+          >
+          <a
+            class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'cli' %}text-white{% endif %}"
+            href="{{ '/cli/' | relative_url }}"
+            >CLI</a
+          >
+          <a
+            class="rounded-lg px-3 py-2 transition hover:text-white {% if page.nav_id == 'plugins' %}text-white{% endif %}"
+            href="{{ '/plugins/' | relative_url }}"
+            >Plugins</a
+          >
+          <a
+            class="rounded-lg px-3 py-2 transition hover:text-brand"
+            href="https://github.com/thachp/eventdbx"
+            >GitHub</a
+          >
+        </nav>
+      </div>
     </header>
     <main class="flex-1">
-        <div class="mx-auto w-full max-w-5xl px-6 py-16">
-            <article class="prose prose-invert prose-lg max-w-none prose-pre:bg-slate-900 prose-pre:text-slate-100 prose-pre:rounded-2xl prose-code:bg-slate-900/60 prose-code:text-slate-100 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded">
-                {{ content }}
-            </article>
-        </div>
+      <div class="mx-auto w-full max-w-5xl px-6 py-16">
+        <article
+          class="prose prose-invert prose-lg max-w-none prose-pre:bg-slate-900 prose-pre:text-slate-100 prose-pre:rounded-2xl prose-code:bg-slate-900/60 prose-code:text-slate-100 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded"
+        >
+          {{ content }}
+        </article>
+      </div>
     </main>
     <footer class="border-t border-white/10 bg-slate-950/80 py-16">
-        <div class="mx-auto grid max-w-6xl gap-12 px-6 md:grid-cols-3">
-            <div>
-                <div class="text-lg font-semibold text-white">{{ site.title }}</div>
-                <p class="mt-4 max-w-xs text-sm text-slate-300">Immutable, event-sourced storage for teams that need to trust every write.</p>
-            </div>
-            <div>
-                <h4 class="text-sm font-semibold uppercase tracking-wide text-slate-400">Docs</h4>
-                <ul class="mt-4 space-y-2 text-sm text-slate-300">
-                    <li><a class="transition hover:text-white" href="{{ '/getting-started/' | relative_url }}">Getting started</a></li>
-                    <li><a class="transition hover:text-white" href="{{ '/apis/' | relative_url }}">API reference</a></li>
-                    <li><a class="transition hover:text-white" href="{{ '/cli/' | relative_url }}">CLI commands</a></li>
-                </ul>
-            </div>
-            <div>
-                <h4 class="text-sm font-semibold uppercase tracking-wide text-slate-400">Community</h4>
-                <ul class="mt-4 space-y-2 text-sm text-slate-300">
-                    <li><a class="transition hover:text-white" href="https://github.com/thachp/eventdbx">GitHub</a></li>
-                    <li><a class="transition hover:text-white" href="https://github.com/thachp/eventdbx/issues">Issue tracker</a></li>
-                    <li><a class="transition hover:text-white" href="mailto:team@eventdbx.io">team@eventdbx.io</a></li>
-                </ul>
-            </div>
+      <div class="mx-auto grid max-w-6xl gap-12 px-6 md:grid-cols-3">
+        <div>
+          <div class="text-lg font-semibold text-white">{{ site.title }}</div>
+          <p class="mt-4 max-w-xs text-sm text-slate-300">
+            Immutable, event-sourced storage for teams that need to trust every write.
+          </p>
         </div>
-        <div class="mx-auto mt-12 flex max-w-6xl flex-wrap items-center gap-4 px-6 text-xs text-slate-500">
-            <div>&copy; EventDBX contributors.</div>
-            <div>MIT Licensed.</div>
+        <div>
+          <h4 class="text-sm font-semibold uppercase tracking-wide text-slate-400">Docs</h4>
+          <ul class="mt-4 space-y-2 text-sm text-slate-300">
+            <li>
+              <a class="transition hover:text-white" href="{{ '/getting-started/' | relative_url }}"
+                >Getting started</a
+              >
+            </li>
+            <li>
+              <a class="transition hover:text-white" href="{{ '/apis/' | relative_url }}"
+                >API reference</a
+              >
+            </li>
+            <li>
+              <a class="transition hover:text-white" href="{{ '/cli/' | relative_url }}"
+                >CLI commands</a
+              >
+            </li>
+          </ul>
         </div>
+        <div>
+          <h4 class="text-sm font-semibold uppercase tracking-wide text-slate-400">Community</h4>
+          <ul class="mt-4 space-y-2 text-sm text-slate-300">
+            <li>
+              <a class="transition hover:text-white" href="https://github.com/thachp/eventdbx"
+                >GitHub</a
+              >
+            </li>
+            <li>
+              <a
+                class="transition hover:text-white"
+                href="https://github.com/thachp/eventdbx/issues"
+                >Issue tracker</a
+              >
+            </li>
+            <li>
+              <a class="transition hover:text-white" href="mailto:hello@eventdbx.com"
+                >hello@eventdbx.com</a
+              >
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div
+        class="mx-auto mt-12 flex max-w-6xl flex-wrap items-center gap-4 px-6 text-xs text-slate-500"
+      >
+        <div>&copy; © 2025 Patrick Thach and contributors.</div>
+        <div>MIT Licensed.</div>
+      </div>
     </footer>
-</body>
+  </body>
 </html>

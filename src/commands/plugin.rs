@@ -23,6 +23,7 @@ use eventdbx::config::{
 use eventdbx::plugin::{
     Plugin, PluginDelivery, establish_connection, instantiate_plugin,
     registry::{self, InstalledPluginRecord, PluginSource},
+    status_file_path,
 };
 use eventdbx::store::{
     ActorClaims, AggregateState, EventMetadata, EventRecord, EventStore, payload_to_map,
@@ -1621,9 +1622,22 @@ fn list_plugins(config: &Config, plugins: &[PluginDefinition], json: bool) -> Re
         }
     };
 
+    let configured_with_runtime: Vec<ConfiguredPluginInfo> = plugins
+        .iter()
+        .cloned()
+        .map(|definition| {
+            let runtime = process_instance_identifier(&definition)
+                .map(|identifier| read_process_runtime_state(&config.data_dir, &identifier));
+            ConfiguredPluginInfo {
+                definition,
+                runtime,
+            }
+        })
+        .collect();
+
     if json {
         let response = PluginListResponse {
-            configured: plugins.to_vec(),
+            configured: configured_with_runtime.clone(),
             available: available.clone(),
         };
         println!("{}", serde_json::to_string_pretty(&response)?);
@@ -1649,13 +1663,14 @@ fn list_plugins(config: &Config, plugins: &[PluginDefinition], json: bool) -> Re
         println!();
     }
 
-    if plugins.is_empty() {
+    if configured_with_runtime.is_empty() {
         println!("(no plugins configured)");
         return Ok(());
     }
 
     println!("Configured plugins:");
-    for plugin in plugins {
+    for info in &configured_with_runtime {
+        let plugin = &info.definition;
         let kind = plugin_kind_name(plugin.config.kind());
         let status = if plugin.enabled {
             "enabled"
@@ -1670,15 +1685,32 @@ fn list_plugins(config: &Config, plugins: &[PluginDefinition], json: bool) -> Re
             }
         });
 
+        let runtime_note = info
+            .runtime
+            .as_ref()
+            .map(|state| format_process_runtime(state));
+
         if let Some(name) = &plugin.name {
             match suggestion {
-                Some(hint) => println!("  - {} ({}) - {}{}", kind, name, status, hint),
-                None => println!("  - {} ({}) - {}", kind, name, status),
+                Some(hint) => match &runtime_note {
+                    Some(rt) => println!("  - {} ({}) - {}{}; {}", kind, name, status, hint, rt),
+                    None => println!("  - {} ({}) - {}{}", kind, name, status, hint),
+                },
+                None => match &runtime_note {
+                    Some(rt) => println!("  - {} ({}) - {}; {}", kind, name, status, rt),
+                    None => println!("  - {} ({}) - {}", kind, name, status),
+                },
             }
         } else {
             match suggestion {
-                Some(hint) => println!("  - {} - {}{}", kind, status, hint),
-                None => println!("  - {} - {}", kind, status),
+                Some(hint) => match &runtime_note {
+                    Some(rt) => println!("  - {} - {}{}; {}", kind, status, hint, rt),
+                    None => println!("  - {} - {}{}", kind, status, hint),
+                },
+                None => match &runtime_note {
+                    Some(rt) => println!("  - {} - {}; {}", kind, status, rt),
+                    None => println!("  - {} - {}", kind, status),
+                },
             }
         }
     }
@@ -1695,10 +1727,25 @@ struct AvailablePluginStatus {
     installed_versions: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+struct ConfiguredPluginInfo {
+    definition: PluginDefinition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<ProcessRuntimeState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct PluginListResponse {
-    configured: Vec<PluginDefinition>,
+    configured: Vec<ConfiguredPluginInfo>,
     available: Vec<AvailablePluginStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+enum ProcessRuntimeState {
+    Running { pid: u32 },
+    Stopped,
+    Unknown,
 }
 
 fn fetch_available_plugins(
@@ -1752,6 +1799,42 @@ fn normalize_plugin_catalog_entry(item: &GitHubContentItem) -> Option<String> {
             .or_else(|| item.name.strip_suffix(".yml"))
             .map(|value| value.to_string()),
         _ => None,
+    }
+}
+
+fn process_instance_identifier(definition: &PluginDefinition) -> Option<String> {
+    match &definition.config {
+        PluginConfig::Process(settings) => Some(
+            definition
+                .name
+                .clone()
+                .unwrap_or_else(|| settings.name.clone()),
+        ),
+        _ => None,
+    }
+}
+
+fn read_process_runtime_state(data_dir: &Path, identifier: &str) -> ProcessRuntimeState {
+    let path = status_file_path(data_dir, identifier);
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let pid_str = contents.trim();
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                ProcessRuntimeState::Running { pid }
+            } else {
+                ProcessRuntimeState::Unknown
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => ProcessRuntimeState::Stopped,
+        Err(_) => ProcessRuntimeState::Unknown,
+    }
+}
+
+fn format_process_runtime(state: &ProcessRuntimeState) -> String {
+    match state {
+        ProcessRuntimeState::Running { pid } => format!("process running (pid {})", pid),
+        ProcessRuntimeState::Stopped => "process stopped".to_string(),
+        ProcessRuntimeState::Unknown => "process status unknown".to_string(),
     }
 }
 

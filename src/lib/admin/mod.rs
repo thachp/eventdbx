@@ -468,12 +468,7 @@ async fn delete_remote(
 }
 
 async fn list_plugins(State(_state): State<AppState>) -> Result<Json<Vec<PluginDefinition>>> {
-    let definitions: Vec<PluginDefinition> = run_cli_json(vec![
-        "plugin".to_string(),
-        "list".to_string(),
-        "--json".to_string(),
-    ])
-    .await?;
+    let definitions = fetch_plugins().await?;
     Ok(Json(definitions))
 }
 
@@ -590,13 +585,19 @@ async fn disable_plugin(
     Ok(Json(definition))
 }
 
+#[derive(Deserialize)]
+struct PluginListEnvelope {
+    configured: Vec<PluginDefinition>,
+}
+
 async fn fetch_plugins() -> Result<Vec<PluginDefinition>> {
-    run_cli_json(vec![
+    let envelope: PluginListEnvelope = run_cli_json(vec![
         "plugin".to_string(),
         "list".to_string(),
         "--json".to_string(),
     ])
-    .await
+    .await?;
+    Ok(envelope.configured)
 }
 
 fn build_plugin_config_args(name: &str, request: &PluginUpsertRequest) -> Result<Vec<String>> {

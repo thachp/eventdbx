@@ -24,6 +24,7 @@ use http::HttpPlugin;
 mod log;
 use log::LogPlugin;
 use process::ProcessPlugin;
+pub use process::status_file_path;
 
 pub struct PluginDelivery<'a> {
     pub record: Option<&'a EventRecord>,
