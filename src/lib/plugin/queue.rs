@@ -125,9 +125,9 @@ impl PluginQueueStore {
 
         metrics::counter!(
             "eventdbx_plugin_jobs_enqueued_total",
-            1,
-            "plugin" => plugin.to_string()
-        );
+            "plugin" => record.plugin.clone()
+        )
+        .increment(1);
 
         Ok(record)
     }
@@ -196,11 +196,9 @@ impl PluginQueueStore {
             job.last_error = None;
         })?;
 
-        metrics::counter!(
-            "eventdbx_plugin_jobs_completed_total",
-            1,
-            "plugin" => job.plugin.clone()
-        );
+        let plugin_label = job.plugin.clone();
+        metrics::counter!("eventdbx_plugin_jobs_completed_total", "plugin" => plugin_label)
+            .increment(1);
 
         Ok(job)
     }
@@ -224,11 +222,9 @@ impl PluginQueueStore {
             }
         })?;
 
-        metrics::counter!(
-            "eventdbx_plugin_jobs_failed_total",
-            1,
-            "plugin" => job.plugin.clone()
-        );
+        let plugin_label = job.plugin.clone();
+        metrics::counter!("eventdbx_plugin_jobs_failed_total", "plugin" => plugin_label)
+            .increment(1);
 
         Ok(job)
     }
@@ -411,26 +407,14 @@ impl PluginQueueStore {
         status.processing = self.collect_jobs(JobStatus::Processing)?;
         status.done = self.collect_jobs(JobStatus::Done)?;
         status.dead = self.collect_jobs(JobStatus::Dead)?;
-        metrics::gauge!(
-            "eventdbx_plugin_queue_jobs",
-            status.pending.len() as f64,
-            "state" => "pending"
-        );
-        metrics::gauge!(
-            "eventdbx_plugin_queue_jobs",
-            status.processing.len() as f64,
-            "state" => "processing"
-        );
-        metrics::gauge!(
-            "eventdbx_plugin_queue_jobs",
-            status.done.len() as f64,
-            "state" => "done"
-        );
-        metrics::gauge!(
-            "eventdbx_plugin_queue_jobs",
-            status.dead.len() as f64,
-            "state" => "dead"
-        );
+        metrics::gauge!("eventdbx_plugin_queue_jobs", "state" => "pending")
+            .set(status.pending.len() as f64);
+        metrics::gauge!("eventdbx_plugin_queue_jobs", "state" => "processing")
+            .set(status.processing.len() as f64);
+        metrics::gauge!("eventdbx_plugin_queue_jobs", "state" => "done")
+            .set(status.done.len() as f64);
+        metrics::gauge!("eventdbx_plugin_queue_jobs", "state" => "dead")
+            .set(status.dead.len() as f64);
         Ok(status)
     }
 
