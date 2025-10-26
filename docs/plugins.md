@@ -58,6 +58,22 @@ dbx queue clear      # Clear dead jobs (asks for confirmation)
 
 Each job prints its plugin label, status, attempt count, next retry deadline, and last error message. Jobs live in `~/.eventdbx/plugin_queue.db`; the data is JSON-encoded so you can inspect it manually if needed.
 
+### Automatic pruning
+
+EventDBX trims the `done` bucket in the background so completed jobs do not grow without bound. By default the daemon removes jobs after 24 hours and evaluates the queue every five minutes. Tune the policy in `config.toml`:
+
+```toml
+[plugin_queue.prune]
+# Drop done jobs older than a day (set to 0 to disable age-based pruning).
+done_ttl_secs = 86400
+# Minimum delay between pruning passes. Values lower than 60 seconds are rounded up.
+interval_secs = 300
+# Optional ceiling for the number of done jobs to retain. Omit to keep all jobs within the TTL.
+max_done_jobs = 500
+```
+
+Use `dbx queue clear-done --older-than-hours <hours>` for an ad-hoc cleanup when you need to reclaim space immediately.
+
 ## Extending EventDBX
 
 You can extend EventDBX in two ways:

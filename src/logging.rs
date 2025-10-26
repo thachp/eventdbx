@@ -1,19 +1,25 @@
 use std::{
+    cmp::Reverse,
     fs,
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
+    time::SystemTime,
 };
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate};
+use flate2::{Compression, write::GzEncoder};
 use parking_lot::Mutex;
+use std::ffi::OsStr;
+use tracing::warn;
 use tracing_appender::non_blocking::{self, WorkerGuard};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 const LOG_DIR_ENV: &str = "EVENTDBX_LOG_DIR";
 const LOG_PREFIX: &str = "eventdbx";
 const ACTIVE_FILE_NAME: &str = "eventdbx.log";
+const MAX_RETAINED_LOGS: usize = 14;
 
 static FILE_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 static PANIC_HOOK: OnceLock<()> = OnceLock::new();
@@ -125,6 +131,7 @@ impl DailyRotatingWriter {
                     rotated_path.display()
                 )
             })?;
+            Self::finalize_rotated_file(log_dir, &rotated_path);
             return Ok(());
         }
 
@@ -136,6 +143,7 @@ impl DailyRotatingWriter {
                 rotated_path.display()
             )
         })?;
+        Self::finalize_rotated_file(log_dir, &rotated_path);
         Ok(())
     }
 
@@ -167,6 +175,7 @@ impl DailyRotatingWriter {
                     rotated_path.display()
                 )
             })?;
+            Self::finalize_rotated_file(&self.inner.log_dir, &rotated_path);
         }
 
         state.file = Some(Self::open_writer(&active_path)?);
@@ -185,6 +194,100 @@ impl DailyRotatingWriter {
             counter += 1;
         }
         candidate
+    }
+
+    fn finalize_rotated_file(log_dir: &Path, rotated_path: &Path) {
+        if let Err(err) = Self::compress_file(rotated_path) {
+            warn!(
+                "failed to compress rotated log {}: {}",
+                rotated_path.display(),
+                err
+            );
+        }
+        if let Err(err) = Self::enforce_retention(log_dir) {
+            warn!(
+                "failed to enforce log retention in {}: {}",
+                log_dir.display(),
+                err
+            );
+        }
+    }
+
+    fn compress_file(path: &Path) -> Result<PathBuf> {
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("gz"))
+            .unwrap_or(false)
+        {
+            return Ok(path.to_path_buf());
+        }
+
+        let new_extension = match path.extension().and_then(|ext| ext.to_str()) {
+            Some(ext) if !ext.is_empty() => format!("{ext}.gz"),
+            _ => "log.gz".to_string(),
+        };
+        let gz_path = path.with_extension(new_extension);
+
+        let mut input = fs::File::open(path)
+            .with_context(|| format!("failed to open {} for compression", path.display()))?;
+        let output = fs::File::create(&gz_path)
+            .with_context(|| format!("failed to create compressed log {}", gz_path.display()))?;
+        let mut encoder = GzEncoder::new(output, Compression::default());
+        io::copy(&mut input, &mut encoder)
+            .with_context(|| format!("failed to compress {}", path.display()))?;
+        let _ = encoder
+            .finish()
+            .with_context(|| format!("failed to finish compression for {}", gz_path.display()))?;
+        drop(input);
+        fs::remove_file(path)
+            .with_context(|| format!("failed to remove uncompressed log {}", path.display()))?;
+
+        Ok(gz_path)
+    }
+
+    fn enforce_retention(log_dir: &Path) -> Result<()> {
+        let mut entries: Vec<(SystemTime, PathBuf)> = Vec::new();
+        for entry in fs::read_dir(log_dir)
+            .with_context(|| format!("failed to inspect log directory {}", log_dir.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!(
+                    "failed to inspect log directory entry in {}",
+                    log_dir.display()
+                )
+            })?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let file_name = match path.file_name().and_then(OsStr::to_str) {
+                Some(name) => name,
+                None => continue,
+            };
+
+            if file_name == ACTIVE_FILE_NAME || !file_name.starts_with(LOG_PREFIX) {
+                continue;
+            }
+
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("failed to read metadata for {}", path.display()))?;
+            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            entries.push((modified, path));
+        }
+
+        entries.sort_by_key(|(modified, _)| Reverse(*modified));
+        while entries.len() > MAX_RETAINED_LOGS {
+            if let Some((_, path)) = entries.pop() {
+                if let Err(err) = fs::remove_file(&path) {
+                    warn!("failed to remove expired log {}: {}", path.display(), err);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn active_path(&self) -> PathBuf {

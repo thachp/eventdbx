@@ -155,6 +155,32 @@ impl Default for AuthConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginQueueConfig {
+    #[serde(default = "default_plugin_queue_prune")]
+    pub prune: PluginQueuePruneConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginQueuePruneConfig {
+    #[serde(default = "default_queue_prune_done_ttl_secs")]
+    pub done_ttl_secs: u64,
+    #[serde(default = "default_queue_prune_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default)]
+    pub max_done_jobs: Option<usize>,
+}
+
+impl Default for PluginQueuePruneConfig {
+    fn default() -> Self {
+        Self {
+            done_ttl_secs: default_queue_prune_done_ttl_secs(),
+            interval_secs: default_queue_prune_interval_secs(),
+            max_done_jobs: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub port: u16,
@@ -179,6 +205,8 @@ pub struct Config {
     pub page_limit: usize,
     #[serde(default = "default_plugin_max_attempts")]
     pub plugin_max_attempts: u32,
+    #[serde(default)]
+    pub plugin_queue: PluginQueueConfig,
     #[serde(default)]
     pub replication: ReplicationConfig,
     #[serde(default)]
@@ -213,6 +241,7 @@ impl Default for Config {
             list_page_size: default_list_page_size(),
             page_limit: default_page_limit(),
             plugin_max_attempts: default_plugin_max_attempts(),
+            plugin_queue: PluginQueueConfig::default(),
             replication: ReplicationConfig::default(),
             remotes: BTreeMap::new(),
             grpc: GrpcApiConfig::default(),
@@ -840,6 +869,18 @@ fn default_cache_threshold() -> usize {
 
 fn default_api_config() -> ApiConfig {
     ApiConfig::default()
+}
+
+fn default_plugin_queue_prune() -> PluginQueuePruneConfig {
+    PluginQueuePruneConfig::default()
+}
+
+fn default_queue_prune_done_ttl_secs() -> u64 {
+    86_400
+}
+
+fn default_queue_prune_interval_secs() -> u64 {
+    300
 }
 
 fn default_identity_key() -> PathBuf {

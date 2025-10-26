@@ -1,11 +1,15 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use parking_lot::Mutex;
 use serde_json::Value;
 use tracing::{error, warn};
 
 use crate::{
-    config::{Config, PluginConfig, PluginDefinition, PluginKind, PluginPayloadMode},
+    config::{
+        Config, PluginConfig, PluginDefinition, PluginKind, PluginPayloadMode,
+        PluginQueuePruneConfig,
+    },
     error::{EventError, Result},
     schema::AggregateSchema,
     store::{AggregateState, EventRecord},
@@ -44,11 +48,59 @@ struct PluginEntry {
     emit_events: bool,
 }
 
+struct QueuePruner {
+    policy: PluginQueuePruneConfig,
+    last_prune_ms: Mutex<Option<i64>>,
+}
+
+impl QueuePruner {
+    fn from_config(policy: PluginQueuePruneConfig) -> Option<Self> {
+        if policy.done_ttl_secs == 0 && policy.max_done_jobs.unwrap_or(0) == 0 {
+            return None;
+        }
+        Some(Self {
+            policy,
+            last_prune_ms: Mutex::new(None),
+        })
+    }
+
+    fn interval_millis(&self) -> i64 {
+        let secs = self.policy.interval_secs.max(60);
+        let millis = secs.saturating_mul(1_000);
+        millis.min(i64::MAX as u64) as i64
+    }
+
+    fn cutoff_millis(&self, now: i64) -> Option<i64> {
+        if self.policy.done_ttl_secs == 0 {
+            return None;
+        }
+        let millis = self.policy.done_ttl_secs.saturating_mul(1_000);
+        let ttl = millis.min(i64::MAX as u64) as i64;
+        Some(now.saturating_sub(ttl))
+    }
+
+    fn max_done_jobs(&self) -> Option<usize> {
+        self.policy.max_done_jobs
+    }
+
+    fn should_run(&self, now: i64) -> bool {
+        let mut guard = self.last_prune_ms.lock();
+        if let Some(previous) = *guard {
+            if now - previous < self.interval_millis() {
+                return false;
+            }
+        }
+        *guard = Some(now);
+        true
+    }
+}
+
 #[derive(Clone)]
 pub struct PluginManager {
     plugins: Arc<Vec<PluginEntry>>,
     queue: Option<PluginQueueStore>,
     max_attempts: u8,
+    queue_pruner: Option<Arc<QueuePruner>>,
 }
 
 impl PluginManager {
@@ -88,10 +140,16 @@ impl PluginManager {
             }
         };
 
+        let queue_pruner = queue
+            .as_ref()
+            .and_then(|_| QueuePruner::from_config(config.plugin_queue.prune.clone()))
+            .map(Arc::new);
+
         Ok(Self {
             plugins: Arc::new(entries),
             queue,
             max_attempts: config.plugin_max_attempts.min(u8::MAX as u32) as u8,
+            queue_pruner,
         })
     }
 
@@ -119,6 +177,7 @@ impl PluginManager {
                 let now = Utc::now().timestamp_millis();
                 match queue.enqueue_job(&entry.label, payload_value, now) {
                     Ok(_) => {
+                        self.maybe_prune_done(queue, now);
                         if let Err(err) = self.process_jobs_for_plugin(queue, entry) {
                             warn!(
                                 target: "eventdbx.plugin",
@@ -189,6 +248,7 @@ impl PluginManager {
             return Ok(());
         }
         let now = Utc::now().timestamp_millis();
+        self.maybe_prune_done(queue, now);
         let _ = queue.recover_stuck_jobs(&entry.label, now, self.max_attempts);
 
         loop {
@@ -262,6 +322,38 @@ impl PluginManager {
         }
         Ok(())
     }
+
+    fn maybe_prune_done(&self, queue: &PluginQueueStore, now: i64) {
+        let Some(pruner) = self.queue_pruner.as_ref() else {
+            return;
+        };
+
+        if !pruner.should_run(now) {
+            return;
+        }
+
+        if let Some(cutoff) = pruner.cutoff_millis(now) {
+            if let Err(err) = queue.clear_done(Some(cutoff)) {
+                warn!(
+                    target: "eventdbx.plugin",
+                    "failed to prune done plugin jobs older than {}: {}",
+                    cutoff,
+                    err
+                );
+            }
+        }
+
+        if let Some(limit) = pruner.max_done_jobs() {
+            if let Err(err) = queue.truncate_done(limit) {
+                warn!(
+                    target: "eventdbx.plugin",
+                    "failed to enforce done plugin job limit {}: {}",
+                    limit,
+                    err
+                );
+            }
+        }
+    }
 }
 
 fn sanitized_record_for_mode(mode: PluginPayloadMode, record: &EventRecord) -> Option<EventRecord> {
@@ -313,6 +405,7 @@ fn build_job_payload(
 mod tests {
     use super::*;
     use crate::{
+        config::PluginQueuePruneConfig,
         schema::AggregateSchema,
         snowflake::SnowflakeId,
         store::{AggregateState, EventMetadata, EventRecord},
@@ -444,6 +537,7 @@ mod tests {
             }]),
             queue: Some(queue_store.clone()),
             max_attempts: 3,
+            queue_pruner: None,
         };
 
         let (record, state) = sample_record(7);
@@ -472,6 +566,7 @@ mod tests {
             }]),
             queue: Some(queue_store.clone()),
             max_attempts: 0,
+            queue_pruner: None,
         };
 
         let (record, state) = sample_record(15);
@@ -491,6 +586,7 @@ mod tests {
             }]),
             queue: Some(queue_store.clone()),
             max_attempts: 3,
+            queue_pruner: None,
         };
         success_manager.dispatch_pending()?;
 
@@ -498,6 +594,75 @@ mod tests {
         assert!(status.pending.is_empty());
         assert!(status.processing.is_empty());
         assert_eq!(status.done.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn prune_removes_old_done_jobs() -> Result<()> {
+        let temp = TempDir::new().expect("tempdir");
+        let queue_path = temp.path().join("queue.db");
+        let queue_store = PluginQueueStore::open(queue_path.as_path())?;
+
+        let now = Utc::now().timestamp_millis();
+        let old_job = queue_store.enqueue_job("rest", json!({"kind": "old"}), now - 120_000)?;
+        queue_store.complete_job(old_job.id)?;
+
+        let fresh_job = queue_store.enqueue_job("rest", json!({"kind": "fresh"}), now)?;
+        queue_store.complete_job(fresh_job.id)?;
+
+        let pruner = QueuePruner::from_config(PluginQueuePruneConfig {
+            done_ttl_secs: 60,
+            interval_secs: 0,
+            max_done_jobs: None,
+        })
+        .expect("pruner configured");
+
+        let manager = PluginManager {
+            plugins: Arc::new(Vec::new()),
+            queue: Some(queue_store.clone()),
+            max_attempts: 3,
+            queue_pruner: Some(Arc::new(pruner)),
+        };
+
+        manager.maybe_prune_done(&queue_store, now);
+
+        let status = queue_store.status()?;
+        assert_eq!(status.done.len(), 1);
+        assert_eq!(status.done[0].id, fresh_job.id);
+        Ok(())
+    }
+
+    #[test]
+    fn prune_enforces_done_limit() -> Result<()> {
+        let temp = TempDir::new().expect("tempdir");
+        let queue_path = temp.path().join("queue.db");
+        let queue_store = PluginQueueStore::open(queue_path.as_path())?;
+
+        let now = Utc::now().timestamp_millis();
+        for idx in 0..4 {
+            let created_at = now + idx as i64;
+            let job = queue_store.enqueue_job("rest", json!({"seq": idx}), created_at)?;
+            queue_store.complete_job(job.id)?;
+        }
+
+        let pruner = QueuePruner::from_config(PluginQueuePruneConfig {
+            done_ttl_secs: 0,
+            interval_secs: 0,
+            max_done_jobs: Some(2),
+        })
+        .expect("pruner configured");
+
+        let manager = PluginManager {
+            plugins: Arc::new(Vec::new()),
+            queue: Some(queue_store.clone()),
+            max_attempts: 3,
+            queue_pruner: Some(Arc::new(pruner)),
+        };
+
+        manager.maybe_prune_done(&queue_store, now);
+
+        let status = queue_store.status()?;
+        assert_eq!(status.done.len(), 2);
         Ok(())
     }
 }

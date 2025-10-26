@@ -131,13 +131,12 @@ impl CoreContext {
             effective_take = self.page_limit;
         }
 
-        let events = self
-            .store
-            .list_events(aggregate_type, aggregate_id)?
-            .into_iter()
-            .skip(skip)
-            .take(effective_take)
-            .collect();
+        let events = self.store.list_events_paginated(
+            aggregate_type,
+            aggregate_id,
+            skip,
+            Some(effective_take),
+        )?;
         Ok(events)
     }
 

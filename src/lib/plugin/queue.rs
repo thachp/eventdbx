@@ -301,6 +301,88 @@ impl PluginQueueStore {
         Ok(removed)
     }
 
+    pub fn clear_done(&self, older_than: Option<i64>) -> Result<usize> {
+        let prefix = status_prefix_any(JobStatus::Done);
+        let mut iter = self
+            .db
+            .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+        let mut batch = WriteBatch::default();
+        let mut removed = 0usize;
+
+        while let Some(item) = iter.next() {
+            let (key, _) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            let job_id = parse_job_id(&key)?;
+            let Some(job) = self.load_job(job_id)? else {
+                batch.delete(key.clone());
+                continue;
+            };
+
+            if let Some(cutoff) = older_than {
+                if job.created_at >= cutoff {
+                    continue;
+                }
+            }
+
+            batch.delete(key.clone());
+            batch.delete(job_key(job_id));
+            removed += 1;
+        }
+
+        if removed > 0 {
+            self.db
+                .write(batch)
+                .map_err(|err| EventError::Storage(err.to_string()))?;
+        }
+
+        Ok(removed)
+    }
+
+    pub fn truncate_done(&self, retain: usize) -> Result<usize> {
+        if retain == 0 {
+            return self.clear_done(None);
+        }
+
+        let prefix = status_prefix_any(JobStatus::Done);
+        let mut iter = self
+            .db
+            .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+
+        while let Some(item) = iter.next() {
+            let (key, _) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            keys.push(key.to_vec());
+        }
+
+        if keys.len() <= retain {
+            return Ok(0);
+        }
+
+        let to_remove = keys.len().saturating_sub(retain);
+        let mut batch = WriteBatch::default();
+        let mut removed = 0usize;
+
+        for key in keys.into_iter().take(to_remove) {
+            let job_id = parse_job_id(&key)?;
+            batch.delete(key);
+            batch.delete(job_key(job_id));
+            removed += 1;
+        }
+
+        if removed > 0 {
+            self.db
+                .write(batch)
+                .map_err(|err| EventError::Storage(err.to_string()))?;
+        }
+
+        Ok(removed)
+    }
+
     pub fn status(&self) -> Result<PluginQueueStatus> {
         let mut status = PluginQueueStatus::default();
         status.pending = self.collect_jobs(JobStatus::Pending)?;
@@ -578,4 +660,86 @@ fn legacy_payload(
         ..Default::default()
     })
     .expect("legacy payload serialization should succeed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Result;
+    use chrono::Utc;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn open_store(tmp: &TempDir) -> Result<PluginQueueStore> {
+        let path = tmp.path().join("queue.db");
+        PluginQueueStore::open(path.as_path())
+    }
+
+    #[test]
+    fn clear_done_removes_records() -> Result<()> {
+        let tmp = TempDir::new().expect("create temp dir");
+        let store = open_store(&tmp)?;
+        let now = Utc::now().timestamp_millis();
+
+        let job = store.enqueue_job("rest", json!({}), now)?;
+        store.complete_job(job.id)?;
+
+        assert_eq!(store.clear_done(None)?, 1);
+        assert!(store.load_job(job.id)?.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn clear_done_respects_cutoff() -> Result<()> {
+        let tmp = TempDir::new().expect("create temp dir");
+        let store = open_store(&tmp)?;
+        let now = Utc::now().timestamp_millis();
+        let earlier = now - 60_000;
+
+        let old_job = store.enqueue_job("rest", json!({ "id": 1 }), earlier)?;
+        let new_job = store.enqueue_job("rest", json!({ "id": 2 }), now)?;
+        store.complete_job(old_job.id)?;
+        store.complete_job(new_job.id)?;
+
+        let cutoff = now - 1_000;
+        assert_eq!(store.clear_done(Some(cutoff))?, 1);
+        assert!(store.load_job(old_job.id)?.is_none());
+        assert!(store.load_job(new_job.id)?.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn truncate_done_enforces_limit() -> Result<()> {
+        let tmp = TempDir::new().expect("create temp dir");
+        let store = open_store(&tmp)?;
+        let now = Utc::now().timestamp_millis();
+
+        for idx in 0..5 {
+            let job = store.enqueue_job("rest", json!({ "seq": idx }), now + idx as i64)?;
+            store.complete_job(job.id)?;
+        }
+
+        let removed = store.truncate_done(2)?;
+        assert_eq!(removed, 3);
+        let status = store.status()?;
+        assert_eq!(status.done.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn truncate_done_zero_clears_all() -> Result<()> {
+        let tmp = TempDir::new().expect("create temp dir");
+        let store = open_store(&tmp)?;
+        let now = Utc::now().timestamp_millis();
+
+        let job = store.enqueue_job("rest", json!({}), now)?;
+        store.complete_job(job.id)?;
+
+        assert_eq!(store.truncate_done(0)?, 1);
+        assert!(store.status()?.done.is_empty());
+        Ok(())
+    }
 }
