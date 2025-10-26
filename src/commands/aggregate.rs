@@ -19,17 +19,18 @@ use eventdbx::{
     error::EventError,
     merkle::compute_merkle_root,
     plugin::PluginManager,
+    restrict,
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{self, ActorClaims, AppendEvent, EventRecord, EventStore, payload_to_map},
     token::{IssueTokenInput, JwtLimits, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
-        ensure_payload_size, ensure_schema_declared, ensure_snake_case,
+        ensure_payload_size, ensure_snake_case,
     },
 };
 
 #[cfg(test)]
-use eventdbx::restrict::{self, RestrictMode};
+use eventdbx::restrict::RestrictMode;
 
 use crate::commands::{cli_token, client::ServerClient};
 use tracing::warn;
@@ -397,11 +398,22 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             ensure_snake_case("event_type", &event)?;
             ensure_aggregate_id(&aggregate_id)?;
 
+            let restrict_mode = config.restrict;
             let schema_manager = SchemaManager::load(config.schema_store_path())?;
-            ensure_schema_declared(&schema_manager, &aggregate)?;
+            let schema_present = match schema_manager.get(&aggregate) {
+                Ok(_) => true,
+                Err(EventError::SchemaNotFound) => false,
+                Err(err) => return Err(err.into()),
+            };
+
+            if !schema_present && restrict_mode.requires_declared_schema() {
+                bail!(restrict::strict_mode_missing_schema_message(&aggregate));
+            }
             if patch_ops.is_none() {
                 ensure_payload_size(&payload)?;
-                schema_manager.validate_event(&aggregate, &event, &payload)?;
+                if schema_present {
+                    schema_manager.validate_event(&aggregate, &event, &payload)?;
+                }
             }
 
             if stage {
@@ -418,11 +430,13 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                         };
                         if patch_ops.is_some() {
                             ensure_payload_size(&effective_payload)?;
-                            schema_manager.validate_event(
-                                &aggregate,
-                                &event,
-                                &effective_payload,
-                            )?;
+                            if schema_present {
+                                schema_manager.validate_event(
+                                    &aggregate,
+                                    &event,
+                                    &effective_payload,
+                                )?;
+                            }
                         }
                         let is_new = match store.aggregate_version(&aggregate, &aggregate_id)? {
                             Some(version) if version > 0 => false,
@@ -654,6 +668,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             )?;
             let plugins = PluginManager::from_config(&config)?;
             let mut tx = store.transaction()?;
+            let restrict_mode = config.restrict;
 
             for staged_event in &staged_events {
                 ensure_snake_case("aggregate_type", &staged_event.aggregate)?;
@@ -672,12 +687,25 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 };
                 ensure_first_event_rule(is_new, &staged_event.event)?;
 
-                ensure_schema_declared(&schema_manager, &staged_event.aggregate)?;
-                schema_manager.validate_event(
-                    &staged_event.aggregate,
-                    &staged_event.event,
-                    &staged_event.payload,
-                )?;
+                let schema_present = match schema_manager.get(&staged_event.aggregate) {
+                    Ok(_) => true,
+                    Err(EventError::SchemaNotFound) => false,
+                    Err(err) => return Err(err.into()),
+                };
+
+                if !schema_present && restrict_mode.requires_declared_schema() {
+                    bail!(restrict::strict_mode_missing_schema_message(
+                        &staged_event.aggregate
+                    ));
+                }
+
+                if schema_present {
+                    schema_manager.validate_event(
+                        &staged_event.aggregate,
+                        &staged_event.event,
+                        &staged_event.payload,
+                    )?;
+                }
 
                 tx.append(staged_event.to_append_event())?;
             }

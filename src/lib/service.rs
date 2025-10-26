@@ -2,13 +2,13 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     error::{EventError, Result},
-    restrict::RestrictMode,
+    restrict::{self, RestrictMode},
     schema::SchemaManager,
     store::{ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore},
     token::TokenManager,
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
-        ensure_payload_size, ensure_schema_declared, ensure_snake_case,
+        ensure_payload_size, ensure_snake_case,
     },
 };
 use serde_json::Value;
@@ -205,8 +205,21 @@ impl CoreContext {
         ensure_payload_size(&effective_payload)?;
 
         let schemas = self.schemas();
-        ensure_schema_declared(schemas.as_ref(), &aggregate_type)?;
-        schemas.validate_event(&aggregate_type, &event_type, &effective_payload)?;
+        let schema_present = match schemas.get(&aggregate_type) {
+            Ok(_) => true,
+            Err(EventError::SchemaNotFound) => false,
+            Err(err) => return Err(err),
+        };
+
+        if !schema_present && self.restrict.requires_declared_schema() {
+            return Err(EventError::SchemaViolation(
+                restrict::strict_mode_missing_schema_message(&aggregate_type),
+            ));
+        }
+
+        if schema_present {
+            schemas.validate_event(&aggregate_type, &event_type, &effective_payload)?;
+        }
 
         let issued_by: Option<ActorClaims> = claims.actor_claims();
         if issued_by.is_none() {
