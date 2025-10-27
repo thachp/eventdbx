@@ -1565,6 +1565,64 @@ fn aggregate_apply_and_get_flow() -> Result<()> {
 }
 
 #[test]
+fn aggregate_patch_and_select_flow() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&[
+        "schema",
+        "create",
+        "person",
+        "--events",
+        "person_created,person_updated",
+    ])?;
+
+    cli.run(&[
+        "aggregate",
+        "apply",
+        "person",
+        "person-1",
+        "person_created",
+        "--payload",
+        r#"{"status":"active","profile":{"name":{"first":"Ada"}}}"#,
+    ])?;
+
+    let patch_ops = r#"[{"op":"replace","path":"/status","value":"inactive"},{"op":"replace","path":"/profile/name/first","value":"Grace"}]"#;
+    let record = cli.run_json(&[
+        "aggregate",
+        "patch",
+        "person",
+        "person-1",
+        "person_updated",
+        "--patch",
+        patch_ops,
+    ])?;
+    assert_eq!(record["aggregate_type"], "person");
+    assert_eq!(record["aggregate_id"], "person-1");
+    assert_eq!(record["event_type"], "person_updated");
+    assert_eq!(record["version"], 2);
+    assert_eq!(record["payload"]["status"], "inactive");
+    assert_eq!(record["payload"]["profile"]["name"]["first"], "Grace");
+
+    let selection = cli.run_json(&[
+        "aggregate",
+        "select",
+        "person",
+        "person-1",
+        "status",
+        "profile.name.first",
+    ])?;
+    assert_eq!(selection["aggregate_type"], "person");
+    assert_eq!(selection["aggregate_id"], "person-1");
+    assert_eq!(selection["version"], 2);
+    let map = selection["selection"]
+        .as_object()
+        .context("selection output missing selection map")?;
+    assert_eq!(map["status"], json!("inactive"));
+    assert_eq!(map["profile.name.first"], json!("Grace"));
+
+    Ok(())
+}
+
+#[test]
 fn aggregate_replay_after_apply_returns_events() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run_json(&[
