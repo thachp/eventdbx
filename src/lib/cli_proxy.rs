@@ -73,6 +73,10 @@ enum ControlReply {
     ListEvents(String),
     AppendEvent(String),
     VerifyAggregate(String),
+    SelectAggregate {
+        found: bool,
+        selection_json: Option<String>,
+    },
 }
 
 enum ControlCommand {
@@ -96,13 +100,26 @@ enum ControlCommand {
         aggregate_id: String,
         event_type: String,
         payload: Option<Value>,
-        patch: Option<Value>,
+        metadata: Option<Value>,
+        note: Option<String>,
+    },
+    PatchEvent {
+        token: String,
+        aggregate_type: String,
+        aggregate_id: String,
+        event_type: String,
+        patch: Value,
         metadata: Option<Value>,
         note: Option<String>,
     },
     VerifyAggregate {
         aggregate_type: String,
         aggregate_id: String,
+    },
+    SelectAggregate {
+        aggregate_type: String,
+        aggregate_id: String,
+        fields: Vec<String>,
     },
 }
 
@@ -131,7 +148,9 @@ fn control_command_name(command: &ControlCommand) -> &'static str {
         ControlCommand::GetAggregate { .. } => "get_aggregate",
         ControlCommand::ListEvents { .. } => "list_events",
         ControlCommand::AppendEvent { .. } => "append_event",
+        ControlCommand::PatchEvent { .. } => "patch_event",
         ControlCommand::VerifyAggregate { .. } => "verify_aggregate",
+        ControlCommand::SelectAggregate { .. } => "select_aggregate",
     }
 }
 
@@ -449,6 +468,18 @@ where
                                 let mut builder = payload.init_verify_aggregate();
                                 builder.set_merkle_root(&merkle_root);
                             }
+                            ControlReply::SelectAggregate {
+                                found,
+                                selection_json,
+                            } => {
+                                let mut builder = payload.init_select_aggregate();
+                                builder.set_found(found);
+                                if let Some(json) = selection_json {
+                                    builder.set_selection_json(&json);
+                                } else {
+                                    builder.set_selection_json("");
+                                }
+                            }
                         }
                     }
                     Err(err) => {
@@ -551,16 +582,6 @@ fn parse_control_command(
                 )
             };
 
-            let patch_raw = read_control_text(req.get_patch_json(), "patch_json")?;
-            let patch_trimmed = patch_raw.trim();
-            let patch = if patch_trimmed.is_empty() {
-                None
-            } else {
-                Some(serde_json::from_str::<Value>(patch_trimmed).map_err(|err| {
-                    EventError::InvalidSchema(format!("invalid patch_json: {err}"))
-                })?)
-            };
-
             let metadata = if req.get_has_metadata() {
                 let metadata_raw = read_control_text(req.get_metadata_json(), "metadata_json")?;
                 let metadata_trimmed = metadata_raw.trim();
@@ -589,6 +610,58 @@ fn parse_control_command(
                 aggregate_id,
                 event_type,
                 payload,
+                metadata,
+                note,
+            })
+        }
+        payload::PatchEvent(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+            let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+            let event_type = read_control_text(req.get_event_type(), "event_type")?;
+
+            let patch_raw = read_control_text(req.get_patch_json(), "patch_json")?;
+            let patch_trimmed = patch_raw.trim();
+            let patch = if patch_trimmed.is_empty() {
+                return Err(EventError::InvalidSchema(
+                    "patch_json must be provided for patch events".into(),
+                ));
+            } else {
+                serde_json::from_str::<Value>(patch_trimmed).map_err(|err| {
+                    EventError::InvalidSchema(format!("invalid patch_json: {err}"))
+                })?
+            };
+
+            let metadata = if req.get_has_metadata() {
+                let metadata_raw = read_control_text(req.get_metadata_json(), "metadata_json")?;
+                let metadata_trimmed = metadata_raw.trim();
+                if metadata_trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        serde_json::from_str::<Value>(metadata_trimmed).map_err(|err| {
+                            EventError::InvalidSchema(format!("invalid metadata_json: {err}"))
+                        })?,
+                    )
+                }
+            } else {
+                None
+            };
+
+            let note = if req.get_has_note() {
+                Some(read_control_text(req.get_note(), "note")?)
+            } else {
+                None
+            };
+
+            Ok(ControlCommand::PatchEvent {
+                token,
+                aggregate_type,
+                aggregate_id,
+                event_type,
                 patch,
                 metadata,
                 note,
@@ -602,6 +675,30 @@ fn parse_control_command(
             Ok(ControlCommand::VerifyAggregate {
                 aggregate_type,
                 aggregate_id,
+            })
+        }
+        payload::SelectAggregate(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+            let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+            let fields_reader = req.get_fields().map_err(|err| {
+                EventError::Serialization(format!("failed to read fields: {err}"))
+            })?;
+            let mut fields = Vec::new();
+            for field in fields_reader.iter() {
+                let value = field.map_err(|err| {
+                    EventError::Serialization(format!("invalid utf-8 in fields entry: {err}"))
+                })?;
+                let field_str = value.to_str().map_err(|err| {
+                    EventError::Serialization(format!("invalid utf-8 in fields entry: {err}"))
+                })?;
+                fields.push(field_str.to_string());
+            }
+
+            Ok(ControlCommand::SelectAggregate {
+                aggregate_type,
+                aggregate_id,
+                fields,
             })
         }
     }
@@ -670,103 +767,55 @@ async fn execute_control_command(
             aggregate_id,
             event_type,
             payload,
+            metadata,
+            note,
+        } => {
+            let input = AppendEventInput {
+                token,
+                aggregate_type,
+                aggregate_id,
+                event_type,
+                payload,
+                patch: None,
+                metadata,
+                note,
+                require_existing: false,
+            };
+            handle_append_event_command(
+                core.clone(),
+                Arc::clone(&shared_config),
+                input,
+                "append event",
+            )
+            .await
+        }
+        ControlCommand::PatchEvent {
+            token,
+            aggregate_type,
+            aggregate_id,
+            event_type,
             patch,
             metadata,
             note,
         } => {
-            let record = spawn_blocking({
-                let core = core.clone();
-                let input = AppendEventInput {
-                    token,
-                    aggregate_type: aggregate_type.clone(),
-                    aggregate_id: aggregate_id.clone(),
-                    event_type: event_type.clone(),
-                    payload,
-                    patch,
-                    metadata,
-                    note,
-                };
-                move || core.append_event(input)
-            })
-            .await
-            .map_err(|err| EventError::Storage(format!("append event task failed: {err}")))??;
-
-            let record_json = serde_json::to_string(&record)?;
-
-            let schemas = core.schemas();
-            if schemas.should_snapshot(&record.aggregate_type, record.version) {
-                let aggregate_type = record.aggregate_type.clone();
-                let aggregate_id = record.aggregate_id.clone();
-                let version = record.version;
-                let snapshot_result = spawn_blocking({
-                    let store = core.store();
-                    let aggregate_type_key = aggregate_type.clone();
-                    let aggregate_id_key = aggregate_id.clone();
-                    move || {
-                        store.create_snapshot(
-                            &aggregate_type_key,
-                            &aggregate_id_key,
-                            Some(format!("auto snapshot v{}", version)),
-                        )
-                    }
-                })
-                .await
-                .map_err(|err| {
-                    EventError::Storage(format!("failed to create auto snapshot: {err}"))
-                })?;
-                if let Err(err) = snapshot_result {
-                    warn!(
-                        target: "server",
-                        "failed to create auto snapshot for {}::{} v{}: {}",
-                        aggregate_type,
-                        aggregate_id,
-                        version,
-                        err
-                    );
-                }
-            }
-
-            let plugins = {
-                let guard = shared_config
-                    .read()
-                    .map_err(|_| EventError::Storage("failed to acquire config lock".into()))?;
-                PluginManager::from_config(&*guard)?
+            let input = AppendEventInput {
+                token,
+                aggregate_type,
+                aggregate_id,
+                event_type,
+                payload: None,
+                patch: Some(patch),
+                metadata,
+                note,
+                require_existing: true,
             };
-
-            if !plugins.is_empty() {
-                let schemas = core.schemas();
-                let schema = schemas.get(&record.aggregate_type).ok();
-                let aggregate_type = record.aggregate_type.clone();
-                let aggregate_id = record.aggregate_id.clone();
-                let state_result = spawn_blocking({
-                    let store = core.store();
-                    let aggregate_type_key = aggregate_type.clone();
-                    let aggregate_id_key = aggregate_id.clone();
-                    move || store.get_aggregate_state(&aggregate_type_key, &aggregate_id_key)
-                })
-                .await
-                .map_err(|err| {
-                    EventError::Storage(format!("failed to load aggregate state: {err}"))
-                })?;
-
-                match state_result {
-                    Ok(current_state) => {
-                        if let Err(err) =
-                            plugins.notify_event(&record, &current_state, schema.as_ref())
-                        {
-                            error!("plugin notification failed: {}", err);
-                        }
-                    }
-                    Err(err) => {
-                        warn!(
-                            "plugin notification skipped (failed to load state for {}::{}): {}",
-                            aggregate_type, aggregate_id, err
-                        );
-                    }
-                }
-            }
-
-            Ok(ControlReply::AppendEvent(record_json))
+            handle_append_event_command(
+                core.clone(),
+                Arc::clone(&shared_config),
+                input,
+                "append patch event",
+            )
+            .await
         }
         ControlCommand::VerifyAggregate {
             aggregate_type,
@@ -783,7 +832,118 @@ async fn execute_control_command(
 
             Ok(ControlReply::VerifyAggregate(merkle))
         }
+        ControlCommand::SelectAggregate {
+            aggregate_type,
+            aggregate_id,
+            fields,
+        } => {
+            let selection = spawn_blocking({
+                let core = core.clone();
+                let aggregate_type = aggregate_type.clone();
+                let aggregate_id = aggregate_id.clone();
+                let fields = fields.clone();
+                move || core.select_aggregate_fields(&aggregate_type, &aggregate_id, &fields)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("select aggregate task failed: {err}")))??;
+
+            match selection {
+                Some(map) => {
+                    let json = serde_json::to_string(&map)?;
+                    Ok(ControlReply::SelectAggregate {
+                        found: true,
+                        selection_json: Some(json),
+                    })
+                }
+                None => Ok(ControlReply::SelectAggregate {
+                    found: false,
+                    selection_json: None,
+                }),
+            }
+        }
     }
+}
+
+async fn handle_append_event_command(
+    core: CoreContext,
+    shared_config: Arc<RwLock<Config>>,
+    input: AppendEventInput,
+    task_label: &'static str,
+) -> std::result::Result<ControlReply, EventError> {
+    let record = spawn_blocking({
+        let core = core.clone();
+        move || core.append_event(input)
+    })
+    .await
+    .map_err(|err| EventError::Storage(format!("{task_label} task failed: {err}")))??;
+
+    let record_json = serde_json::to_string(&record)?;
+
+    let schemas = core.schemas();
+    if schemas.should_snapshot(&record.aggregate_type, record.version) {
+        let aggregate_type = record.aggregate_type.clone();
+        let aggregate_id = record.aggregate_id.clone();
+        let version = record.version;
+        let snapshot_result = spawn_blocking({
+            let store = core.store();
+            let aggregate_type_key = aggregate_type.clone();
+            let aggregate_id_key = aggregate_id.clone();
+            move || {
+                store.create_snapshot(
+                    &aggregate_type_key,
+                    &aggregate_id_key,
+                    Some(format!("auto snapshot v{}", version)),
+                )
+            }
+        })
+        .await
+        .map_err(|err| EventError::Storage(format!("failed to create auto snapshot: {err}")))?;
+        if let Err(err) = snapshot_result {
+            warn!(
+                target: "server",
+                "failed to create auto snapshot for {}::{} v{}: {}",
+                aggregate_type, aggregate_id, version, err
+            );
+        }
+    }
+
+    let plugins = {
+        let guard = shared_config
+            .read()
+            .map_err(|_| EventError::Storage("failed to acquire config lock".into()))?;
+        PluginManager::from_config(&*guard)?
+    };
+
+    if !plugins.is_empty() {
+        let schemas = core.schemas();
+        let schema = schemas.get(&record.aggregate_type).ok();
+        let aggregate_type = record.aggregate_type.clone();
+        let aggregate_id = record.aggregate_id.clone();
+        let state_result = spawn_blocking({
+            let store = core.store();
+            let aggregate_type_key = aggregate_type.clone();
+            let aggregate_id_key = aggregate_id.clone();
+            move || store.get_aggregate_state(&aggregate_type_key, &aggregate_id_key)
+        })
+        .await
+        .map_err(|err| EventError::Storage(format!("failed to load aggregate state: {err}")))?;
+
+        match state_result {
+            Ok(current_state) => {
+                if let Err(err) = plugins.notify_event(&record, &current_state, schema.as_ref()) {
+                    error!("plugin notification failed: {}", err);
+                }
+            }
+            Err(err) => {
+                warn!(
+                    "plugin notification skipped (failed to load state for {}::{}): {}",
+                    aggregate_type, aggregate_id, err
+                );
+            }
+        }
+    }
+
+    Ok(ControlReply::AppendEvent(record_json))
 }
 
 async fn handle_replication_session<R, W>(

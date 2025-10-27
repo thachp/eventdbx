@@ -266,7 +266,7 @@ fn collect_top_level_keys(patch: &Value) -> std::result::Result<BTreeSet<String>
             .get("op")
             .and_then(Value::as_str)
             .ok_or_else(|| "patch entry is missing 'op'".to_string())?;
-        if op != "add" && op != "replace" {
+        if op != "add" && op != "replace" && op != "remove" {
             return Err(format!("unsupported patch operation '{}'", op));
         }
         let path = entry
@@ -292,6 +292,39 @@ fn state_map_to_value(map: &BTreeMap<String, String>) -> Value {
         object.insert(key.clone(), parse_state_value(value));
     }
     Value::Object(object)
+}
+
+pub fn select_state_field(map: &BTreeMap<String, String>, path: &str) -> Option<Value> {
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut segments = path.split('.');
+    let first = segments.next()?;
+    if first.is_empty() {
+        return None;
+    }
+
+    let mut current = match map.get(first) {
+        Some(raw) => parse_state_value(raw),
+        None => return None,
+    };
+
+    for segment in segments {
+        if segment.is_empty() {
+            return None;
+        }
+        current = match &current {
+            Value::Object(object) => object.get(segment)?.clone(),
+            Value::Array(array) => {
+                let index = segment.parse::<usize>().ok()?;
+                array.get(index)?.clone()
+            }
+            _ => return None,
+        };
+    }
+
+    Some(current)
 }
 
 #[derive(Debug, Clone)]
@@ -1597,5 +1630,31 @@ mod tests {
                 "status": "inactive"
             })
         );
+    }
+
+    #[test]
+    fn select_state_field_handles_nested_paths() {
+        let mut map = BTreeMap::new();
+        map.insert("status".into(), "\"active\"".into());
+        map.insert(
+            "profile".into(),
+            r#"{"name":{"first":"Ada"},"scores":[10,20]}"#.into(),
+        );
+
+        assert_eq!(
+            super::select_state_field(&map, "status"),
+            Some(Value::String("active".into()))
+        );
+        assert_eq!(
+            super::select_state_field(&map, "profile.name.first"),
+            Some(Value::String("Ada".into()))
+        );
+        assert_eq!(
+            super::select_state_field(&map, "profile.scores.1"),
+            Some(Value::from(20))
+        );
+        assert_eq!(super::select_state_field(&map, "missing"), None);
+        assert_eq!(super::select_state_field(&map, ""), None);
+        assert_eq!(super::select_state_field(&map, "profile.scores.5"), None);
     }
 }

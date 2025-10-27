@@ -4,7 +4,9 @@ use crate::{
     error::{EventError, Result},
     restrict::{self, RestrictMode},
     schema::SchemaManager,
-    store::{ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore},
+    store::{
+        ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore, select_state_field,
+    },
     token::TokenManager,
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
@@ -112,6 +114,35 @@ impl CoreContext {
         }
     }
 
+    pub fn select_aggregate_fields(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        fields: &[String],
+    ) -> Result<Option<BTreeMap<String, Value>>> {
+        if self.is_hidden_aggregate(aggregate_type) {
+            return Ok(None);
+        }
+
+        let aggregate = match self.store.get_aggregate_state(aggregate_type, aggregate_id) {
+            Ok(aggregate) => self.sanitize_aggregate(aggregate),
+            Err(EventError::AggregateNotFound) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+
+        let mut selections = BTreeMap::new();
+        for field in fields {
+            let trimmed = field.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value = select_state_field(&aggregate.state, trimmed).unwrap_or(Value::Null);
+            selections.insert(trimmed.to_string(), value);
+        }
+
+        Ok(Some(selections))
+    }
+
     pub fn list_events(
         &self,
         aggregate_type: &str,
@@ -157,7 +188,28 @@ impl CoreContext {
             patch,
             metadata,
             note,
+            require_existing,
         } = input;
+
+        enum EventBody {
+            Payload(Value),
+            Patch(Value),
+        }
+
+        let event_body = match (payload, patch) {
+            (Some(payload), None) => EventBody::Payload(payload),
+            (None, Some(patch_spec)) => EventBody::Patch(patch_spec),
+            (Some(_), Some(_)) => {
+                return Err(EventError::InvalidSchema(
+                    "payload_json and patch_json cannot both be provided".into(),
+                ));
+            }
+            (None, None) => {
+                return Err(EventError::InvalidSchema(
+                    "payload_json must be provided when patch_json is absent".into(),
+                ));
+            }
+        };
 
         ensure_snake_case("aggregate_type", &aggregate_type)?;
         ensure_snake_case("event_type", &event_type)?;
@@ -166,42 +218,44 @@ impl CoreContext {
             ensure_metadata_extensions(metadata)?;
         }
 
-        let is_new_aggregate = match self
+        let aggregate_version = self
             .store
-            .aggregate_version(&aggregate_type, &aggregate_id)?
-        {
+            .aggregate_version(&aggregate_type, &aggregate_id)?;
+        let is_new_aggregate = match aggregate_version {
             Some(version) if version > 0 => false,
             Some(_) | None => true,
         };
+        let is_patch_event = matches!(&event_body, EventBody::Patch(_));
+        if (require_existing || is_patch_event) && is_new_aggregate {
+            return Err(EventError::AggregateNotFound);
+        }
         ensure_first_event_rule(is_new_aggregate, &event_type)?;
-
-        if payload.is_some() && patch.is_some() {
-            return Err(EventError::InvalidSchema(
-                "payload_json must be empty when patch_json is provided".into(),
-            ));
-        }
-        if payload.is_none() && patch.is_none() {
-            return Err(EventError::InvalidSchema(
-                "payload_json must be provided when patch_json is absent".into(),
-            ));
-        }
 
         let resource = format!("aggregate:{}:{}", aggregate_type, aggregate_id);
         let claims =
             self.tokens()
                 .authorize_action(&token, "aggregate.append", Some(resource.as_str()))?;
 
-        let effective_payload = match (payload, patch) {
-            (Some(payload), None) => payload,
-            (None, Some(patch_ops)) => {
-                self.store
-                    .prepare_payload_from_patch(&aggregate_type, &aggregate_id, &patch_ops)?
+        let effective_payload = match event_body {
+            EventBody::Payload(payload) => {
+                ensure_payload_size(&payload)?;
+                payload
             }
-            (Some(_), Some(_)) => unreachable!(),
-            (None, None) => unreachable!(),
+            EventBody::Patch(patch_spec) => {
+                if !patch_spec.is_array() {
+                    return Err(EventError::InvalidSchema(
+                        "patch_json must be an array of operations".into(),
+                    ));
+                }
+                let payload = self.store.prepare_payload_from_patch(
+                    &aggregate_type,
+                    &aggregate_id,
+                    &patch_spec,
+                )?;
+                ensure_payload_size(&payload)?;
+                payload
+            }
         };
-
-        ensure_payload_size(&effective_payload)?;
 
         let schemas = self.schemas();
         let schema_present = match schemas.get(&aggregate_type) {
@@ -261,4 +315,5 @@ pub struct AppendEventInput {
     pub patch: Option<Value>,
     pub metadata: Option<Value>,
     pub note: Option<String>,
+    pub require_existing: bool,
 }

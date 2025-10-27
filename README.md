@@ -18,12 +18,12 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 
    ```bash
    # Install prebuilt binaries via shell script
-   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.13.2/eventdbx-installer.sh | sh
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v3.5.2/eventdbx-installer.sh | sh
    ```
 
    ```bash
    # Install prebuilt binaries via powershell script
-   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.13.2/eventdbx-installer.ps1 | iex"
+   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v3.5.2/eventdbx-installer.ps1 | iex"
    ```
 
 2. **Start the server**
@@ -202,6 +202,30 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
   Writes the current aggregate state (no metadata) as CSV or JSON. Exports default to one file per aggregate type; pass `--zip` to bundle the output into an archive.
 
 `--payload` and `--patch` are mutually exclusive. Use `--payload` when you want to supply the full document explicitly; use `--patch` for an RFC 6902 JSON Patch that the server applies before validation and persistence.
+
+#### Aggregate Operation Costs
+
+Every aggregate command ultimately turns into a small set of RocksDB reads or writes. Ballpark complexities:
+
+- `aggregate list`: iterates over the requested page of aggregates. Runtime is O(k) in the page size (default `list_page_size`).
+- `aggregate get`: one state lookup (O(log N)) plus optional event scanning when you request `--include-events` or `--version` (adds O(Eₐ) for that aggregate’s events) and lightweight JSON parsing of the returned map.
+- `aggregate select`: uses the same state lookup as `get` (O(log N)) and walks each requested dot path in-memory; no additional RocksDB reads are taken, so cost is dominated by the selected payload size.
+- `aggregate apply`: validates the payload, merges it into the materialized state, and appends the event in a single batch write. Time is proportional to the payload size being processed.
+- `aggregate patch`: reads the current state (same cost as `get`), applies the JSON Patch document, then appends the result—effectively O(payload + patch_ops).
+- `aggregate replay` / `aggregate list --include-events`: scans the requested slice of the event stream for that aggregate (O(Eₐ)).
+- `aggregate verify`: recomputes the Merkle root for the aggregate’s events (O(Eₐ)).
+
+In practice those costs are dominated by payload size and the number of events you ask the CLI to stream; hot aggregates tend to stay in the RocksDB block cache, keeping per-operation latency close to constant.
+
+| Operation          | Time complexity          | Notes                                                            |
+| ------------------ | ------------------------ | ---------------------------------------------------------------- |
+| `aggregate list`   | O(k)                     | `k` is the requested page size (defaults to `list_page_size`).   |
+| `aggregate get`    | O(log N + Eₐ + P)        | Single state read plus optional event scan and JSON parsing.     |
+| `aggregate select` | O(log N + P_selected)    | Same state read as `get`; dot-path traversal happens in memory.  |
+| `aggregate apply`  | O(P)                     | Payload validation + merge + append in one RocksDB batch.        |
+| `aggregate patch`  | O(log N + P + patch_ops) | Reads state, applies JSON Patch, then appends the patch payload. |
+| `aggregate replay` | O(Eₐ)                    | Linear in the number of events streamed.                         |
+| `aggregate verify` | O(Eₐ)                    | Recomputes the Merkle root across the aggregate’s events.        |
 
 Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply --stage` to add entries to this queue, inspect them with `aggregate list --stage`, and persist the entire batch with `aggregate commit`. Events are validated against the active schema whenever restriction is `default` or `strict`; the strict mode also insists that a schema exists before anything can be staged. The commit operation writes every pending event in one RocksDB batch, guaranteeing all-or-nothing persistence.
 

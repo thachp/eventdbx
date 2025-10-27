@@ -8,6 +8,8 @@ struct ControlRequest {
     listEvents @3 :ListEventsRequest;
     appendEvent @4 :AppendEventRequest;
     verifyAggregate @5 :VerifyAggregateRequest;
+    patchEvent @6 :PatchEventRequest;
+    selectAggregate @7 :SelectAggregateRequest;
   }
 }
 
@@ -19,7 +21,8 @@ struct ControlResponse {
     listEvents @3 :ListEventsResponse;
     appendEvent @4 :AppendEventResponse;
     verifyAggregate @5 :VerifyAggregateResponse;
-    error @6 :ControlError;
+    selectAggregate @6 :SelectAggregateResponse;
+    error @7 :ControlError;
   }
 }
 
@@ -72,6 +75,18 @@ struct AppendEventResponse {
   eventJson @0 :Text;
 }
 
+struct PatchEventRequest {
+  token @0 :Text;
+  aggregateType @1 :Text;
+  aggregateId @2 :Text;
+  eventType @3 :Text;
+  patchJson @4 :Text;
+  note @5 :Text;
+  hasNote @6 :Bool;
+  metadataJson @7 :Text;
+  hasMetadata @8 :Bool;
+}
+
 struct VerifyAggregateRequest {
   aggregateType @0 :Text;
   aggregateId @1 :Text;
@@ -79,6 +94,17 @@ struct VerifyAggregateRequest {
 
 struct VerifyAggregateResponse {
   merkleRoot @0 :Text;
+}
+
+struct SelectAggregateRequest {
+  aggregateType @0 :Text;
+  aggregateId @1 :Text;
+  fields @2 :List(Text);
+}
+
+struct SelectAggregateResponse {
+  found @0 :Bool;
+  selectionJson @1 :Text;
 }
 
 struct ControlError {

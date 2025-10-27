@@ -32,7 +32,6 @@ impl ServerClient {
         aggregate_id: &str,
         event_type: &str,
         payload: Option<&Value>,
-        patch: Option<&Value>,
         metadata: Option<&Value>,
         note: Option<&str>,
     ) -> Result<EventRecord> {
@@ -42,7 +41,6 @@ impl ServerClient {
         let aggregate_id = aggregate_id.to_string();
         let event_type = event_type.to_string();
         let payload = payload.cloned();
-        let patch = patch.cloned();
         let metadata = metadata.cloned();
         let note = note.map(|value| value.to_string());
 
@@ -55,7 +53,6 @@ impl ServerClient {
                     aggregate_id,
                     event_type,
                     payload,
-                    patch.clone(),
                     metadata.clone(),
                     note.clone(),
                 )
@@ -69,6 +66,51 @@ impl ServerClient {
             aggregate_id,
             event_type,
             payload,
+            metadata,
+            note,
+        )
+    }
+
+    pub fn patch_event(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        event_type: &str,
+        patch: &Value,
+        metadata: Option<&Value>,
+        note: Option<&str>,
+    ) -> Result<EventRecord> {
+        let connect_addr = self.connect_addr.clone();
+        let token = token.to_string();
+        let aggregate_type = aggregate_type.to_string();
+        let aggregate_id = aggregate_id.to_string();
+        let event_type = event_type.to_string();
+        let patch = patch.clone();
+        let metadata = metadata.cloned();
+        let note = note.map(|value| value.to_string());
+
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return tokio::task::block_in_place(move || {
+                patch_event_blocking(
+                    connect_addr,
+                    token,
+                    aggregate_type,
+                    aggregate_id,
+                    event_type,
+                    patch.clone(),
+                    metadata.clone(),
+                    note.clone(),
+                )
+            });
+        }
+
+        patch_event_blocking(
+            connect_addr,
+            token,
+            aggregate_type,
+            aggregate_id,
+            event_type,
             patch,
             metadata,
             note,
@@ -83,7 +125,6 @@ fn append_event_blocking(
     aggregate_id: String,
     event_type: String,
     payload: Option<Value>,
-    patch: Option<Value>,
     metadata: Option<Value>,
     note: Option<String>,
 ) -> Result<EventRecord> {
@@ -102,11 +143,6 @@ fn append_event_blocking(
         .map(|value| serde_json::to_string(&value))
         .transpose()
         .context("failed to serialize payload for proxy request")?
-        .unwrap_or_default();
-    let patch_json = patch
-        .map(|value| serde_json::to_string(&value))
-        .transpose()
-        .context("failed to serialize patch for proxy request")?
         .unwrap_or_default();
     let (metadata_json, has_metadata) = match metadata {
         Some(value) => (
@@ -132,7 +168,6 @@ fn append_event_blocking(
         append.set_aggregate_id(&aggregate_id);
         append.set_event_type(&event_type);
         append.set_payload_json(&payload_json);
-        append.set_patch_json(&patch_json);
         append.set_metadata_json(&metadata_json);
         append.set_has_metadata(has_metadata);
         append.set_note(&note_text);
@@ -171,6 +206,112 @@ fn append_event_blocking(
             let event_json = read_text(append.get_event_json(), "event_json")?;
             let record: EventRecord = serde_json::from_str(&event_json)
                 .context("failed to parse append response payload")?;
+            Ok(record)
+        }
+        payload::AppendEvent(Err(err)) => Err(anyhow!(
+            "failed to decode append_event payload from CLI proxy: {}",
+            err
+        )),
+        payload::Error(Ok(error)) => {
+            let code = read_text(error.get_code(), "code")?;
+            let message = read_text(error.get_message(), "message")?;
+            Err(anyhow!("server returned {}: {}", code, message))
+        }
+        payload::Error(Err(err)) => Err(anyhow!(
+            "failed to decode error payload from CLI proxy: {}",
+            err
+        )),
+        _ => Err(anyhow!(
+            "unexpected payload returned from CLI proxy response"
+        )),
+    }
+}
+
+fn patch_event_blocking(
+    connect_addr: String,
+    token: String,
+    aggregate_type: String,
+    aggregate_id: String,
+    event_type: String,
+    patch: Value,
+    metadata: Option<Value>,
+    note: Option<String>,
+) -> Result<EventRecord> {
+    let mut stream = TcpStream::connect(&connect_addr)
+        .with_context(|| format!("failed to connect to CLI proxy at {}", connect_addr))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .context("failed to configure proxy write timeout")?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .context("failed to configure proxy read timeout")?;
+
+    let request_id = next_request_id();
+
+    let patch_json =
+        serde_json::to_string(&patch).context("failed to serialize patch for proxy request")?;
+    let (metadata_json, has_metadata) = match metadata {
+        Some(value) => (
+            serde_json::to_string(&value)
+                .context("failed to serialize metadata for proxy request")?,
+            true,
+        ),
+        None => (String::new(), false),
+    };
+    let (note_text, has_note) = match note {
+        Some(value) => (value, true),
+        None => (String::new(), false),
+    };
+
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let mut request = message.init_root::<control_request::Builder>();
+        request.set_id(request_id);
+        let payload_builder = request.reborrow().init_payload();
+        let mut patch_builder = payload_builder.init_patch_event();
+        patch_builder.set_token(&token);
+        patch_builder.set_aggregate_type(&aggregate_type);
+        patch_builder.set_aggregate_id(&aggregate_id);
+        patch_builder.set_event_type(&event_type);
+        patch_builder.set_patch_json(&patch_json);
+        patch_builder.set_metadata_json(&metadata_json);
+        patch_builder.set_has_metadata(has_metadata);
+        patch_builder.set_note(&note_text);
+        patch_builder.set_has_note(has_note);
+    }
+
+    serialize::write_message(&mut stream, &message)
+        .context("failed to send patch request via CLI proxy")?;
+    stream
+        .flush()
+        .context("failed to flush patch request via CLI proxy")?;
+
+    let mut reader = BufReader::new(stream);
+    let response_message = serialize::read_message(&mut reader, ReaderOptions::new())
+        .context("failed to read patch response from CLI proxy")?;
+    let response = response_message
+        .get_root::<control_response::Reader>()
+        .context("failed to decode patch response from CLI proxy")?;
+
+    if response.get_id() != request_id {
+        bail!(
+            "CLI proxy returned response id {} but expected {}",
+            response.get_id(),
+            request_id
+        );
+    }
+
+    use control_response::payload;
+
+    match response
+        .get_payload()
+        .which()
+        .context("failed to decode patch response payload")?
+    {
+        payload::AppendEvent(Ok(append)) => {
+            let event_json = read_text(append.get_event_json(), "event_json")?;
+            let record: EventRecord = serde_json::from_str(&event_json)
+                .context("failed to parse patch response payload")?;
             Ok(record)
         }
         payload::AppendEvent(Err(err)) => Err(anyhow!(
