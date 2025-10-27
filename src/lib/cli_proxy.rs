@@ -26,6 +26,7 @@ use crate::{
     config::Config,
     control_capnp::{control_request, control_response},
     error::EventError,
+    filter::FilterExpr,
     observability,
     plugin::PluginManager,
     replication_capnp::{
@@ -83,6 +84,7 @@ enum ControlCommand {
     ListAggregates {
         skip: usize,
         take: Option<usize>,
+        filter: Option<FilterExpr>,
     },
     GetAggregate {
         aggregate_type: String,
@@ -528,7 +530,16 @@ fn parse_control_command(
                 None
             };
 
-            Ok(ControlCommand::ListAggregates { skip, take })
+            let filter = if req.get_has_filter() {
+                let reader = req
+                    .get_filter()
+                    .map_err(|err| EventError::Serialization(err.to_string()))?;
+                Some(FilterExpr::from_capnp(reader)?)
+            } else {
+                None
+            };
+
+            Ok(ControlCommand::ListAggregates { skip, take, filter })
         }
         payload::GetAggregate(req) => {
             let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
@@ -710,10 +721,10 @@ async fn execute_control_command(
     shared_config: Arc<RwLock<Config>>,
 ) -> std::result::Result<ControlReply, EventError> {
     match command {
-        ControlCommand::ListAggregates { skip, take } => {
+        ControlCommand::ListAggregates { skip, take, filter } => {
             let aggregates = spawn_blocking({
                 let core = core.clone();
-                move || core.list_aggregates(skip, take)
+                move || core.list_aggregates(skip, take, filter)
             })
             .await
             .map_err(|err| EventError::Storage(format!("list aggregates task failed: {err}")))?;

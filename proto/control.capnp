@@ -30,6 +30,8 @@ struct ListAggregatesRequest {
   skip @0 :UInt64;
   take @1 :UInt64;
   hasTake @2 :Bool;
+  filter @3 :FilterExpression;
+  hasFilter @4 :Bool;
 }
 
 struct ListAggregatesResponse {
@@ -52,6 +54,8 @@ struct ListEventsRequest {
   skip @2 :UInt64;
   take @3 :UInt64;
   hasTake @4 :Bool;
+  filter @5 :FilterExpression;
+  hasFilter @6 :Bool;
 }
 
 struct ListEventsResponse {
@@ -64,11 +68,10 @@ struct AppendEventRequest {
   aggregateId @2 :Text;
   eventType @3 :Text;
   payloadJson @4 :Text;
-  patchJson @5 :Text;
-  note @6 :Text;
-  hasNote @7 :Bool;
-  metadataJson @8 :Text;
-  hasMetadata @9 :Bool;
+  note @5 :Text;
+  hasNote @6 :Bool;
+  metadataJson @7 :Text;
+  hasMetadata @8 :Bool;
 }
 
 struct AppendEventResponse {
@@ -105,6 +108,42 @@ struct SelectAggregateRequest {
 struct SelectAggregateResponse {
   found @0 :Bool;
   selectionJson @1 :Text;
+}
+
+struct FilterExpression {
+  union {
+    logical @0 :LogicalExpression;
+    comparison @1 :ComparisonExpression;
+  }
+}
+
+struct LogicalExpression {
+  union {
+    and @0 :List(FilterExpression);
+    or @1 :List(FilterExpression);
+    not @2 :FilterExpression;
+  }
+}
+
+struct ComparisonExpression {
+  union {
+    equals @0 :Comparison;
+    notEquals @1 :Comparison;
+    greaterThan @2 :Comparison;
+    lessThan @3 :Comparison;
+    inSet @4 :SetComparison;
+    like @5 :Comparison;
+  }
+}
+
+struct Comparison {
+  field @0 :Text;
+  value @1 :Text;
+}
+
+struct SetComparison {
+  field @0 :Text;
+  values @1 :List(Text);
 }
 
 struct ControlError {

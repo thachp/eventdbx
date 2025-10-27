@@ -972,6 +972,18 @@ impl EventStore {
     }
 
     pub fn aggregates_paginated(&self, skip: usize, take: Option<usize>) -> Vec<AggregateState> {
+        self.aggregates_paginated_with_transform(skip, take, |aggregate| Some(aggregate))
+    }
+
+    pub fn aggregates_paginated_with_transform<F>(
+        &self,
+        skip: usize,
+        take: Option<usize>,
+        mut transform: F,
+    ) -> Vec<AggregateState>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
         let start = Instant::now();
         let prefix = meta_prefix();
         let iter = self
@@ -1005,19 +1017,25 @@ impl EventStore {
                 }
             };
 
-            if skipped < skip {
-                skipped += 1;
-                continue;
-            }
-
-            items.push(AggregateState {
+            let aggregate = AggregateState {
                 aggregate_type: meta.aggregate_type.clone(),
                 aggregate_id: meta.aggregate_id.clone(),
                 version: meta.version,
                 state,
                 merkle_root: meta.merkle_root,
                 archived: meta.archived,
-            });
+            };
+
+            let Some(aggregate) = transform(aggregate) else {
+                continue;
+            };
+
+            if skipped < skip {
+                skipped += 1;
+                continue;
+            }
+
+            items.push(aggregate);
 
             if let Some(limit) = take {
                 if items.len() >= limit {

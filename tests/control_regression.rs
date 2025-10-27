@@ -119,7 +119,6 @@ async fn control_capnp_regression_flows() -> Result<()> {
             append.set_payload_json(
                 r#"{"status":"created","firstName":"John","address":{"street":"123 Main","zipCode":"94107"}}"#,
             );
-            append.set_patch_json("");
             append.set_metadata_json("");
             append.set_note("");
             append.set_has_note(false);
@@ -417,7 +416,6 @@ async fn control_capnp_regression_flows() -> Result<()> {
             append.set_aggregate_id("order-1");
             append.set_event_type("order_created");
             append.set_payload_json(r#"{"status":"ignored"}"#);
-            append.set_patch_json("");
             append.set_metadata_json("");
             append.set_note("");
             append.set_has_note(false);
@@ -582,7 +580,6 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             append.set_payload_json(
                 r#"{"status":"created","firstName":"John","address":{"street":"123 Main","zipCode":"94107"}}"#,
             );
-            append.set_patch_json("");
             append.set_metadata_json("");
             append.set_note("");
             append.set_has_note(false);

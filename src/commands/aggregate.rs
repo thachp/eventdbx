@@ -17,6 +17,7 @@ use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 use eventdbx::{
     config::{Config, load_or_default},
     error::EventError,
+    filter,
     merkle::compute_merkle_root,
     plugin::PluginManager,
     restrict,
@@ -261,6 +262,10 @@ pub struct AggregateListArgs {
     /// Emit results as JSON
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Filter aggregates using a SQL-like expression (e.g. `last_name = "thach"`)
+    #[arg(long)]
+    pub filter: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -322,8 +327,23 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
 
             let store =
                 EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
+            let filter_expr = match args.filter.as_ref() {
+                Some(raw) => Some(
+                    filter::parse_shorthand(raw)
+                        .with_context(|| format!("invalid filter expression: {raw}"))?,
+                ),
+                None => None,
+            };
             let take = args.take.or(Some(config.list_page_size));
-            let aggregates = store.aggregates_paginated(args.skip, take);
+            let aggregates =
+                store.aggregates_paginated_with_transform(args.skip, take, |aggregate| {
+                    if let Some(expr) = filter_expr.as_ref() {
+                        if !expr.matches_aggregate(&aggregate) {
+                            return None;
+                        }
+                    }
+                    Some(aggregate)
+                });
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&aggregates)?);
             } else {

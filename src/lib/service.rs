@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     error::{EventError, Result},
+    filter::FilterExpr,
     restrict::{self, RestrictMode},
     schema::SchemaManager,
     store::{
@@ -82,7 +83,12 @@ impl CoreContext {
         aggregate
     }
 
-    pub fn list_aggregates(&self, skip: usize, take: Option<usize>) -> Vec<AggregateState> {
+    pub fn list_aggregates(
+        &self,
+        skip: usize,
+        take: Option<usize>,
+        filter: Option<FilterExpr>,
+    ) -> Vec<AggregateState> {
         let mut effective_take = take.unwrap_or(self.list_page_size);
         if effective_take == 0 {
             return Vec::new();
@@ -91,12 +97,20 @@ impl CoreContext {
             effective_take = self.page_limit;
         }
 
+        let filter_ref = filter.as_ref();
         self.store
-            .aggregates_paginated(skip, Some(effective_take))
-            .into_iter()
-            .filter(|aggregate| !self.is_hidden_aggregate(&aggregate.aggregate_type))
-            .map(|aggregate| self.sanitize_aggregate(aggregate))
-            .collect()
+            .aggregates_paginated_with_transform(skip, Some(effective_take), |aggregate| {
+                if self.is_hidden_aggregate(&aggregate.aggregate_type) {
+                    return None;
+                }
+                let sanitized = self.sanitize_aggregate(aggregate);
+                if let Some(expr) = filter_ref {
+                    if !expr.matches_aggregate(&sanitized) {
+                        return None;
+                    }
+                }
+                Some(sanitized)
+            })
     }
 
     pub fn get_aggregate(

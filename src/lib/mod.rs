@@ -6,6 +6,7 @@ pub mod config;
 pub mod control_capnp;
 pub mod encryption;
 pub mod error;
+pub mod filter;
 pub mod merkle;
 pub mod observability;
 pub mod plugin;
