@@ -73,6 +73,47 @@ dbx schema create patient \
 
 Add additional events later with `dbx schema add patient --events patient-archived`.
 
+Schemas live alongside your data directory (default `~/.eventdbx/data/schemas.json`). Run `dbx schema <aggregate>` to print the JSON definition EventDBX enforces. You can extend it with column types, validation rules, and per-event field lists. For example:
+
+```bash
+dbx schema create person --events person_created,person_updated
+dbx schema person
+```
+
+```json
+{
+  "person": {
+    "aggregate": "person",
+    "snapshot_threshold": null,
+    "locked": false,
+    "field_locks": [],
+    "hidden": false,
+    "hidden_fields": [],
+    "column_types": {
+      "first_name": { "type": "text", "required": true, "format": "email" },
+      "last_name": {
+        "type": "text",
+        "rules": { "length": { "min": "1", "max": "64" } }
+      }
+    },
+    "events": {
+      "person_created": {
+        "fields": ["first_name", "last_name"]
+      },
+      "person_updated": {
+        "fields": []
+      }
+    },
+    "created_at": "2025-10-26T22:25:24.028129Z",
+    "updated_at": "2025-10-26T22:27:25.967615Z"
+  }
+}
+```
+
+- Use `column_types` to declare field data types, formats, and validation rules (length, range, regex, cross-field matches).
+- Populate `events.<event>.fields` with the fields an event may touch; an empty list keeps the event permissive.
+- Toggle `locked`, `field_locks`, or `hidden_fields` to freeze fields or suppress them from aggregate detail responses.
+
 ## 5. Issue a token
 
 Automation uses bearer tokens for control-socket calls and any optional plugin surfaces.
