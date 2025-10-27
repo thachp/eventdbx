@@ -60,6 +60,48 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 
    Omit `--snapshot-threshold` to inherit the default configured in `config.toml` (if any).
 
+   EventDBX stores schemas in `~/.eventdbx/data/schemas.json` (or the `data_dir` you configured). Inspect the full definition at any time with `dbx schema <aggregate>`; the command prints the JSON the server enforces. For example, a `person` aggregate that validates email format and enforces name lengths can be declared as:
+
+   ```bash
+   dbx schema create person --events person_created,person_updated
+   dbx schema person
+   ```
+
+   ```json
+   {
+     "person": {
+       "aggregate": "person",
+       "snapshot_threshold": null,
+       "locked": false,
+       "field_locks": [],
+       "hidden": false,
+       "hidden_fields": [],
+       "column_types": {
+         "first_name": { "type": "text", "required": true, "format": "email" },
+         "last_name": {
+           "type": "text",
+           "rules": { "length": { "min": "1", "max": "64" } }
+         }
+       },
+       "events": {
+         "person_created": {
+           "fields": ["first_name", "last_name"]
+         },
+         "person_updated": {
+           "fields": []
+         }
+       },
+       "created_at": "2025-10-26T22:25:24.028129Z",
+       "updated_at": "2025-10-26T22:27:25.967615Z"
+     }
+   }
+   ```
+
+   - `column_types` declare data types, validation formats, and rule blocks per field. Rules can enforce length, numeric ranges, regexes, or cross-field matches.
+   - `events.<event>.fields` restrict the properties an event may set; leaving the list empty keeps the event permissive.
+   - `field_locks` and `hidden_fields` control which fields can be updated or returned in aggregate detail calls.
+   - `locked: true` freezes the schema to prevent further event writes until it is unlocked.
+
 4. **Issue a token for CLI access**
 
    ```bash
