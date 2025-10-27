@@ -18,12 +18,12 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 
    ```bash
    # Install prebuilt binaries via shell script
-   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v1.13.2/eventdbx-installer.sh | sh
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v3.5.2/eventdbx-installer.sh | sh
    ```
 
    ```bash
    # Install prebuilt binaries via powershell script
-   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v1.13.2/eventdbx-installer.ps1 | iex"
+   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v3.5.2/eventdbx-installer.ps1 | iex"
    ```
 
 2. **Start the server**
@@ -217,15 +217,15 @@ Every aggregate command ultimately turns into a small set of RocksDB reads or wr
 
 In practice those costs are dominated by payload size and the number of events you ask the CLI to stream; hot aggregates tend to stay in the RocksDB block cache, keeping per-operation latency close to constant.
 
-| Operation            | Time complexity                | Notes |
-| -------------------- | ------------------------------ | ----- |
-| `aggregate list`     | O(k)                           | `k` is the requested page size (defaults to `list_page_size`). |
-| `aggregate get`      | O(log N + Eₐ + P)              | Single state read plus optional event scan and JSON parsing. |
-| `aggregate select`   | O(log N + P_selected)          | Same state read as `get`; dot-path traversal happens in memory. |
-| `aggregate apply`    | O(P)                           | Payload validation + merge + append in one RocksDB batch. |
-| `aggregate patch`    | O(log N + P + patch_ops)       | Reads state, applies JSON Patch, then appends the patch payload. |
-| `aggregate replay`   | O(Eₐ)                          | Linear in the number of events streamed. |
-| `aggregate verify`   | O(Eₐ)                          | Recomputes the Merkle root across the aggregate’s events. |
+| Operation          | Time complexity          | Notes                                                            |
+| ------------------ | ------------------------ | ---------------------------------------------------------------- |
+| `aggregate list`   | O(k)                     | `k` is the requested page size (defaults to `list_page_size`).   |
+| `aggregate get`    | O(log N + Eₐ + P)        | Single state read plus optional event scan and JSON parsing.     |
+| `aggregate select` | O(log N + P_selected)    | Same state read as `get`; dot-path traversal happens in memory.  |
+| `aggregate apply`  | O(P)                     | Payload validation + merge + append in one RocksDB batch.        |
+| `aggregate patch`  | O(log N + P + patch_ops) | Reads state, applies JSON Patch, then appends the patch payload. |
+| `aggregate replay` | O(Eₐ)                    | Linear in the number of events streamed.                         |
+| `aggregate verify` | O(Eₐ)                    | Recomputes the Merkle root across the aggregate’s events.        |
 
 Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply --stage` to add entries to this queue, inspect them with `aggregate list --stage`, and persist the entire batch with `aggregate commit`. Events are validated against the active schema whenever restriction is `default` or `strict`; the strict mode also insists that a schema exists before anything can be staged. The commit operation writes every pending event in one RocksDB batch, guaranteeing all-or-nothing persistence.
 
