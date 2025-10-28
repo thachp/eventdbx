@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, io::Cursor};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{
@@ -7,9 +7,10 @@ use base64::{
 };
 use capnp::message::ReaderOptions;
 use capnp::serialize::{OwnedSegments, write_message_to_words};
-use capnp_futures::serialize::read_message;
+use capnp_futures::serialize::read_message as read_async_message;
 use futures::AsyncWriteExt;
 use serde_json::{self, Value};
+use snow::TransportState;
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -17,6 +18,7 @@ use crate::{
     replication_capnp::{
         replication_hello, replication_hello_response, replication_request, replication_response,
     },
+    replication_noise::{perform_client_handshake, read_encrypted_frame, write_encrypted_frame},
     schema::AggregateSchema,
     store::{AggregatePositionEntry, EventMetadata, EventRecord},
 };
@@ -26,6 +28,7 @@ pub const REPLICATION_PROTOCOL_VERSION: u16 = 1;
 pub struct CapnpReplicationClient {
     reader: Compat<tokio::net::tcp::OwnedReadHalf>,
     writer: Compat<tokio::net::tcp::OwnedWriteHalf>,
+    noise: TransportState,
 }
 
 impl CapnpReplicationClient {
@@ -37,9 +40,13 @@ impl CapnpReplicationClient {
         let mut reader = reader_half.compat();
         let mut writer = writer_half.compat_write();
 
-        send_handshake(&mut reader, &mut writer, expected_key).await?;
+        let noise = send_handshake(&mut reader, &mut writer, expected_key).await?;
 
-        Ok(Self { reader, writer })
+        Ok(Self {
+            reader,
+            writer,
+            noise,
+        })
     }
 
     pub async fn list_positions(&mut self) -> Result<Vec<AggregatePositionEntry>> {
@@ -67,6 +74,7 @@ impl CapnpReplicationClient {
             replication_response::Which::ListPositions(Err(err)) => {
                 Err(anyhow!("failed to decode list_positions response: {err}"))
             }
+            replication_response::Which::Ok(()) => Ok(Vec::new()),
             replication_response::Which::Error(Ok(err)) => {
                 let message = read_text(err.get_message(), "error message")?;
                 bail!("remote returned error: {message}");
@@ -76,7 +84,6 @@ impl CapnpReplicationClient {
             }
             replication_response::Which::PullSchemas(_)
             | replication_response::Which::ApplySchemas(_)
-            | replication_response::Which::Ok(())
             | replication_response::Which::PullEvents(_)
             | replication_response::Which::ApplyEvents(_) => {
                 bail!("unexpected response variant for list_positions response");
@@ -239,22 +246,35 @@ impl CapnpReplicationClient {
             write_message_to_words(&message)
         };
 
-        self.writer
-            .write_all(&request_bytes)
+        self.write_encrypted_message(&request_bytes)
             .await
-            .context("failed to write replication request")?;
-        self.writer
-            .flush()
+            .context("failed to send encrypted replication request")?;
+        let response_bytes = self
+            .read_encrypted_message()
             .await
-            .context("failed to flush replication request")?;
+            .context("failed to read encrypted replication response")?;
+        let mut cursor = Cursor::new(&response_bytes);
+        capnp::serialize::read_message(&mut cursor, ReaderOptions::new())
+            .context("failed to decode replication response message")
+    }
 
-        read_message(&mut self.reader, ReaderOptions::new())
-            .await
-            .context("failed to read replication response")
+    async fn write_encrypted_message(&mut self, payload: &[u8]) -> Result<()> {
+        write_encrypted_frame(&mut self.writer, &mut self.noise, payload).await
+    }
+
+    async fn read_encrypted_message(&mut self) -> Result<Vec<u8>> {
+        match read_encrypted_frame(&mut self.reader, &mut self.noise).await? {
+            Some(bytes) => Ok(bytes),
+            None => bail!("replication connection closed unexpectedly"),
+        }
     }
 }
 
-async fn send_handshake<R, W>(reader: &mut R, writer: &mut W, expected_key: &[u8]) -> Result<()>
+async fn send_handshake<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    expected_key: &[u8],
+) -> Result<TransportState>
 where
     R: futures::AsyncRead + Unpin,
     W: futures::AsyncWrite + Unpin,
@@ -278,7 +298,7 @@ where
         .await
         .context("failed to flush replication handshake")?;
 
-    let response = read_message(reader, ReaderOptions::new())
+    let response = read_async_message(&mut *reader, ReaderOptions::new())
         .await
         .context("failed to read replication handshake response")?;
     let hello = response
@@ -288,7 +308,10 @@ where
         let reason = read_text(hello.get_message(), "handshake rejection message")?;
         bail!("replication handshake rejected: {reason}");
     }
-    Ok(())
+
+    perform_client_handshake(reader, writer, expected_key)
+        .await
+        .context("failed to establish encrypted replication channel")
 }
 
 fn encode_event(

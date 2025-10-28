@@ -1,21 +1,36 @@
-use std::{io, net::SocketAddr};
+use std::{
+    convert::TryInto,
+    io::{self, Cursor},
+    net::SocketAddr,
+};
 
 use anyhow::{Context, Result, anyhow};
-use capnp::{message::Builder, serialize::write_message_to_words};
+use capnp::{
+    message::{Builder, ReaderOptions},
+    serialize::write_message_to_words,
+};
 use capnp_futures::serialize::read_message;
 use chrono::{TimeZone, Utc};
+use ed25519_dalek::SigningKey;
 use eventdbx::{
     replication_capnp::{
         replication_hello, replication_hello_response, replication_request, replication_response,
     },
     replication_capnp_client::{CapnpReplicationClient, REPLICATION_PROTOCOL_VERSION},
+    replication_noise::{perform_server_handshake, read_encrypted_frame, write_encrypted_frame},
     snowflake::SnowflakeId,
     store::{AggregatePositionEntry, EventMetadata, EventRecord},
 };
 use futures::AsyncWriteExt;
+use rand_core::OsRng;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+enum ListPositionsFixture {
+    Positions(Vec<AggregatePositionEntry>),
+    EmptyOk,
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn capnp_regression_list_positions_and_pull_events() -> Result<()> {
@@ -33,7 +48,10 @@ async fn capnp_regression_list_positions_and_pull_events() -> Result<()> {
         .local_addr()
         .context("failed to read mock server address")?;
 
-    let expected_key = vec![0xAB; 32];
+    let mut rng = OsRng;
+    let signing_key = SigningKey::generate(&mut rng);
+    let identity_secret = signing_key.as_bytes().to_vec();
+    let expected_key = signing_key.verifying_key().as_bytes().to_vec();
 
     let positions = vec![
         AggregatePositionEntry {
@@ -72,8 +90,8 @@ async fn capnp_regression_list_positions_and_pull_events() -> Result<()> {
 
     let server_handle = tokio::spawn(run_mock_replication_server(
         listener,
-        expected_key.clone(),
-        positions.clone(),
+        identity_secret.clone(),
+        ListPositionsFixture::Positions(positions.clone()),
         vec![sample_event.clone()],
     ));
 
@@ -121,10 +139,64 @@ async fn capnp_regression_list_positions_and_pull_events() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn capnp_regression_list_positions_ok_response() -> Result<()> {
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            eprintln!("capnp regression skipped: {}", err);
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(err).context("failed to bind mock replication server");
+        }
+    };
+    let addr: SocketAddr = listener
+        .local_addr()
+        .context("failed to read mock server address")?;
+
+    let mut rng = OsRng;
+    let signing_key = SigningKey::generate(&mut rng);
+    let identity_secret = signing_key.as_bytes().to_vec();
+    let expected_key = signing_key.verifying_key().as_bytes().to_vec();
+    let server_handle = tokio::spawn(run_mock_replication_server(
+        listener,
+        identity_secret.clone(),
+        ListPositionsFixture::EmptyOk,
+        Vec::new(),
+    ));
+
+    let endpoint = addr.to_string();
+    let mut client = CapnpReplicationClient::connect(&endpoint, &expected_key)
+        .await
+        .context("client failed to connect to mock server")?;
+
+    let received_positions = client
+        .list_positions()
+        .await
+        .context("list_positions call failed")?;
+    assert!(received_positions.is_empty());
+
+    let pulled_events = client
+        .pull_events("noop", "noop", 0, Some(10))
+        .await
+        .context("pull_events call failed")?;
+    assert!(pulled_events.is_empty());
+
+    drop(client);
+
+    server_handle
+        .await
+        .context("mock server task panicked")?
+        .context("mock server failed")?;
+
+    Ok(())
+}
+
 async fn run_mock_replication_server(
     listener: TcpListener,
-    expected_key: Vec<u8>,
-    positions: Vec<AggregatePositionEntry>,
+    identity_secret: Vec<u8>,
+    list_positions_reply: ListPositionsFixture,
     events: Vec<EventRecord>,
 ) -> Result<()> {
     let (stream, _) = listener
@@ -135,6 +207,13 @@ async fn run_mock_replication_server(
     let (read_half, write_half) = stream.into_split();
     let mut reader = read_half.compat();
     let mut writer = write_half.compat_write();
+
+    let secret_bytes: [u8; 32] = identity_secret
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("invalid replication identity secret length"))?;
+    let signing_key = SigningKey::from_bytes(&secret_bytes);
+    let local_public_bytes = signing_key.verifying_key().as_bytes().to_vec();
 
     let hello_message = read_message(&mut reader, Default::default())
         .await
@@ -152,7 +231,7 @@ async fn run_mock_replication_server(
         let received_key = hello
             .get_expected_public_key()
             .context("failed to read expected key")?;
-        if received_key != expected_key.as_slice() {
+        if received_key != local_public_bytes.as_slice() {
             return Err(anyhow!("handshake carried unexpected key"));
         }
     }
@@ -170,13 +249,21 @@ async fn run_mock_replication_server(
         .context("failed to send handshake response")?;
     writer.flush().await.context("failed to flush handshake")?;
 
-    let list_request_message = read_message(&mut reader, Default::default())
+    let mut noise = perform_server_handshake(&mut reader, &mut writer, identity_secret.as_slice())
         .await
-        .context("failed to read list_positions request")?;
+        .context("failed to complete Noise handshake")?;
+
+    let list_request_bytes = read_encrypted_frame(&mut reader, &mut noise)
+        .await
+        .context("failed to read encrypted list_positions request")?
+        .ok_or_else(|| anyhow!("client closed before list_positions request"))?;
+    let mut cursor = Cursor::new(&list_request_bytes);
+    let list_request_message = capnp::serialize::read_message(&mut cursor, ReaderOptions::new())
+        .context("failed to decode list_positions request")?;
     {
         let list_request = list_request_message
             .get_root::<replication_request::Reader>()
-            .context("failed to decode list_positions request")?;
+            .context("failed to decode list_positions request root")?;
         if !matches!(
             list_request
                 .which()
@@ -190,32 +277,38 @@ async fn run_mock_replication_server(
     let mut response = Builder::new_default();
     {
         let mut envelope = response.init_root::<replication_response::Builder>();
-        let mut ok = envelope.reborrow().init_list_positions();
-        let mut list = ok.reborrow().init_positions(positions.len() as u32);
-        for (idx, entry) in positions.iter().enumerate() {
-            let mut builder = list.reborrow().get(idx as u32);
-            builder.set_aggregate_type(&entry.aggregate_type);
-            builder.set_aggregate_id(&entry.aggregate_id);
-            builder.set_version(entry.version);
+        match &list_positions_reply {
+            ListPositionsFixture::Positions(positions) => {
+                let mut ok = envelope.reborrow().init_list_positions();
+                let mut list = ok.reborrow().init_positions(positions.len() as u32);
+                for (idx, entry) in positions.iter().enumerate() {
+                    let mut builder = list.reborrow().get(idx as u32);
+                    builder.set_aggregate_type(&entry.aggregate_type);
+                    builder.set_aggregate_id(&entry.aggregate_id);
+                    builder.set_version(entry.version);
+                }
+            }
+            ListPositionsFixture::EmptyOk => {
+                envelope.set_ok(());
+            }
         }
     }
     let bytes = write_message_to_words(&response);
-    writer
-        .write_all(&bytes)
+    write_encrypted_frame(&mut writer, &mut noise, &bytes)
         .await
         .context("failed to send list_positions response")?;
-    writer
-        .flush()
-        .await
-        .context("failed to flush list_positions response")?;
 
-    let pull_request_message = read_message(&mut reader, Default::default())
-        .await
-        .context("failed to read pull_events request")?;
+    let pull_request_bytes = match read_encrypted_frame(&mut reader, &mut noise).await? {
+        Some(bytes) => bytes,
+        None => return Ok(()),
+    };
+    let mut cursor = Cursor::new(&pull_request_bytes);
+    let pull_request_message = capnp::serialize::read_message(&mut cursor, ReaderOptions::new())
+        .context("failed to decode pull_events request")?;
     let (requested_type, requested_id, from_version, limit) = {
         let pull_request = pull_request_message
             .get_root::<replication_request::Reader>()
-            .context("failed to decode pull_events request")?;
+            .context("failed to decode pull_events request root")?;
         match pull_request
             .which()
             .context("invalid request discriminant")?
@@ -284,14 +377,9 @@ async fn run_mock_replication_server(
         }
     }
     let bytes = write_message_to_words(&response);
-    writer
-        .write_all(&bytes)
+    write_encrypted_frame(&mut writer, &mut noise, &bytes)
         .await
         .context("failed to send pull_events response")?;
-    writer
-        .flush()
-        .await
-        .context("failed to flush pull_events response")?;
 
     Ok(())
 }
