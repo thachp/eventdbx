@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::{
     control_capnp::{comparison_expression, filter_expression, logical_expression},
     error::EventError,
-    store::{AggregateState, select_state_field},
+    store::{AggregateState, EventMetadata, EventRecord, select_state_field},
 };
 
 #[derive(Debug, Clone)]
@@ -67,6 +67,18 @@ impl FilterExpr {
             FilterExpr::Not(expr) => !expr.matches_aggregate(aggregate),
             FilterExpr::Comparison { field, op } => {
                 let value = resolve_field_value(aggregate, field);
+                evaluate_comparison(value, op)
+            }
+        }
+    }
+
+    pub fn matches_event(&self, event: &EventRecord) -> bool {
+        match self {
+            FilterExpr::And(children) => children.iter().all(|child| child.matches_event(event)),
+            FilterExpr::Or(children) => children.iter().any(|child| child.matches_event(event)),
+            FilterExpr::Not(expr) => !expr.matches_event(event),
+            FilterExpr::Comparison { field, op } => {
+                let value = resolve_event_value(event, field);
                 evaluate_comparison(value, op)
             }
         }
@@ -272,6 +284,128 @@ fn resolve_field_value(aggregate: &AggregateState, field: &str) -> Option<Compar
             Value::String(ref text) => ComparableValue::String(text.clone()),
             _ => ComparableValue::Unsupported,
         }),
+    }
+}
+
+fn resolve_event_value(event: &EventRecord, field: &str) -> Option<ComparableValue> {
+    match field {
+        "aggregate_type" | "aggregateType" => {
+            Some(ComparableValue::String(event.aggregate_type.clone()))
+        }
+        "aggregate_id" | "aggregateId" => Some(ComparableValue::String(event.aggregate_id.clone())),
+        "event_type" | "eventType" => Some(ComparableValue::String(event.event_type.clone())),
+        "version" => Some(ComparableValue::Number(event.version as f64)),
+        "event_id" | "eventId" => {
+            Some(ComparableValue::String(event.metadata.event_id.to_string()))
+        }
+        "created_at" | "createdAt" => Some(ComparableValue::Number(
+            event.metadata.created_at.timestamp_millis() as f64,
+        )),
+        "merkle_root" | "merkleRoot" => Some(ComparableValue::String(event.merkle_root.clone())),
+        "hash" => Some(ComparableValue::String(event.hash.clone())),
+        "note" => event
+            .metadata
+            .note
+            .as_ref()
+            .map(|note| ComparableValue::String(note.clone())),
+        other if other.starts_with("metadata.") => {
+            let path = other.trim_start_matches("metadata.");
+            metadata_field_value(&event.metadata, path)
+        }
+        other if other.starts_with("extensions.") => {
+            let path = other.trim_start_matches("extensions.");
+            event
+                .extensions
+                .as_ref()
+                .and_then(|value| select_json_comparable(value, path))
+        }
+        other if other.starts_with("payload.") => {
+            let path = other.trim_start_matches("payload.");
+            select_json_comparable(&event.payload, path)
+        }
+        other => metadata_field_value(&event.metadata, other)
+            .or_else(|| {
+                event
+                    .extensions
+                    .as_ref()
+                    .and_then(|value| select_json_comparable(value, other))
+            })
+            .or_else(|| select_json_comparable(&event.payload, other)),
+    }
+}
+
+fn metadata_field_value(metadata: &EventMetadata, field: &str) -> Option<ComparableValue> {
+    match field {
+        "note" => metadata
+            .note
+            .as_ref()
+            .map(|note| ComparableValue::String(note.clone())),
+        "event_id" | "eventId" => Some(ComparableValue::String(metadata.event_id.to_string())),
+        "created_at" | "createdAt" => Some(ComparableValue::Number(
+            metadata.created_at.timestamp_millis() as f64,
+        )),
+        other if other.starts_with("issued_by.") => {
+            let claims = metadata.issued_by.as_ref()?;
+            match other.trim_start_matches("issued_by.") {
+                "group" | "Group" => Some(ComparableValue::String(claims.group.clone())),
+                "user" | "User" => Some(ComparableValue::String(claims.user.clone())),
+                _ => None,
+            }
+        }
+        other if other.starts_with("issuedBy.") => {
+            let claims = metadata.issued_by.as_ref()?;
+            match other.trim_start_matches("issuedBy.") {
+                "group" | "Group" => Some(ComparableValue::String(claims.group.clone())),
+                "user" | "User" => Some(ComparableValue::String(claims.user.clone())),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn select_json_comparable(value: &Value, path: &str) -> Option<ComparableValue> {
+    if path.is_empty() {
+        return Some(json_value_to_comparable(value));
+    }
+    let target = select_json_value(value, path)?;
+    Some(json_value_to_comparable(&target))
+}
+
+fn select_json_value(value: &Value, path: &str) -> Option<Value> {
+    if path.is_empty() {
+        return Some(value.clone());
+    }
+
+    let mut current = value;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        match current {
+            Value::Object(object) => {
+                current = object.get(segment)?;
+            }
+            Value::Array(array) => {
+                let index = segment.parse::<usize>().ok()?;
+                current = array.get(index)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current.clone())
+}
+
+fn json_value_to_comparable(value: &Value) -> ComparableValue {
+    match value {
+        Value::Null => ComparableValue::Null,
+        Value::Bool(v) => ComparableValue::Bool(*v),
+        Value::Number(num) => num
+            .as_f64()
+            .map(ComparableValue::Number)
+            .unwrap_or(ComparableValue::Unsupported),
+        Value::String(text) => ComparableValue::String(text.clone()),
+        _ => ComparableValue::Unsupported,
     }
 }
 

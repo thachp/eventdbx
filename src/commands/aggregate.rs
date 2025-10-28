@@ -272,6 +272,10 @@ pub struct AggregateRemoveArgs {
 
 #[derive(Args)]
 pub struct AggregateListArgs {
+    /// Limit results to a single aggregate type
+    #[arg(value_name = "AGGREGATE")]
+    pub aggregate: Option<String>,
+
     /// Number of aggregates to skip
     #[arg(long, default_value_t = 0)]
     pub skip: usize,
@@ -403,13 +407,26 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
         }
         AggregateCommands::List(args) => {
+            let aggregate_filter = args.aggregate.as_deref();
+            if let Some(name) = aggregate_filter {
+                ensure_snake_case("aggregate_type", name)?;
+            }
+
             if args.stage {
                 let staging_path = config.staging_path();
                 let staged_events = load_staged_events(staging_path.as_path())?;
-                if staged_events.is_empty() {
+                let filtered: Vec<_> = staged_events
+                    .into_iter()
+                    .filter(|event| {
+                        aggregate_filter
+                            .map(|target| event.aggregate == target)
+                            .unwrap_or(true)
+                    })
+                    .collect();
+                if filtered.is_empty() {
                     println!("no staged events");
                 } else {
-                    for event in staged_events {
+                    for event in filtered {
                         println!("{}", serde_json::to_string_pretty(&event)?);
                     }
                 }
@@ -418,13 +435,33 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
 
             let store =
                 EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
-            let filter_expr = match args.filter.as_ref() {
+            let mut filter_expr = match args.filter.as_ref() {
                 Some(raw) => Some(
                     filter::parse_shorthand(raw)
                         .with_context(|| format!("invalid filter expression: {raw}"))?,
                 ),
                 None => None,
             };
+
+            if let Some(name) = aggregate_filter {
+                filter_expr = match filter_expr {
+                    Some(existing) => Some(filter::FilterExpr::And(vec![
+                        filter::FilterExpr::Comparison {
+                            field: "aggregate_type".to_string(),
+                            op: filter::ComparisonOp::Equals(filter::FilterValue::String(
+                                name.to_string(),
+                            )),
+                        },
+                        existing,
+                    ])),
+                    None => Some(filter::FilterExpr::Comparison {
+                        field: "aggregate_type".to_string(),
+                        op: filter::ComparisonOp::Equals(filter::FilterValue::String(
+                            name.to_string(),
+                        )),
+                    }),
+                };
+            }
             let mut scope = if args.archived_only {
                 AggregateQueryScope::ArchivedOnly
             } else if args.include_archived {

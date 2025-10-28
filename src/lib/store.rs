@@ -21,7 +21,10 @@ use super::{
     merkle::{compute_merkle_root, empty_root},
     schema::MAX_EVENT_NOTE_LENGTH,
 };
-use crate::snowflake::{MAX_WORKER_ID, SnowflakeGenerator, SnowflakeId};
+use crate::{
+    filter::FilterExpr,
+    snowflake::{MAX_WORKER_ID, SnowflakeGenerator, SnowflakeId},
+};
 
 const SEP: u8 = 0x1F;
 const PREFIX_EVENT: &str = "evt";
@@ -375,6 +378,41 @@ pub enum AggregateQueryScope {
     IncludeArchived,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventSortField {
+    AggregateType,
+    AggregateId,
+    EventType,
+    Version,
+    CreatedAt,
+    EventId,
+    MerkleRoot,
+    Hash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventSort {
+    pub field: EventSortField,
+    pub descending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventQueryScope<'a> {
+    All,
+    AggregateType(&'a str),
+    Aggregate {
+        aggregate_type: &'a str,
+        aggregate_id: &'a str,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventArchiveScope {
+    ActiveOnly,
+    ArchivedOnly,
+    IncludeArchived,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AggregateIndex {
     Active,
@@ -414,6 +452,45 @@ impl AggregateSort {
     }
 }
 
+impl EventSortField {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EventSortField::AggregateType => "aggregate_type",
+            EventSortField::AggregateId => "aggregate_id",
+            EventSortField::EventType => "event_type",
+            EventSortField::Version => "version",
+            EventSortField::CreatedAt => "created_at",
+            EventSortField::EventId => "event_id",
+            EventSortField::MerkleRoot => "merkle_root",
+            EventSortField::Hash => "hash",
+        }
+    }
+
+    pub fn compare(self, lhs: &EventRecord, rhs: &EventRecord) -> StdOrdering {
+        match self {
+            EventSortField::AggregateType => lhs.aggregate_type.cmp(&rhs.aggregate_type),
+            EventSortField::AggregateId => lhs.aggregate_id.cmp(&rhs.aggregate_id),
+            EventSortField::EventType => lhs.event_type.cmp(&rhs.event_type),
+            EventSortField::Version => lhs.version.cmp(&rhs.version),
+            EventSortField::CreatedAt => lhs.metadata.created_at.cmp(&rhs.metadata.created_at),
+            EventSortField::EventId => lhs.metadata.event_id.cmp(&rhs.metadata.event_id),
+            EventSortField::MerkleRoot => lhs.merkle_root.cmp(&rhs.merkle_root),
+            EventSortField::Hash => lhs.hash.cmp(&rhs.hash),
+        }
+    }
+}
+
+impl EventSort {
+    pub fn compare(self, lhs: &EventRecord, rhs: &EventRecord) -> StdOrdering {
+        let ordering = self.field.compare(lhs, rhs);
+        if self.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    }
+}
+
 impl std::str::FromStr for AggregateSortField {
     type Err = String;
 
@@ -426,6 +503,25 @@ impl std::str::FromStr for AggregateSortField {
             "merkle_root" | "merkleroot" => Ok(AggregateSortField::MerkleRoot),
             "archived" => Ok(AggregateSortField::Archived),
             _ => Err(format!("unsupported aggregate sort field '{value}'")),
+        }
+    }
+}
+
+impl std::str::FromStr for EventSortField {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "aggregate_type" | "aggregatetype" => Ok(EventSortField::AggregateType),
+            "aggregate_id" | "aggregateid" => Ok(EventSortField::AggregateId),
+            "event_type" | "eventtype" => Ok(EventSortField::EventType),
+            "version" => Ok(EventSortField::Version),
+            "created_at" | "createdat" => Ok(EventSortField::CreatedAt),
+            "event_id" | "eventid" => Ok(EventSortField::EventId),
+            "merkle_root" | "merkleroot" => Ok(EventSortField::MerkleRoot),
+            "hash" => Ok(EventSortField::Hash),
+            _ => Err(format!("unsupported event sort field '{value}'")),
         }
     }
 }
@@ -444,12 +540,33 @@ impl AggregateIndex {
             AggregateIndex::Archived => PREFIX_STATE_ARCHIVED,
         }
     }
+
+    fn event_prefix(self) -> &'static str {
+        match self {
+            AggregateIndex::Active => PREFIX_EVENT,
+            AggregateIndex::Archived => PREFIX_EVENT_ARCHIVED,
+        }
+    }
 }
 
 fn compare_aggregate_sort_keys(
     lhs: &AggregateState,
     rhs: &AggregateState,
     keys: &[AggregateSort],
+) -> StdOrdering {
+    for key in keys {
+        let ordering = key.compare(lhs, rhs);
+        if ordering != StdOrdering::Equal {
+            return ordering;
+        }
+    }
+    StdOrdering::Equal
+}
+
+fn compare_event_sort_keys(
+    lhs: &EventRecord,
+    rhs: &EventRecord,
+    keys: &[EventSort],
 ) -> StdOrdering {
     for key in keys {
         let ordering = key.compare(lhs, rhs);
@@ -894,6 +1011,74 @@ impl EventStore {
             duration,
         );
         result
+    }
+
+    pub fn events_paginated(
+        &self,
+        scope: EventQueryScope<'_>,
+        archive_scope: EventArchiveScope,
+        skip: usize,
+        take: Option<usize>,
+        sort: Option<&[EventSort]>,
+        filter: Option<&FilterExpr>,
+    ) -> Result<Vec<EventRecord>> {
+        match archive_scope {
+            EventArchiveScope::ActiveOnly => Ok(self.collect_events_paginated(
+                AggregateIndex::Active,
+                scope,
+                skip,
+                take,
+                sort,
+                filter,
+            )),
+            EventArchiveScope::ArchivedOnly => Ok(self.collect_events_paginated(
+                AggregateIndex::Archived,
+                scope,
+                skip,
+                take,
+                sort,
+                filter,
+            )),
+            EventArchiveScope::IncludeArchived => {
+                let mut active = self.collect_events_paginated(
+                    AggregateIndex::Active,
+                    scope,
+                    0,
+                    None,
+                    None,
+                    filter,
+                );
+                let mut archived = self.collect_events_paginated(
+                    AggregateIndex::Archived,
+                    scope,
+                    0,
+                    None,
+                    None,
+                    filter,
+                );
+                active.append(&mut archived);
+
+                if let Some(keys) = sort {
+                    active.sort_by(|a, b| compare_event_sort_keys(a, b, keys));
+                }
+
+                let total = active.len();
+                let start = skip.min(total);
+                let end = if let Some(limit) = take {
+                    start.saturating_add(limit).min(total)
+                } else {
+                    total
+                };
+                Ok(active[start..end].to_vec())
+            }
+        }
+    }
+
+    pub fn find_event_by_id(&self, event_id: SnowflakeId) -> Result<Option<EventRecord>> {
+        if let Some(event) = self.find_event_by_id_in_index(AggregateIndex::Active, event_id)? {
+            return Ok(Some(event));
+        }
+        self.find_event_by_id_in_index(AggregateIndex::Archived, event_id)
     }
 
     pub fn aggregate_version(
@@ -1381,6 +1566,160 @@ impl EventStore {
         items
     }
 
+    fn collect_events_paginated(
+        &self,
+        index: AggregateIndex,
+        scope: EventQueryScope<'_>,
+        skip: usize,
+        take: Option<usize>,
+        sort: Option<&[EventSort]>,
+        filter: Option<&FilterExpr>,
+    ) -> Vec<EventRecord> {
+        let start = Instant::now();
+        let prefix = event_prefix_for_scope(index, scope);
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+        let mut items = Vec::new();
+        let mut skipped = 0usize;
+        let should_sort = sort.map_or(false, |keys| !keys.is_empty());
+        let mut status = "ok";
+
+        for item in iter {
+            let Ok((key, value)) = item else {
+                status = "err";
+                continue;
+            };
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            if key.len() > prefix.len() && key[prefix.len()] != SEP {
+                break;
+            }
+
+            let raw: EventRecord = match serde_json::from_slice(&value) {
+                Ok(record) => record,
+                Err(_) => {
+                    status = "err";
+                    continue;
+                }
+            };
+            let record = match self.decode_record(raw) {
+                Ok(record) => record,
+                Err(_) => {
+                    status = "err";
+                    continue;
+                }
+            };
+
+            if let Some(expr) = filter {
+                if !expr.matches_event(&record) {
+                    continue;
+                }
+            }
+
+            if skipped < skip && !should_sort {
+                skipped += 1;
+                continue;
+            }
+
+            if should_sort {
+                items.push(record);
+                continue;
+            }
+
+            items.push(record);
+
+            if let Some(limit) = take {
+                if items.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        if should_sort {
+            if let Some(keys) = sort {
+                items.sort_by(|a, b| compare_event_sort_keys(a, b, keys));
+            }
+
+            let total = items.len();
+            let start = skip.min(total);
+            let end = if let Some(limit) = take {
+                start.saturating_add(limit).min(total)
+            } else {
+                total
+            };
+            items = items[start..end].to_vec();
+        }
+
+        let duration = start.elapsed().as_secs_f64();
+        let metric = match index {
+            AggregateIndex::Active => "rocksdb_iter_events",
+            AggregateIndex::Archived => "rocksdb_iter_events_archived",
+        };
+        record_store_op(metric, status, duration);
+        items
+    }
+
+    fn find_event_by_id_in_index(
+        &self,
+        index: AggregateIndex,
+        event_id: SnowflakeId,
+    ) -> Result<Option<EventRecord>> {
+        let start = Instant::now();
+        let prefix = key_with_segments(&[index.event_prefix()]);
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+        let mut status = "ok";
+
+        for item in iter {
+            let Ok((key, value)) = item else {
+                status = "err";
+                continue;
+            };
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            if key.len() > prefix.len() && key[prefix.len()] != SEP {
+                break;
+            }
+
+            let raw: EventRecord = match serde_json::from_slice(&value) {
+                Ok(record) => record,
+                Err(_) => {
+                    status = "err";
+                    continue;
+                }
+            };
+            let record = match self.decode_record(raw) {
+                Ok(record) => record,
+                Err(_) => {
+                    status = "err";
+                    continue;
+                }
+            };
+
+            if record.metadata.event_id == event_id {
+                let duration = start.elapsed().as_secs_f64();
+                let metric = match index {
+                    AggregateIndex::Active => "rocksdb_scan_event_id",
+                    AggregateIndex::Archived => "rocksdb_scan_event_id_archived",
+                };
+                record_store_op(metric, status, duration);
+                return Ok(Some(record));
+            }
+        }
+
+        let duration = start.elapsed().as_secs_f64();
+        let metric = match index {
+            AggregateIndex::Active => "rocksdb_scan_event_id",
+            AggregateIndex::Archived => "rocksdb_scan_event_id_archived",
+        };
+        record_store_op(metric, status, duration);
+        Ok(None)
+    }
+
     pub fn aggregate_positions(&self) -> Result<Vec<AggregatePositionEntry>> {
         let start = Instant::now();
         let result = (|| {
@@ -1658,6 +1997,19 @@ fn event_key(aggregate_type: &str, aggregate_id: &str, version: u64) -> Vec<u8> 
         aggregate_id,
         version,
     )
+}
+
+fn event_prefix_for_scope(index: AggregateIndex, scope: EventQueryScope<'_>) -> Vec<u8> {
+    match scope {
+        EventQueryScope::All => key_with_segments(&[index.event_prefix()]),
+        EventQueryScope::AggregateType(aggregate_type) => {
+            key_with_segments(&[index.event_prefix(), aggregate_type])
+        }
+        EventQueryScope::Aggregate {
+            aggregate_type,
+            aggregate_id,
+        } => key_with_segments(&[index.event_prefix(), aggregate_type, aggregate_id]),
+    }
 }
 
 fn snapshot_key(aggregate_type: &str, aggregate_id: &str, created_at: DateTime<Utc>) -> Vec<u8> {

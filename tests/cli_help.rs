@@ -155,6 +155,14 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "Retry dead entries, optionally filtering by job id",
     },
     HelpCase {
+        path: &["events"],
+        expected_snippet: "List events in the store",
+    },
+    HelpCase {
+        path: &["event"],
+        expected_snippet: "Inspect a single event by Snowflake identifier",
+    },
+    HelpCase {
         path: &["aggregate"],
         expected_snippet: "Manage aggregates",
     },

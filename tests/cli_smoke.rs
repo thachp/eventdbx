@@ -1433,6 +1433,49 @@ fn aggregate_list_json_empty() -> Result<()> {
 }
 
 #[test]
+fn aggregate_list_accepts_positional_type() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "patient", "--events", "patient_created"])?;
+    cli.run(&["schema", "create", "order", "--events", "order_created"])?;
+
+    cli.create_aggregate("patient", "patient-1")?;
+    cli.run(&[
+        "aggregate",
+        "apply",
+        "patient",
+        "patient-1",
+        "patient_created",
+        "--payload",
+        r#"{"status":"active"}"#,
+    ])?;
+    cli.create_aggregate("order", "order-1")?;
+
+    let patient_list = cli.run_json(&["aggregate", "list", "patient", "--json"])?;
+    let patient_array = patient_list
+        .as_array()
+        .context("patient aggregate list did not return an array")?;
+    assert_eq!(patient_array.len(), 1);
+    assert!(
+        patient_array
+            .iter()
+            .all(|entry| entry["aggregate_type"] == "patient")
+    );
+
+    let order_list = cli.run_json(&["aggregate", "list", "order", "--json"])?;
+    let order_array = order_list
+        .as_array()
+        .context("order aggregate list did not return an array")?;
+    assert_eq!(order_array.len(), 1);
+    assert!(
+        order_array
+            .iter()
+            .all(|entry| entry["aggregate_type"] == "order")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn aggregate_commit_no_staged_events() -> Result<()> {
     let cli = CliTest::new()?;
     let output = cli.run(&["aggregate", "commit"])?;
@@ -2177,6 +2220,69 @@ fn aggregate_stage_and_commit_flow() -> Result<()> {
     assert_eq!(events[0]["event_type"], "order_created");
     assert_eq!(events[1]["event_type"], "order_updated");
     assert_eq!(events[1]["payload"]["status"], "processing");
+
+    Ok(())
+}
+
+#[test]
+fn events_list_filters_by_payload_field() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "orders", "--events", "order_created"])?;
+    cli.create_aggregate("orders", "order-1")?;
+    cli.run(&[
+        "aggregate",
+        "apply",
+        "orders",
+        "order-1",
+        "order_created",
+        "--field",
+        "status=open",
+    ])?;
+
+    let events = cli.run_json(&["events", "--filter", r#"payload.status = "open""#, "--json"])?;
+    let array = events.as_array().context("events output missing array")?;
+    assert_eq!(array.len(), 1);
+    assert_eq!(array[0]["event_type"], "order_created");
+
+    let filtered = cli.run_json(&[
+        "events",
+        "--filter",
+        r#"payload.status = "closed""#,
+        "--json",
+    ])?;
+    let filtered_array = filtered
+        .as_array()
+        .context("filtered events output missing array")?;
+    assert!(
+        filtered_array.is_empty(),
+        "expected filtered events to be empty"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn event_show_returns_single_event() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "orders", "--events", "order_created"])?;
+    cli.create_aggregate("orders", "order-1")?;
+    let record = cli.run_json(&[
+        "aggregate",
+        "apply",
+        "orders",
+        "order-1",
+        "order_created",
+        "--field",
+        "status=open",
+    ])?;
+    let event_id = record["metadata"]["event_id"]
+        .as_str()
+        .context("aggregate apply output missing event_id")?;
+
+    let detail = cli.run_json(&["event", event_id, "--json"])?;
+    assert_eq!(detail["event_type"], "order_created");
+    assert_eq!(detail["aggregate_id"], "order-1");
+    assert_eq!(detail["payload"]["status"], "open");
 
     Ok(())
 }
