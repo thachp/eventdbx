@@ -276,9 +276,7 @@ impl CoreContext {
             return Err(EventError::Unauthorized);
         }
 
-        let comment = comment
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
+        let comment = normalize_optional_comment(comment);
 
         let store = self.store();
         let state = store.set_archive(&aggregate_type, &aggregate_id, archived, comment)?;
@@ -443,4 +441,15 @@ pub struct SetAggregateArchiveInput {
     pub aggregate_id: String,
     pub archived: bool,
     pub comment: Option<String>,
+}
+
+pub(crate) fn normalize_optional_comment(comment: Option<String>) -> Option<String> {
+    comment.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }

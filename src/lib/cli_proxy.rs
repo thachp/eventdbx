@@ -36,7 +36,10 @@ use crate::{
     },
     replication_capnp_client::REPLICATION_PROTOCOL_VERSION,
     schema::{AggregateSchema, SchemaManager},
-    service::{AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput},
+    service::{
+        AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
+        normalize_optional_comment,
+    },
     store::{
         AggregatePositionEntry, AggregateQueryScope, AggregateSort, AggregateSortField,
         EventMetadata, EventRecord, EventStore,
@@ -852,16 +855,11 @@ fn parse_control_command(
             let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
             let archived = req.get_archived();
 
-            let comment = if req.get_has_comment() {
-                let value = read_control_text(req.get_comment(), "comment")?;
-                if value.trim().is_empty() {
-                    None
-                } else {
-                    Some(value)
-                }
+            let comment = normalize_optional_comment(if req.get_has_comment() {
+                Some(read_control_text(req.get_comment(), "comment")?)
             } else {
                 None
-            };
+            });
 
             Ok(ControlCommand::SetAggregateArchive {
                 token,
