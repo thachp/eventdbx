@@ -131,6 +131,8 @@ impl fmt::Display for ColumnTypeParseError {
 
 impl std::error::Error for ColumnTypeParseError {}
 
+// Manual implementation of `Deserialize` for `FieldRules` is provided elsewhere.
+// This is necessary to ignore the deprecated `must_match` field during deserialization.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct FieldRules {
