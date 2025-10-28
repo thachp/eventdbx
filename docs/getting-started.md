@@ -90,8 +90,8 @@ dbx schema person
     "hidden": false,
     "hidden_fields": [],
     "column_types": {
-      "first_name": { "type": "text", "required": true, "format": "email" },
-      "last_name": {
+      "email": { "type": "text", "required": true, "format": "email" },
+      "full_name": {
         "type": "text",
         "rules": { "length": { "min": "1", "max": "64" } }
       }
