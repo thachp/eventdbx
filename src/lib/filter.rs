@@ -927,10 +927,9 @@ mod tests {
 
     #[test]
     fn parse_shorthand_supports_nested_logic() {
-        let expr = parse_shorthand(
-            r#"(status = "pending" OR status = "paid") AND archived = false"#,
-        )
-        .expect("parse succeeds");
+        let expr =
+            parse_shorthand(r#"(status = "pending" OR status = "paid") AND archived = false"#)
+                .expect("parse succeeds");
 
         let FilterExpr::And(parts) = expr else {
             panic!("expected AND expression");
@@ -991,12 +990,10 @@ mod tests {
     fn matches_aggregate_handles_in_and_like() {
         let aggregate = sample_aggregate();
 
-        let expr =
-            parse_shorthand(r#"status IN ["pending","paid"]"#).expect("parse succeeds");
+        let expr = parse_shorthand(r#"status IN ["pending","paid"]"#).expect("parse succeeds");
         assert!(expr.matches_aggregate(&aggregate));
 
-        let expr =
-            parse_shorthand(r#"aggregate_id LIKE "order%""#).expect("parse succeeds");
+        let expr = parse_shorthand(r#"aggregate_id LIKE "order%""#).expect("parse succeeds");
         assert!(expr.matches_aggregate(&aggregate));
     }
 

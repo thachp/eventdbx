@@ -32,6 +32,8 @@ struct ListAggregatesRequest {
   hasTake @2 :Bool;
   filter @3 :FilterExpression;
   hasFilter @4 :Bool;
+  sort @5 :List(AggregateSort);
+  hasSort @6 :Bool;
 }
 
 struct ListAggregatesResponse {
@@ -108,6 +110,19 @@ struct SelectAggregateRequest {
 struct SelectAggregateResponse {
   found @0 :Bool;
   selectionJson @1 :Text;
+}
+
+struct AggregateSort {
+  field @0 :AggregateSortField;
+  descending @1 :Bool;
+}
+
+enum AggregateSortField {
+  aggregateType @0;
+  aggregateId @1;
+  version @2;
+  merkleRoot @3;
+  archived @4;
 }
 
 struct FilterExpression {

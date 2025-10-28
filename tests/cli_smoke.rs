@@ -1623,6 +1623,100 @@ fn aggregate_patch_and_select_flow() -> Result<()> {
 }
 
 #[test]
+fn aggregate_list_supports_sorting() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&[
+        "aggregate",
+        "apply",
+        "order",
+        "order-1",
+        "order_created",
+        "--field",
+        "status=created",
+    ])?;
+    cli.run(&[
+        "aggregate",
+        "apply",
+        "order",
+        "order-2",
+        "order_created",
+        "--field",
+        "status=created",
+    ])?;
+    cli.run(&[
+        "aggregate",
+        "apply",
+        "invoice",
+        "invoice-1",
+        "invoice_created",
+        "--field",
+        "total=100",
+    ])?;
+    cli.run(&[
+        "aggregate",
+        "apply",
+        "order",
+        "order-1",
+        "order_updated",
+        "--field",
+        "status=confirmed",
+    ])?;
+
+    let aggregates = cli.run_json(&[
+        "aggregate",
+        "list",
+        "--json",
+        "--sort",
+        "aggregate_type:asc,aggregate_id:desc",
+    ])?;
+    let list = aggregates
+        .as_array()
+        .context("sorted aggregate list did not return an array")?;
+    assert_eq!(list.len(), 3, "expected three aggregates in list");
+    assert_eq!(list[0]["aggregate_type"], "invoice");
+    assert_eq!(list[0]["aggregate_id"], "invoice-1");
+    assert_eq!(list[1]["aggregate_type"], "order");
+    assert_eq!(list[1]["aggregate_id"], "order-2");
+    assert_eq!(list[2]["aggregate_id"], "order-1");
+
+    let version_sorted = cli.run_json(&[
+        "aggregate",
+        "list",
+        "--json",
+        "--sort",
+        "version:desc,aggregate_id:asc",
+    ])?;
+    let version_list = version_sorted
+        .as_array()
+        .context("version-sorted list did not return an array")?;
+    assert_eq!(version_list.len(), 3);
+    assert_eq!(version_list[0]["aggregate_id"], "order-1");
+    assert_eq!(version_list[0]["version"], 2);
+    assert_eq!(version_list[1]["version"], 1);
+    assert_eq!(version_list[2]["version"], 1);
+
+    let paged = cli.run_json(&[
+        "aggregate",
+        "list",
+        "--json",
+        "--take",
+        "1",
+        "--skip",
+        "1",
+        "--sort",
+        "version:desc,aggregate_id:asc",
+    ])?;
+    let paged_list = paged
+        .as_array()
+        .context("paged aggregate list did not return an array")?;
+    assert_eq!(paged_list.len(), 1);
+    assert_eq!(paged_list[0]["aggregate_id"], "invoice-1");
+
+    Ok(())
+}
+
+#[test]
 fn aggregate_replay_after_apply_returns_events() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run_json(&[

@@ -66,6 +66,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_skip(0);
             list.set_take(0);
             list.set_has_take(false);
+            list.set_has_sort(false);
         },
         |response| match response
             .get_payload()
@@ -195,6 +196,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_skip(0);
             list.set_take(10);
             list.set_has_take(true);
+            list.set_has_sort(false);
         },
         |response| match response
             .get_payload()

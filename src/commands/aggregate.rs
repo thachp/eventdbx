@@ -4,6 +4,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -23,7 +24,8 @@ use eventdbx::{
     restrict,
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
-        self, ActorClaims, AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
+        self, ActorClaims, AggregateSort, AggregateSortField, AppendEvent, EventRecord, EventStore,
+        payload_to_map, select_state_field,
     },
     token::{IssueTokenInput, JwtLimits, TokenManager},
     validation::{
@@ -266,6 +268,10 @@ pub struct AggregateListArgs {
     /// Filter aggregates using a SQL-like expression (e.g. `last_name = "thach"`)
     #[arg(long)]
     pub filter: Option<String>,
+
+    /// Sort aggregates by comma-separated fields (e.g. `aggregate_type:asc,version:desc`)
+    #[arg(long, value_name = "FIELD[:ORDER][,...]")]
+    pub sort: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -335,15 +341,28 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 None => None,
             };
             let take = args.take.or(Some(config.list_page_size));
-            let aggregates =
-                store.aggregates_paginated_with_transform(args.skip, take, |aggregate| {
+            let sort_directives = if let Some(spec) = args.sort.as_deref() {
+                Some(
+                    parse_sort_directives(spec)
+                        .map_err(|err| anyhow!("invalid sort specification: {err}"))?,
+                )
+            } else {
+                None
+            };
+            let sort_keys = sort_directives.as_ref().map(|keys| keys.as_slice());
+            let aggregates = store.aggregates_paginated_with_transform(
+                args.skip,
+                take,
+                sort_keys,
+                |aggregate| {
                     if let Some(expr) = filter_expr.as_ref() {
                         if !expr.matches_aggregate(&aggregate) {
                             return None;
                         }
                     }
                     Some(aggregate)
-                });
+                },
+            );
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&aggregates)?);
             } else {
@@ -1461,6 +1480,56 @@ fn create_zip_archive(files: &[(PathBuf, String)], output: &Path) -> Result<()> 
 
     zip.finish()?;
     Ok(())
+}
+
+fn parse_sort_directives(raw: &str) -> Result<Vec<AggregateSort>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("sort specification cannot be empty".to_string());
+    }
+
+    let mut directives = Vec::new();
+    for segment in trimmed.split(',') {
+        let spec = segment.trim();
+        if spec.is_empty() {
+            return Err("sort segments cannot be empty".to_string());
+        }
+        directives.push(parse_single_sort(spec)?);
+    }
+
+    Ok(directives)
+}
+
+fn parse_single_sort(spec: &str) -> Result<AggregateSort, String> {
+    let mut parts = spec.split(':');
+    let field_str = parts
+        .next()
+        .ok_or_else(|| "missing sort field".to_string())?
+        .trim();
+
+    if field_str.is_empty() {
+        return Err("sort field cannot be empty".to_string());
+    }
+
+    let field = AggregateSortField::from_str(field_str)?;
+    let descending = match parts.next() {
+        Some(order) => match order.trim().to_ascii_lowercase().as_str() {
+            "asc" => false,
+            "desc" => true,
+            other => {
+                return Err(format!(
+                    "invalid sort order '{other}' (expected 'asc' or 'desc')"
+                ));
+            }
+        },
+        None => false,
+    };
+
+    if parts.next().is_some() {
+        return Err("sort specification contains too many ':' separators".to_string());
+    }
+
+    Ok(AggregateSort { field, descending })
 }
 
 fn parse_key_value(raw: &str) -> Result<KeyValue, String> {

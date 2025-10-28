@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering as StdOrdering,
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     str,
@@ -346,6 +347,84 @@ pub struct AggregateState {
     pub state: BTreeMap<String, String>,
     pub merkle_root: String,
     pub archived: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateSortField {
+    AggregateType,
+    AggregateId,
+    Version,
+    MerkleRoot,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AggregateSort {
+    pub field: AggregateSortField,
+    pub descending: bool,
+}
+
+impl AggregateSortField {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AggregateSortField::AggregateType => "aggregate_type",
+            AggregateSortField::AggregateId => "aggregate_id",
+            AggregateSortField::Version => "version",
+            AggregateSortField::MerkleRoot => "merkle_root",
+            AggregateSortField::Archived => "archived",
+        }
+    }
+
+    pub fn compare(self, lhs: &AggregateState, rhs: &AggregateState) -> StdOrdering {
+        match self {
+            AggregateSortField::AggregateType => lhs.aggregate_type.cmp(&rhs.aggregate_type),
+            AggregateSortField::AggregateId => lhs.aggregate_id.cmp(&rhs.aggregate_id),
+            AggregateSortField::Version => lhs.version.cmp(&rhs.version),
+            AggregateSortField::MerkleRoot => lhs.merkle_root.cmp(&rhs.merkle_root),
+            AggregateSortField::Archived => lhs.archived.cmp(&rhs.archived),
+        }
+    }
+}
+
+impl AggregateSort {
+    pub fn compare(self, lhs: &AggregateState, rhs: &AggregateState) -> StdOrdering {
+        let ordering = self.field.compare(lhs, rhs);
+        if self.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    }
+}
+
+impl std::str::FromStr for AggregateSortField {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "aggregate_type" | "aggregatetype" => Ok(AggregateSortField::AggregateType),
+            "aggregate_id" | "aggregateid" => Ok(AggregateSortField::AggregateId),
+            "version" => Ok(AggregateSortField::Version),
+            "merkle_root" | "merkleroot" => Ok(AggregateSortField::MerkleRoot),
+            "archived" => Ok(AggregateSortField::Archived),
+            _ => Err(format!("unsupported aggregate sort field '{value}'")),
+        }
+    }
+}
+
+fn compare_aggregate_sort_keys(
+    lhs: &AggregateState,
+    rhs: &AggregateState,
+    keys: &[AggregateSort],
+) -> StdOrdering {
+    for key in keys {
+        let ordering = key.compare(lhs, rhs);
+        if ordering != StdOrdering::Equal {
+            return ordering;
+        }
+    }
+    StdOrdering::Equal
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -972,13 +1051,14 @@ impl EventStore {
     }
 
     pub fn aggregates_paginated(&self, skip: usize, take: Option<usize>) -> Vec<AggregateState> {
-        self.aggregates_paginated_with_transform(skip, take, |aggregate| Some(aggregate))
+        self.aggregates_paginated_with_transform(skip, take, None, |aggregate| Some(aggregate))
     }
 
     pub fn aggregates_paginated_with_transform<F>(
         &self,
         skip: usize,
         take: Option<usize>,
+        sort: Option<&[AggregateSort]>,
         mut transform: F,
     ) -> Vec<AggregateState>
     where
@@ -991,6 +1071,7 @@ impl EventStore {
             .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
         let mut items = Vec::new();
         let mut skipped = 0usize;
+        let should_sort = sort.map_or(false, |keys| !keys.is_empty());
         let mut status = "ok";
 
         for item in iter {
@@ -1030,8 +1111,13 @@ impl EventStore {
                 continue;
             };
 
-            if skipped < skip {
+            if skipped < skip && !should_sort {
                 skipped += 1;
+                continue;
+            }
+
+            if should_sort {
+                items.push(aggregate);
                 continue;
             }
 
@@ -1042,6 +1128,21 @@ impl EventStore {
                     break;
                 }
             }
+        }
+
+        if should_sort {
+            if let Some(keys) = sort {
+                items.sort_by(|a, b| compare_aggregate_sort_keys(a, b, keys));
+            }
+
+            let total = items.len();
+            let start = skip.min(total);
+            let end = if let Some(limit) = take {
+                start.saturating_add(limit).min(total)
+            } else {
+                total
+            };
+            items = items[start..end].to_vec();
         }
 
         let duration = start.elapsed().as_secs_f64();

@@ -24,7 +24,9 @@ use tracing::{debug, error, info, warn};
 use crate::{
     cli_capnp::{cli_request, cli_response},
     config::Config,
-    control_capnp::{control_request, control_response},
+    control_capnp::{
+        AggregateSortField as CapnpAggregateSortField, control_request, control_response,
+    },
     error::EventError,
     filter::FilterExpr,
     observability,
@@ -35,7 +37,10 @@ use crate::{
     replication_capnp_client::REPLICATION_PROTOCOL_VERSION,
     schema::{AggregateSchema, SchemaManager},
     service::{AppendEventInput, CoreContext},
-    store::{AggregatePositionEntry, EventMetadata, EventRecord, EventStore},
+    store::{
+        AggregatePositionEntry, AggregateSort, AggregateSortField, EventMetadata, EventRecord,
+        EventStore,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -85,6 +90,7 @@ enum ControlCommand {
         skip: usize,
         take: Option<usize>,
         filter: Option<FilterExpr>,
+        sort: Option<Vec<AggregateSort>>,
     },
     GetAggregate {
         aggregate_type: String,
@@ -539,7 +545,43 @@ fn parse_control_command(
                 None
             };
 
-            Ok(ControlCommand::ListAggregates { skip, take, filter })
+            let sort = if req.get_has_sort() {
+                let list = req
+                    .get_sort()
+                    .map_err(|err| EventError::Serialization(err.to_string()))?;
+                let mut directives = Vec::with_capacity(list.len() as usize);
+                for entry in list.iter() {
+                    let field = match entry.get_field().map_err(|err| {
+                        EventError::InvalidSchema(format!(
+                            "unknown aggregate sort field value: {err}"
+                        ))
+                    })? {
+                        CapnpAggregateSortField::AggregateType => AggregateSortField::AggregateType,
+                        CapnpAggregateSortField::AggregateId => AggregateSortField::AggregateId,
+                        CapnpAggregateSortField::Version => AggregateSortField::Version,
+                        CapnpAggregateSortField::MerkleRoot => AggregateSortField::MerkleRoot,
+                        CapnpAggregateSortField::Archived => AggregateSortField::Archived,
+                    };
+                    directives.push(AggregateSort {
+                        field,
+                        descending: entry.get_descending(),
+                    });
+                }
+                if directives.is_empty() {
+                    None
+                } else {
+                    Some(directives)
+                }
+            } else {
+                None
+            };
+
+            Ok(ControlCommand::ListAggregates {
+                skip,
+                take,
+                filter,
+                sort,
+            })
         }
         payload::GetAggregate(req) => {
             let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
@@ -721,10 +763,18 @@ async fn execute_control_command(
     shared_config: Arc<RwLock<Config>>,
 ) -> std::result::Result<ControlReply, EventError> {
     match command {
-        ControlCommand::ListAggregates { skip, take, filter } => {
+        ControlCommand::ListAggregates {
+            skip,
+            take,
+            filter,
+            sort,
+        } => {
             let aggregates = spawn_blocking({
                 let core = core.clone();
-                move || core.list_aggregates(skip, take, filter)
+                move || {
+                    let sort_ref = sort.as_ref().map(|keys| keys.as_slice());
+                    core.list_aggregates(skip, take, filter, sort_ref)
+                }
             })
             .await
             .map_err(|err| EventError::Storage(format!("list aggregates task failed: {err}")))?;
