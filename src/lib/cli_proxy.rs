@@ -137,6 +137,10 @@ enum ControlCommand {
         token: String,
         aggregate_type: String,
         aggregate_id: String,
+        event_type: String,
+        payload: Value,
+        metadata: Option<Value>,
+        note: Option<String>,
     },
 }
 
@@ -748,11 +752,48 @@ fn parse_control_command(
                 .to_string();
             let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
             let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+            let event_type = read_control_text(req.get_event_type(), "event_type")?;
+
+            let payload_raw = read_control_text(req.get_payload_json(), "payload_json")?;
+            let payload_trimmed = payload_raw.trim();
+            if payload_trimmed.is_empty() {
+                return Err(EventError::InvalidSchema(
+                    "payload_json must be provided when creating an aggregate".into(),
+                ));
+            }
+            let payload = serde_json::from_str::<Value>(payload_trimmed)
+                .map_err(|err| EventError::InvalidSchema(format!("invalid payload_json: {err}")))?;
+
+            let metadata = if req.get_has_metadata() {
+                let metadata_raw = read_control_text(req.get_metadata_json(), "metadata_json")?;
+                let metadata_trimmed = metadata_raw.trim();
+                if metadata_trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        serde_json::from_str::<Value>(metadata_trimmed).map_err(|err| {
+                            EventError::InvalidSchema(format!("invalid metadata_json: {err}"))
+                        })?,
+                    )
+                }
+            } else {
+                None
+            };
+
+            let note = if req.get_has_note() {
+                Some(read_control_text(req.get_note(), "note")?)
+            } else {
+                None
+            };
 
             Ok(ControlCommand::CreateAggregate {
                 token,
                 aggregate_type,
                 aggregate_id,
+                event_type,
+                payload,
+                metadata,
+                note,
             })
         }
         payload::VerifyAggregate(req) => {
@@ -981,17 +1022,29 @@ async fn execute_control_command(
             token,
             aggregate_type,
             aggregate_id,
+            event_type,
+            payload,
+            metadata,
+            note,
         } => {
             let aggregate = spawn_blocking({
                 let core = core.clone();
                 let aggregate_type = aggregate_type.clone();
                 let aggregate_id = aggregate_id.clone();
                 let token = token.clone();
+                let event_type = event_type.clone();
+                let payload = payload.clone();
+                let metadata = metadata.clone();
+                let note = note.clone();
                 move || {
                     core.create_aggregate(CreateAggregateInput {
                         token,
                         aggregate_type,
                         aggregate_id,
+                        event_type,
+                        payload,
+                        metadata,
+                        note,
                     })
                 }
             })

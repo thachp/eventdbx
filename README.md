@@ -188,8 +188,11 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 
 ### Aggregates
 
-- `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--payload <json>] [--patch <json>] [--stage] [--token <value>] [--note <text>]`  
+- `dbx aggregate create --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--metadata <json>] [--note <text>] [--token <value>] [--json]`  
+- `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--payload <json>] [--stage] [--token <value>] [--note <text>]`  
   Appends an event immediately—use `--stage` to queue it for a later commit.
+- `dbx aggregate patch --aggregate <type> --aggregate-id <id> --event <name> --patch <json> [--stage] [--token <value>] [--metadata <json>] [--note <text>]`  
+  Applies an RFC 6902 JSON Patch to the current state and persists the delta as a new event.
 - `dbx aggregate list [--skip <n>] [--take <n>] [--stage]`  
   Lists aggregates with version, Merkle root, and archive status; pass `--stage` to display queued events instead.
 - `dbx aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
@@ -211,7 +214,7 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 - `dbx aggregate export [<type>] [--all] --output <path> [--format csv|json] [--zip] [--pretty]`  
   Writes the current aggregate state (no metadata) as CSV or JSON. Exports default to one file per aggregate type; pass `--zip` to bundle the output into an archive.
 
-`--payload` and `--patch` are mutually exclusive. Use `--payload` when you want to supply the full document explicitly; use `--patch` for an RFC 6902 JSON Patch that the server applies before validation and persistence.
+`--payload` lets you provide the full event document explicitly; use `dbx aggregate patch` when you need to apply an RFC 6902 JSON Patch server-side.
 
 #### Aggregate Operation Costs
 

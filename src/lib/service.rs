@@ -205,22 +205,29 @@ impl CoreContext {
             token,
             aggregate_type,
             aggregate_id,
+            event_type,
+            payload,
+            metadata,
+            note,
         } = input;
 
         ensure_snake_case("aggregate_type", &aggregate_type)?;
+        ensure_snake_case("event_type", &event_type)?;
         ensure_aggregate_id(&aggregate_id)?;
+        if let Some(ref metadata) = metadata {
+            ensure_metadata_extensions(metadata)?;
+        }
+        ensure_payload_size(&payload)?;
 
-        let schemas = self.schemas();
-        let schema_present = match schemas.get(&aggregate_type) {
-            Ok(_) => true,
-            Err(EventError::SchemaNotFound) => false,
-            Err(err) => return Err(err),
-        };
-
-        if !schema_present && self.restrict.requires_declared_schema() {
-            return Err(EventError::SchemaViolation(
-                restrict::strict_mode_missing_schema_message(&aggregate_type),
-            ));
+        let store = self.store();
+        if store
+            .aggregate_version(&aggregate_type, &aggregate_id)?
+            .is_some()
+        {
+            return Err(EventError::SchemaViolation(format!(
+                "aggregate {}::{} already exists",
+                aggregate_type, aggregate_id
+            )));
         }
 
         let resource = format!("aggregate:{}:{}", aggregate_type, aggregate_id);
@@ -232,11 +239,19 @@ impl CoreContext {
             return Err(EventError::Unauthorized);
         }
 
-        self.store
-            .create_aggregate(&aggregate_type, &aggregate_id)?;
-        let aggregate = self
-            .store
-            .get_aggregate_state(&aggregate_type, &aggregate_id)?;
+        let _record = self.append_event(AppendEventInput {
+            token,
+            aggregate_type: aggregate_type.clone(),
+            aggregate_id: aggregate_id.clone(),
+            event_type,
+            payload: Some(payload),
+            patch: None,
+            metadata,
+            note,
+            require_existing: false,
+        })?;
+
+        let aggregate = store.get_aggregate_state(&aggregate_type, &aggregate_id)?;
         Ok(self.sanitize_aggregate(aggregate))
     }
 
@@ -385,4 +400,8 @@ pub struct CreateAggregateInput {
     pub token: String,
     pub aggregate_type: String,
     pub aggregate_id: String,
+    pub event_type: String,
+    pub payload: Value,
+    pub metadata: Option<Value>,
+    pub note: Option<String>,
 }

@@ -30,19 +30,45 @@ impl ServerClient {
         token: &str,
         aggregate_type: &str,
         aggregate_id: &str,
+        event_type: &str,
+        payload: &Value,
+        metadata: Option<&Value>,
+        note: Option<&str>,
     ) -> Result<AggregateState> {
         let connect_addr = self.connect_addr.clone();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
+        let event_type = event_type.to_string();
+        let payload = payload.clone();
+        let metadata = metadata.cloned();
+        let note = note.map(|value| value.to_string());
 
         if tokio::runtime::Handle::try_current().is_ok() {
             return tokio::task::block_in_place(move || {
-                create_aggregate_blocking(connect_addr, token, aggregate_type, aggregate_id)
+                create_aggregate_blocking(
+                    connect_addr,
+                    token,
+                    aggregate_type,
+                    aggregate_id,
+                    event_type,
+                    payload,
+                    metadata.clone(),
+                    note.clone(),
+                )
             });
         }
 
-        create_aggregate_blocking(connect_addr, token, aggregate_type, aggregate_id)
+        create_aggregate_blocking(
+            connect_addr,
+            token,
+            aggregate_type,
+            aggregate_id,
+            event_type,
+            payload,
+            metadata,
+            note,
+        )
     }
 
     pub fn append_event(
@@ -146,6 +172,10 @@ fn create_aggregate_blocking(
     token: String,
     aggregate_type: String,
     aggregate_id: String,
+    event_type: String,
+    payload: Value,
+    metadata: Option<Value>,
+    note: Option<String>,
 ) -> Result<AggregateState> {
     let mut stream = TcpStream::connect(&connect_addr)
         .with_context(|| format!("failed to connect to CLI proxy at {}", connect_addr))?;
@@ -158,6 +188,21 @@ fn create_aggregate_blocking(
 
     let request_id = next_request_id();
 
+    let payload_json = serde_json::to_string(&payload)
+        .context("failed to serialize payload for proxy create request")?;
+    let (metadata_json, has_metadata) = match metadata {
+        Some(value) => (
+            serde_json::to_string(&value)
+                .context("failed to serialize metadata for proxy create request")?,
+            true,
+        ),
+        None => (String::new(), false),
+    };
+    let (note_text, has_note) = match note {
+        Some(value) => (value, true),
+        None => (String::new(), false),
+    };
+
     let mut message = capnp::message::Builder::new_default();
     {
         let mut request = message.init_root::<control_request::Builder>();
@@ -167,6 +212,12 @@ fn create_aggregate_blocking(
         create.set_token(&token);
         create.set_aggregate_type(&aggregate_type);
         create.set_aggregate_id(&aggregate_id);
+        create.set_event_type(&event_type);
+        create.set_payload_json(&payload_json);
+        create.set_metadata_json(&metadata_json);
+        create.set_has_metadata(has_metadata);
+        create.set_note(&note_text);
+        create.set_has_note(has_note);
     }
 
     serialize::write_message(&mut stream, &message)

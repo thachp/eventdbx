@@ -48,7 +48,8 @@ Requests to `/admin/...` must include an `Authorization: Bearer <token>` header 
 4. **Append your first event**
 
    ```bash
-   dbx aggregate apply patient p-001 patient-added \
+   dbx aggregate create patient p-001 \
+     --event patient_created \
      --field name="Jane Doe" \
      --field status=active
    ```

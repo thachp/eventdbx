@@ -98,8 +98,59 @@ impl CliTest {
         Ok(parsed)
     }
 
-    fn create_aggregate(&self, aggregate: &str, aggregate_id: &str) -> Result<()> {
-        self.run(&["aggregate", "create", aggregate, aggregate_id])?;
+    fn create_aggregate(&self, aggregate: &str, aggregate_id: &str, event: &str) -> Result<()> {
+        self.create_aggregate_with_fields(aggregate, aggregate_id, event, &[])
+    }
+
+    fn create_aggregate_with_fields(
+        &self,
+        aggregate: &str,
+        aggregate_id: &str,
+        event: &str,
+        fields: &[(&str, &str)],
+    ) -> Result<()> {
+        let mut args = vec![
+            "aggregate".to_string(),
+            "create".to_string(),
+            aggregate.to_string(),
+            aggregate_id.to_string(),
+            "--event".to_string(),
+            event.to_string(),
+            "--json".to_string(),
+        ];
+
+        for (key, value) in fields {
+            args.push("--field".to_string());
+            args.push(format!("{}={}", key, value));
+        }
+
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let stdout = self.run(&arg_refs)?;
+        serde_json::from_str::<Value>(stdout.trim())
+            .context("failed to parse aggregate create output")?;
+        Ok(())
+    }
+
+    fn create_aggregate_with_payload(
+        &self,
+        aggregate: &str,
+        aggregate_id: &str,
+        event: &str,
+        payload: &str,
+    ) -> Result<()> {
+        let stdout = self.run(&[
+            "aggregate",
+            "create",
+            aggregate,
+            aggregate_id,
+            "--event",
+            event,
+            "--payload",
+            payload,
+            "--json",
+        ])?;
+        serde_json::from_str::<Value>(stdout.trim())
+            .context("failed to parse aggregate create output")?;
         Ok(())
     }
 
@@ -1207,7 +1258,7 @@ fn aggregate_get_unknown_fails() -> Result<()> {
         "--events",
         "existing_created",
     ])?;
-    cli.create_aggregate("existing", "existing-1")?;
+    cli.create_aggregate("existing", "existing-1", "existing_created")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1236,7 +1287,7 @@ fn aggregate_replay_unknown_fails() -> Result<()> {
         "--events",
         "existing_created",
     ])?;
-    cli.create_aggregate("existing", "existing-1")?;
+    cli.create_aggregate("existing", "existing-1", "existing_created")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1265,7 +1316,7 @@ fn aggregate_remove_unknown_fails() -> Result<()> {
         "--events",
         "existing_created",
     ])?;
-    cli.create_aggregate("existing", "existing-1")?;
+    cli.create_aggregate("existing", "existing-1", "existing_created")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1294,7 +1345,7 @@ fn aggregate_verify_unknown_fails() -> Result<()> {
         "--events",
         "existing_created",
     ])?;
-    cli.create_aggregate("existing", "existing-1")?;
+    cli.create_aggregate("existing", "existing-1", "existing_created")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1345,7 +1396,7 @@ fn aggregate_apply_requires_schema_in_strict_mode() -> Result<()> {
 #[test]
 fn aggregate_apply_allows_missing_schema_in_default_mode() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.create_aggregate("order", "order-1")?;
+    cli.create_aggregate("order", "order-1", "order_created")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1385,18 +1436,17 @@ fn aggregate_apply_without_create_requires_flag() -> Result<()> {
         failure.stderr
     );
 
-    let record = cli.run_json(&[
-        "aggregate",
-        "apply",
+    cli.create_aggregate_with_fields(
         "legacy",
         "legacy-1",
         "legacy_created",
-        "--field",
-        "status=pending",
-        "--allow-create",
-    ])?;
-    assert_eq!(record["aggregate_id"], json!("legacy-1"));
-    assert_eq!(record["version"], json!(1));
+        &[("status", "pending")],
+    )?;
+    let state = cli.run_json(&["aggregate", "get", "legacy", "legacy-1", "--include-events"])?;
+    assert_eq!(state["aggregate_type"], json!("legacy"));
+    assert_eq!(state["aggregate_id"], json!("legacy-1"));
+    assert_eq!(state["version"], json!(1));
+    assert_eq!(state["state"]["status"], json!("pending"));
     Ok(())
 }
 
@@ -1412,10 +1462,18 @@ fn aggregate_create_outputs_state() -> Result<()> {
         "--json",
     ])?;
 
-    let state = cli.run_json(&["aggregate", "create", "patient", "patient-1", "--json"])?;
+    let state = cli.run_json(&[
+        "aggregate",
+        "create",
+        "patient",
+        "patient-1",
+        "--event",
+        "patient_created",
+        "--json",
+    ])?;
     assert_eq!(state["aggregate_type"], json!("patient"));
     assert_eq!(state["aggregate_id"], json!("patient-1"));
-    assert_eq!(state["version"], json!(0));
+    assert_eq!(state["version"], json!(1));
     assert!(state["state"].as_object().unwrap().is_empty());
     Ok(())
 }
@@ -1438,7 +1496,7 @@ fn aggregate_list_accepts_positional_type() -> Result<()> {
     cli.run(&["schema", "create", "patient", "--events", "patient_created"])?;
     cli.run(&["schema", "create", "order", "--events", "order_created"])?;
 
-    cli.create_aggregate("patient", "patient-1")?;
+    cli.create_aggregate("patient", "patient-1", "patient_created")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1448,7 +1506,7 @@ fn aggregate_list_accepts_positional_type() -> Result<()> {
         "--payload",
         r#"{"status":"active"}"#,
     ])?;
-    cli.create_aggregate("order", "order-1")?;
+    cli.create_aggregate("order", "order-1", "order_created")?;
 
     let patient_list = cli.run_json(&["aggregate", "list", "patient", "--json"])?;
     let patient_array = patient_list
@@ -1497,7 +1555,7 @@ fn aggregate_apply_metadata_invalid_key_fails() -> Result<()> {
         "--events",
         "metadata_created",
     ])?;
-    cli.create_aggregate("metadata", "id-1")?;
+    cli.create_aggregate("metadata", "id-1", "metadata_created")?;
     let failure = cli.run_failure(&[
         "aggregate",
         "apply",
@@ -1523,7 +1581,7 @@ fn aggregate_apply_metadata_invalid_key_fails() -> Result<()> {
 fn aggregate_apply_note_too_long_fails() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run(&["schema", "create", "notes", "--events", "note_created"])?;
-    cli.create_aggregate("notes", "id-1")?;
+    cli.create_aggregate("notes", "id-1", "note_created")?;
     let long_note = "n".repeat(129);
     let failure = cli.run_failure(&[
         "aggregate",
@@ -1553,7 +1611,7 @@ fn aggregate_list_stage_empty_shows_message() -> Result<()> {
 }
 
 #[test]
-fn aggregate_stage_enforces_first_event_rule() -> Result<()> {
+fn aggregate_stage_accepts_first_event_without_created_suffix() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run_json(&[
         "schema",
@@ -1564,8 +1622,8 @@ fn aggregate_stage_enforces_first_event_rule() -> Result<()> {
         "--json",
     ])?;
 
-    cli.create_aggregate("order", "order-1")?;
-    let failure = cli.run_failure(&[
+    cli.create_aggregate("order", "order-1", "order_created")?;
+    let staged = cli.run(&[
         "aggregate",
         "apply",
         "order",
@@ -1576,19 +1634,15 @@ fn aggregate_stage_enforces_first_event_rule() -> Result<()> {
         "--stage",
     ])?;
     assert!(
-        failure
-            .stderr
-            .contains("first event for a new aggregate must end with '_created'"),
-        "first-event rule error not reported\nstdout:\n{}\nstderr:\n{}",
-        failure.stdout,
-        failure.stderr
+        staged.contains("event staged for later commit"),
+        "unexpected staging output:\n{}",
+        staged
     );
 
     let staged_list = cli.run(&["aggregate", "list", "--stage"])?;
-    assert_eq!(
-        staged_list.trim(),
-        "no staged events",
-        "staging queue should remain empty after failed apply: {}",
+    assert!(
+        staged_list.contains("\"event\": \"order_updated\""),
+        "expected staged list to include order_updated event:\n{}",
         staged_list
     );
     Ok(())
@@ -1605,7 +1659,7 @@ fn aggregate_apply_payload_and_field_conflict() -> Result<()> {
         "conflict_created",
         "--json",
     ])?;
-    cli.create_aggregate("conflict", "id-1")?;
+    cli.create_aggregate("conflict", "id-1", "conflict_created")?;
     let failure = cli.run_failure(&[
         "aggregate",
         "apply",
@@ -1630,47 +1684,49 @@ fn aggregate_apply_payload_and_field_conflict() -> Result<()> {
 #[test]
 fn aggregate_apply_and_get_flow() -> Result<()> {
     let cli = CliTest::new()?;
-    let schema = cli.run_json(&[
+    cli.run_json(&[
         "schema",
         "create",
         "order",
         "--events",
-        "order_created",
+        "order_created,order_updated",
         "--json",
     ])?;
-    assert_eq!(schema["aggregate"], "order");
-    assert!(
-        schema["events"].get("order_created").is_some(),
-        "expected schema to include order_created event"
-    );
 
-    cli.create_aggregate("order", "order-1")?;
+    cli.create_aggregate_with_fields(
+        "order",
+        "order-1",
+        "order_created",
+        &[("status", "pending")],
+    )?;
     let record = cli.run_json(&[
         "aggregate",
         "apply",
         "order",
         "order-1",
-        "order_created",
+        "order_updated",
         "--field",
         "status=created",
     ])?;
     assert_eq!(record["aggregate_type"], "order");
     assert_eq!(record["aggregate_id"], "order-1");
-    assert_eq!(record["event_type"], "order_created");
+    assert_eq!(record["event_type"], "order_updated");
     assert_eq!(record["payload"]["status"], "created");
-    assert_eq!(record["version"], 1);
+    assert_eq!(record["version"], 2);
 
     let detail = cli.run_json(&["aggregate", "get", "order", "order-1", "--include-events"])?;
     assert_eq!(detail["aggregate_type"], "order");
     assert_eq!(detail["aggregate_id"], "order-1");
-    assert_eq!(detail["version"], 1);
+    assert_eq!(detail["version"], 2);
     assert_eq!(detail["state"]["status"], "created");
     let events = detail["events"]
         .as_array()
         .context("aggregate get response missing events array")?;
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert_eq!(events[0]["event_type"], "order_created");
-    assert_eq!(events[0]["version"], 1);
+    assert_eq!(events[0]["payload"]["status"], "pending");
+    assert_eq!(events[1]["event_type"], "order_updated");
+    assert_eq!(events[1]["payload"]["status"], "created");
 
     let aggregates = cli.run_json(&["aggregate", "list", "--json"])?;
     let list = aggregates
@@ -1679,7 +1735,7 @@ fn aggregate_apply_and_get_flow() -> Result<()> {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["aggregate_type"], "order");
     assert_eq!(list[0]["aggregate_id"], "order-1");
-    assert_eq!(list[0]["version"], 1);
+    assert_eq!(list[0]["version"], 2);
 
     Ok(())
 }
@@ -1695,16 +1751,12 @@ fn aggregate_patch_and_select_flow() -> Result<()> {
         "person_created,person_updated",
     ])?;
 
-    cli.create_aggregate("person", "person-1")?;
-    cli.run(&[
-        "aggregate",
-        "apply",
+    cli.create_aggregate_with_payload(
         "person",
         "person-1",
         "person_created",
-        "--payload",
         r#"{"status":"active","profile":{"name":{"first":"Ada"}}}"#,
-    ])?;
+    )?;
 
     let patch_ops = r#"[{"op":"replace","path":"/status","value":"inactive"},{"op":"replace","path":"/profile/name/first","value":"Grace"}]"#;
     let record = cli.run_json(&[
@@ -1747,37 +1799,24 @@ fn aggregate_patch_and_select_flow() -> Result<()> {
 fn aggregate_list_supports_sorting() -> Result<()> {
     let cli = CliTest::new()?;
 
-    cli.create_aggregate("order", "order-1")?;
-    cli.create_aggregate("order", "order-2")?;
-    cli.create_aggregate("invoice", "invoice-1")?;
-
-    cli.run(&[
-        "aggregate",
-        "apply",
+    cli.create_aggregate_with_fields(
         "order",
         "order-1",
         "order_created",
-        "--field",
-        "status=created",
-    ])?;
-    cli.run(&[
-        "aggregate",
-        "apply",
+        &[("status", "created")],
+    )?;
+    cli.create_aggregate_with_fields(
         "order",
         "order-2",
         "order_created",
-        "--field",
-        "status=created",
-    ])?;
-    cli.run(&[
-        "aggregate",
-        "apply",
+        &[("status", "created")],
+    )?;
+    cli.create_aggregate_with_fields(
         "invoice",
         "invoice-1",
         "invoice_created",
-        "--field",
-        "total=100",
-    ])?;
+        &[("total", "100")],
+    )?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1852,7 +1891,7 @@ fn aggregate_list_hides_archived_by_default() -> Result<()> {
         "archive_created",
     ])?;
 
-    cli.create_aggregate("archive_demo", "demo-1")?;
+    cli.create_aggregate("archive_demo", "demo-1", "archive_created")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1904,16 +1943,12 @@ fn aggregate_replay_after_apply_returns_events() -> Result<()> {
         "order_created",
         "--json",
     ])?;
-    cli.create_aggregate("replay_order", "order-1")?;
-    cli.run(&[
-        "aggregate",
-        "apply",
+    cli.create_aggregate_with_fields(
         "replay_order",
         "order-1",
         "order_created",
-        "--field",
-        "status=pending",
-    ])?;
+        &[("status", "pending")],
+    )?;
 
     let events = cli.run_json(&["aggregate", "replay", "replay_order", "order-1", "--json"])?;
     let array = events
@@ -1936,16 +1971,7 @@ fn aggregate_snapshot_creates_record() -> Result<()> {
         "snap_created",
         "--json",
     ])?;
-    cli.create_aggregate("snap", "snap-1")?;
-    cli.run(&[
-        "aggregate",
-        "apply",
-        "snap",
-        "snap-1",
-        "snap_created",
-        "--field",
-        "status=ready",
-    ])?;
+    cli.create_aggregate_with_fields("snap", "snap-1", "snap_created", &[("status", "ready")])?;
     let output = cli.run(&["aggregate", "snapshot", "snap", "snap-1"])?;
     let snapshot: Value =
         serde_json::from_str(output.trim()).context("failed to parse snapshot output")?;
@@ -1965,16 +1991,7 @@ fn aggregate_verify_success_json() -> Result<()> {
         "verify_created",
         "--json",
     ])?;
-    cli.create_aggregate("verify", "verify-1")?;
-    cli.run(&[
-        "aggregate",
-        "apply",
-        "verify",
-        "verify-1",
-        "verify_created",
-        "--field",
-        "status=ok",
-    ])?;
+    cli.create_aggregate_with_fields("verify", "verify-1", "verify_created", &[("status", "ok")])?;
     let output = cli.run(&["aggregate", "verify", "verify", "verify-1", "--json"])?;
     let body: Value =
         serde_json::from_str(output.trim()).context("failed to parse verify output")?;
@@ -1999,16 +2016,12 @@ fn aggregate_archive_and_restore_flow() -> Result<()> {
         "archive_created",
         "--json",
     ])?;
-    cli.create_aggregate("archive", "archive-1")?;
-    cli.run(&[
-        "aggregate",
-        "apply",
+    cli.create_aggregate_with_fields(
         "archive",
         "archive-1",
         "archive_created",
-        "--field",
-        "status=active",
-    ])?;
+        &[("status", "active")],
+    )?;
 
     let archived = cli.run(&[
         "aggregate",
@@ -2051,16 +2064,12 @@ fn aggregate_replay_with_skip_take() -> Result<()> {
         "order_created,order_updated",
         "--json",
     ])?;
-    cli.create_aggregate("timeline", "order-1")?;
-    cli.run(&[
-        "aggregate",
-        "apply",
+    cli.create_aggregate_with_fields(
         "timeline",
         "order-1",
         "order_created",
-        "--field",
-        "status=pending",
-    ])?;
+        &[("status", "pending")],
+    )?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -2098,16 +2107,12 @@ fn aggregate_export_json_creates_file() -> Result<()> {
         "export_created",
         "--json",
     ])?;
-    cli.create_aggregate("export", "export-1")?;
-    cli.run(&[
-        "aggregate",
-        "apply",
+    cli.create_aggregate_with_fields(
         "export",
         "export-1",
         "export_created",
-        "--field",
-        "status=ready",
-    ])?;
+        &[("status", "ready")],
+    )?;
     let output_path = cli.home.join("export.json");
     let stdout = cli.run(&[
         "aggregate",
@@ -2147,45 +2152,7 @@ fn aggregate_stage_and_commit_flow() -> Result<()> {
     ])?;
     assert_eq!(schema["aggregate"], "order");
 
-    cli.create_aggregate("order", "order-1")?;
-
-    let staged = cli.run(&[
-        "aggregate",
-        "apply",
-        "order",
-        "order-1",
-        "order_created",
-        "--field",
-        "status=created",
-        "--stage",
-    ])?;
-    assert!(
-        staged.contains("event staged for later commit"),
-        "unexpected staging output:\n{}",
-        staged
-    );
-
-    let staged_list = cli.run(&["aggregate", "list", "--stage"])?;
-    assert!(
-        staged_list.contains("\"event\": \"order_created\""),
-        "expected staged list to include order_created event:\n{}",
-        staged_list
-    );
-
-    let commit_output = cli.run(&["aggregate", "commit"])?;
-    assert!(
-        commit_output.contains("committed 1 event(s)"),
-        "unexpected commit output:\n{}",
-        commit_output
-    );
-
-    let staged_list_after = cli.run(&["aggregate", "list", "--stage"])?;
-    assert_eq!(
-        staged_list_after.trim(),
-        "no staged events",
-        "expected staging queue to be empty after commit:\n{}",
-        staged_list_after
-    );
+    cli.create_aggregate("order", "order-1", "order_created")?;
 
     let staged_update = cli.run(&[
         "aggregate",
@@ -2210,6 +2177,14 @@ fn aggregate_stage_and_commit_flow() -> Result<()> {
         commit_update
     );
 
+    let staged_list_after = cli.run(&["aggregate", "list", "--stage"])?;
+    assert_eq!(
+        staged_list_after.trim(),
+        "no staged events",
+        "expected staging queue to be empty after commit:\n{}",
+        staged_list_after
+    );
+
     let detail = cli.run_json(&["aggregate", "get", "order", "order-1", "--include-events"])?;
     assert_eq!(detail["version"], 2);
     assert_eq!(detail["state"]["status"], "processing");
@@ -2228,7 +2203,7 @@ fn aggregate_stage_and_commit_flow() -> Result<()> {
 fn events_list_filters_by_payload_field() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run(&["schema", "create", "orders", "--events", "order_created"])?;
-    cli.create_aggregate("orders", "order-1")?;
+    cli.create_aggregate("orders", "order-1", "order_created")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -2265,7 +2240,7 @@ fn events_list_filters_by_payload_field() -> Result<()> {
 fn event_show_returns_single_event() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run(&["schema", "create", "orders", "--events", "order_created"])?;
-    cli.create_aggregate("orders", "order-1")?;
+    cli.create_aggregate("orders", "order-1", "order_created")?;
     let record = cli.run_json(&[
         "aggregate",
         "apply",

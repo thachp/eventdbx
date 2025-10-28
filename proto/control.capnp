@@ -121,6 +121,12 @@ struct CreateAggregateRequest {
   token @0 :Text;
   aggregateType @1 :Text;
   aggregateId @2 :Text;
+  eventType @3 :Text;
+  payloadJson @4 :Text;
+  note @5 :Text;
+  hasNote @6 :Bool;
+  metadataJson @7 :Text;
+  hasMetadata @8 :Bool;
 }
 
 struct CreateAggregateResponse {
