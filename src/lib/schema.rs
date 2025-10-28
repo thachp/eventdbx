@@ -371,6 +371,7 @@ impl<'de> Deserialize<'de> for FieldRules {
             #[serde(default)]
             does_not_contain: Vec<String>,
             #[serde(default)]
+            // Retained for backward compatibility during deserialization of old schema files.
             #[allow(dead_code)]
             must_match: Option<String>,
             #[serde(default)]
