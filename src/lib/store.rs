@@ -25,6 +25,7 @@ use crate::snowflake::{MAX_WORKER_ID, SnowflakeGenerator, SnowflakeId};
 
 const SEP: u8 = 0x1F;
 const PREFIX_EVENT: &str = "evt";
+const PREFIX_EVENT_ARCHIVED: &str = "evt-arch";
 const PREFIX_META: &str = "meta";
 const PREFIX_STATE: &str = "state";
 const PREFIX_META_ARCHIVED: &str = "meta-arch";
@@ -348,7 +349,7 @@ pub struct AggregateState {
     pub version: u64,
     pub state: BTreeMap<String, String>,
     pub merkle_root: String,
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub archived: bool,
 }
 
@@ -374,7 +375,7 @@ pub enum AggregateQueryScope {
     IncludeArchived,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum AggregateIndex {
     Active,
     Archived,
@@ -662,14 +663,19 @@ impl EventStore {
         let aggregate_id = input.aggregate_id.clone();
         let event_id = self.next_event_id();
 
-        let mut meta = self
-            .load_meta(&aggregate_type, &aggregate_id)?
-            .unwrap_or_else(|| AggregateMeta::new(aggregate_type.clone(), aggregate_id.clone()));
-
-        if meta.archived {
-            return Err(EventError::AggregateArchived);
-        }
-        let mut state = self.load_state_map(&aggregate_type, &aggregate_id)?;
+        let (mut meta, mut state) = match self.load_meta_any(&aggregate_type, &aggregate_id)? {
+            Some((_, AggregateIndex::Archived)) => {
+                return Err(EventError::AggregateArchived);
+            }
+            Some((meta, AggregateIndex::Active)) => (
+                meta,
+                self.load_state_map_from(AggregateIndex::Active, &aggregate_type, &aggregate_id)?,
+            ),
+            None => (
+                AggregateMeta::new(aggregate_type.clone(), aggregate_id.clone()),
+                BTreeMap::new(),
+            ),
+        };
         let record = apply_event(&mut meta, &mut state, input, event_id);
         let stored_record = self.encode_record(&record)?;
         let encoded_state = self.encode_state_map(&state)?;
@@ -703,9 +709,19 @@ impl EventStore {
         let aggregate_type = record.aggregate_type.clone();
         let aggregate_id = record.aggregate_id.clone();
 
-        let mut meta = self
-            .load_meta(&aggregate_type, &aggregate_id)?
-            .unwrap_or_else(|| AggregateMeta::new(aggregate_type.clone(), aggregate_id.clone()));
+        let (mut meta, mut state) = match self.load_meta_any(&aggregate_type, &aggregate_id)? {
+            Some((_, AggregateIndex::Archived)) => {
+                return Err(EventError::AggregateArchived);
+            }
+            Some((meta, AggregateIndex::Active)) => (
+                meta,
+                self.load_state_map_from(AggregateIndex::Active, &aggregate_type, &aggregate_id)?,
+            ),
+            None => (
+                AggregateMeta::new(aggregate_type.clone(), aggregate_id.clone()),
+                BTreeMap::new(),
+            ),
+        };
 
         if meta.version + 1 != record.version {
             return Err(EventError::Storage(format!(
@@ -716,8 +732,6 @@ impl EventStore {
                 record.version
             )));
         }
-
-        let mut state = self.load_state_map(&aggregate_type, &aggregate_id)?;
         let payload_map = payload_to_map(&record.payload);
 
         let computed_hash = hash_event(
@@ -843,8 +857,11 @@ impl EventStore {
     ) -> Result<Vec<EventRecord>> {
         let start = Instant::now();
         let result = (|| {
-            let start_key = event_key(aggregate_type, aggregate_id, from_version + 1);
-            let prefix = event_prefix(aggregate_type, aggregate_id);
+            let (_, index) = self
+                .load_meta_any(aggregate_type, aggregate_id)?
+                .ok_or(EventError::AggregateNotFound)?;
+            let start_key = event_key_for(index, aggregate_type, aggregate_id, from_version + 1);
+            let prefix = event_prefix_for(index, aggregate_type, aggregate_id);
             let iter = self
                 .db
                 .iterator(IteratorMode::From(start_key.as_slice(), Direction::Forward));
@@ -991,6 +1008,15 @@ impl EventStore {
         let encoded_state = self.encode_state_map(&state_map)?;
 
         let mut batch = WriteBatch::default();
+        if current_index != destination_index {
+            self.move_event_stream(
+                aggregate_type,
+                aggregate_id,
+                current_index,
+                destination_index,
+                &mut batch,
+            )?;
+        }
         match (current_index, destination_index) {
             (AggregateIndex::Active, AggregateIndex::Archived) => {
                 batch.delete(meta_key(aggregate_type, aggregate_id));
@@ -1049,6 +1075,44 @@ impl EventStore {
         self.write_batch(batch)?;
 
         self.get_aggregate_state(aggregate_type, aggregate_id)
+    }
+
+    fn move_event_stream(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        from: AggregateIndex,
+        to: AggregateIndex,
+        batch: &mut WriteBatch,
+    ) -> Result<()> {
+        if from == to {
+            return Ok(());
+        }
+
+        let prefix = event_prefix_for(from, aggregate_type, aggregate_id);
+        let mut iter = self
+            .db
+            .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+        let mut records = Vec::new();
+
+        while let Some(item) = iter.next() {
+            let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            let version = parse_event_version(&key)?;
+            records.push((key, value.to_vec(), version));
+        }
+
+        for (old_key, value, version) in records {
+            batch.delete(old_key);
+            batch.put(
+                event_key_for(to, aggregate_type, aggregate_id, version),
+                value,
+            );
+        }
+
+        Ok(())
     }
 
     fn encode_record(&self, record: &EventRecord) -> Result<EventRecord> {
@@ -1566,16 +1630,34 @@ fn state_key_for(index: AggregateIndex, aggregate_type: &str, aggregate_id: &str
     key_with_segments(&[index.state_prefix(), aggregate_type, aggregate_id])
 }
 
-fn event_prefix(aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
-    let mut prefix = key_with_segments(&[PREFIX_EVENT, aggregate_type, aggregate_id]);
-    prefix.push(SEP);
-    prefix
+fn event_prefix_for(index: AggregateIndex, aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
+    let prefix = match index {
+        AggregateIndex::Active => PREFIX_EVENT,
+        AggregateIndex::Archived => PREFIX_EVENT_ARCHIVED,
+    };
+    let mut key = key_with_segments(&[prefix, aggregate_type, aggregate_id]);
+    key.push(SEP);
+    key
+}
+
+fn event_key_for(
+    index: AggregateIndex,
+    aggregate_type: &str,
+    aggregate_id: &str,
+    version: u64,
+) -> Vec<u8> {
+    let mut key = event_prefix_for(index, aggregate_type, aggregate_id);
+    key.extend_from_slice(&version.to_be_bytes());
+    key
 }
 
 fn event_key(aggregate_type: &str, aggregate_id: &str, version: u64) -> Vec<u8> {
-    let mut key = event_prefix(aggregate_type, aggregate_id);
-    key.extend_from_slice(&version.to_be_bytes());
-    key
+    event_key_for(
+        AggregateIndex::Active,
+        aggregate_type,
+        aggregate_id,
+        version,
+    )
 }
 
 fn snapshot_key(aggregate_type: &str, aggregate_id: &str, created_at: DateTime<Utc>) -> Vec<u8> {
@@ -1583,6 +1665,15 @@ fn snapshot_key(aggregate_type: &str, aggregate_id: &str, created_at: DateTime<U
     key.push(SEP);
     key.extend_from_slice(&created_at.timestamp_millis().to_be_bytes());
     key
+}
+
+fn parse_event_version(key: &[u8]) -> Result<u64> {
+    if key.len() < 8 {
+        return Err(EventError::Storage("event key too short".into()));
+    }
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&key[key.len() - 8..]);
+    Ok(u64::from_be_bytes(buf))
 }
 
 fn key_with_segments(parts: &[&str]) -> Vec<u8> {
