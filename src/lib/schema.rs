@@ -241,6 +241,70 @@ impl FieldRules {
                             )));
                         }
                     }
+                    FieldFormat::CountryCode => {
+                        if !validate_country_code(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be an ISO 3166-1 alpha-2 country code",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::Iso8601 => {
+                        if DateTime::parse_from_rfc3339(text).is_err() {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be a valid ISO 8601 timestamp",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::Wgs84 => {
+                        if !validate_wgs84(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be a valid WGS 84 coordinate (lat,lon)",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::CamelCase => {
+                        if !validate_camel_case(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be camelCase",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::SnakeCase => {
+                        if !validate_snake_case(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be snake_case",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::KebabCase => {
+                        if !validate_kebab_case(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be kebab-case",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::PascalCase => {
+                        if !validate_pascal_case(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be PascalCase",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::UpperCaseSnakeCase => {
+                        if !validate_upper_case_snake_case(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be UPPER_CASE_SNAKE_CASE",
+                                path
+                            )));
+                        }
+                    }
                 }
             }
         } else if let Some(length) = &self.length {
@@ -337,6 +401,15 @@ pub enum FieldFormat {
     Email,
     Url,
     CreditCard,
+    CountryCode,
+    Iso8601,
+    #[serde(rename = "wgs_84")]
+    Wgs84,
+    CamelCase,
+    SnakeCase,
+    KebabCase,
+    PascalCase,
+    UpperCaseSnakeCase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1423,6 +1496,169 @@ fn parse_date_literal(raw: &str, path: &str) -> Result<NaiveDate> {
     })
 }
 
+fn validate_country_code(value: &str) -> bool {
+    if value.len() != 2 {
+        return false;
+    }
+    if !value.chars().all(|c| c.is_ascii_uppercase()) {
+        return false;
+    }
+    ISO_COUNTRY_CODES.binary_search(&value).is_ok()
+}
+
+fn validate_wgs84(value: &str) -> bool {
+    let mut parts = value.split(',');
+    let lat_raw = match parts.next() {
+        Some(part) => part.trim(),
+        None => return false,
+    };
+    let lon_raw = match parts.next() {
+        Some(part) => part.trim(),
+        None => return false,
+    };
+    if parts.next().is_some() || lat_raw.is_empty() || lon_raw.is_empty() {
+        return false;
+    }
+
+    let lat: f64 = match lat_raw.parse() {
+        Ok(val) => val,
+        Err(_) => return false,
+    };
+    let lon: f64 = match lon_raw.parse() {
+        Ok(val) => val,
+        Err(_) => return false,
+    };
+
+    lat.is_finite()
+        && lon.is_finite()
+        && (-90.0..=90.0).contains(&lat)
+        && (-180.0..=180.0).contains(&lon)
+}
+
+fn validate_camel_case(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric())
+}
+
+fn validate_pascal_case(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric())
+}
+
+fn validate_snake_case(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    let mut prev_was_separator = false;
+    for c in value.chars() {
+        match c {
+            'a'..='z' | '0'..='9' => prev_was_separator = false,
+            '_' => {
+                if prev_was_separator {
+                    return false;
+                }
+                prev_was_separator = true;
+                continue;
+            }
+            _ => return false,
+        }
+    }
+    !prev_was_separator
+}
+
+fn validate_kebab_case(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    let mut prev_was_separator = false;
+    for c in value.chars() {
+        match c {
+            'a'..='z' | '0'..='9' => prev_was_separator = false,
+            '-' => {
+                if prev_was_separator {
+                    return false;
+                }
+                prev_was_separator = true;
+                continue;
+            }
+            _ => return false,
+        }
+    }
+    !prev_was_separator
+}
+
+fn validate_upper_case_snake_case(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    let mut prev_was_separator = false;
+    for c in value.chars() {
+        match c {
+            'A'..='Z' | '0'..='9' => prev_was_separator = false,
+            '_' => {
+                if prev_was_separator {
+                    return false;
+                }
+                prev_was_separator = true;
+                continue;
+            }
+            _ => return false,
+        }
+    }
+    !prev_was_separator
+}
+
+const ISO_COUNTRY_CODES: &[&str] = &[
+    "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ",
+    "BA", "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BL", "BM", "BN", "BO", "BQ", "BR", "BS",
+    "BT", "BV", "BW", "BY", "BZ", "CA", "CC", "CD", "CF", "CG", "CH", "CI", "CK", "CL", "CM", "CN",
+    "CO", "CR", "CU", "CV", "CW", "CX", "CY", "CZ", "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE",
+    "EG", "EH", "ER", "ES", "ET", "FI", "FJ", "FK", "FM", "FO", "FR", "GA", "GB", "GD", "GE", "GF",
+    "GG", "GH", "GI", "GL", "GM", "GN", "GP", "GQ", "GR", "GS", "GT", "GU", "GW", "GY", "HK", "HM",
+    "HN", "HR", "HT", "HU", "ID", "IE", "IL", "IM", "IN", "IO", "IQ", "IR", "IS", "IT", "JE", "JM",
+    "JO", "JP", "KE", "KG", "KH", "KI", "KM", "KN", "KP", "KR", "KW", "KY", "KZ", "LA", "LB", "LC",
+    "LI", "LK", "LR", "LS", "LT", "LU", "LV", "LY", "MA", "MC", "MD", "ME", "MF", "MG", "MH", "MK",
+    "ML", "MM", "MN", "MO", "MP", "MQ", "MR", "MS", "MT", "MU", "MV", "MW", "MX", "MY", "MZ", "NA",
+    "NC", "NE", "NF", "NG", "NI", "NL", "NO", "NP", "NR", "NU", "NZ", "OM", "PA", "PE", "PF", "PG",
+    "PH", "PK", "PL", "PM", "PN", "PR", "PS", "PT", "PW", "PY", "QA", "RE", "RO", "RS", "RU", "RW",
+    "SA", "SB", "SC", "SD", "SE", "SG", "SH", "SI", "SJ", "SK", "SL", "SM", "SN", "SO", "SR", "SS",
+    "ST", "SV", "SX", "SY", "SZ", "TC", "TD", "TF", "TG", "TH", "TJ", "TK", "TL", "TM", "TN", "TO",
+    "TR", "TT", "TV", "TW", "TZ", "UA", "UG", "UM", "US", "UY", "UZ", "VA", "VC", "VE", "VG", "VI",
+    "VN", "VU", "WF", "WS", "YE", "YT", "ZA", "ZM", "ZW",
+];
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1859,5 +2095,259 @@ mod tests {
             .validate_event("customer", "customer_created", &json!({ "address": {} }))
             .unwrap_err();
         assert!(matches!(err, EventError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn date_columns_accept_calendar_strings() {
+        let accepted = coerce_date(&json!("2024-01-01"), "birthday").unwrap();
+        assert_eq!(accepted.to_string(), "2024-01-01");
+
+        let err_timestamp = coerce_date(&json!("2024-01-01T00:00:00Z"), "birthday").unwrap_err();
+        assert!(matches!(err_timestamp, EventError::SchemaViolation(_)));
+
+        let err_malformed = coerce_date(&json!("20240101"), "birthday").unwrap_err();
+        assert!(matches!(err_malformed, EventError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn country_code_format_requires_known_iso_entries() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::CountryCode);
+
+        rules
+            .validate_rules(
+                "country",
+                &ColumnType::Text,
+                &ComparableValue::Text("US".to_string()),
+            )
+            .expect("US should be accepted");
+
+        let err = rules
+            .validate_rules(
+                "country",
+                &ColumnType::Text,
+                &ComparableValue::Text("XX".to_string()),
+            )
+            .unwrap_err();
+        assert!(matches!(err, EventError::SchemaViolation(_)));
+
+        let err_lowercase = rules
+            .validate_rules(
+                "country",
+                &ColumnType::Text,
+                &ComparableValue::Text("us".to_string()),
+            )
+            .unwrap_err();
+        assert!(matches!(err_lowercase, EventError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn iso_8601_format_requires_valid_timestamps() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::Iso8601);
+
+        rules
+            .validate_rules(
+                "timestamp",
+                &ColumnType::Text,
+                &ComparableValue::Text("2024-05-02T13:45:00Z".to_string()),
+            )
+            .expect("valid ISO 8601 should pass");
+
+        let err = rules
+            .validate_rules(
+                "timestamp",
+                &ColumnType::Text,
+                &ComparableValue::Text("02/05/2024".to_string()),
+            )
+            .unwrap_err();
+        assert!(matches!(err, EventError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn wgs84_format_requires_lat_lon_pair() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::Wgs84);
+
+        rules
+            .validate_rules(
+                "location",
+                &ColumnType::Text,
+                &ComparableValue::Text("37.7749,-122.4194".to_string()),
+            )
+            .expect("valid coordinates should pass");
+
+        for invalid in [
+            "91.0,0.0",
+            "10.0,181.0",
+            "10.0",
+            "lat,lon",
+            "37.0,-122.0,5.0",
+            "",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "location",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
+    }
+
+    #[test]
+    fn camel_case_format_enforces_pattern() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::CamelCase);
+
+        rules
+            .validate_rules(
+                "label",
+                &ColumnType::Text,
+                &ComparableValue::Text("camelCaseValue1".to_string()),
+            )
+            .expect("valid camelCase should pass");
+
+        for invalid in [
+            "CamelCase",
+            "snake_case",
+            "kebab-case",
+            "camel_case",
+            "camel-case",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "label",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
+    }
+
+    #[test]
+    fn snake_case_format_enforces_pattern() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::SnakeCase);
+
+        rules
+            .validate_rules(
+                "label",
+                &ColumnType::Text,
+                &ComparableValue::Text("snake_case_value1".to_string()),
+            )
+            .expect("valid snake_case should pass");
+
+        for invalid in [
+            "Snake_Case",
+            "_leading",
+            "trailing_",
+            "double__underscore",
+            "snake-case",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "label",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
+    }
+
+    #[test]
+    fn kebab_case_format_enforces_pattern() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::KebabCase);
+
+        rules
+            .validate_rules(
+                "label",
+                &ColumnType::Text,
+                &ComparableValue::Text("kebab-case-value1".to_string()),
+            )
+            .expect("valid kebab-case should pass");
+
+        for invalid in [
+            "Kebab-Case",
+            "-leading",
+            "trailing-",
+            "double--dash",
+            "kebab_case",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "label",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
+    }
+
+    #[test]
+    fn pascal_case_format_enforces_pattern() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::PascalCase);
+
+        rules
+            .validate_rules(
+                "label",
+                &ColumnType::Text,
+                &ComparableValue::Text("PascalCaseValue1".to_string()),
+            )
+            .expect("valid PascalCase should pass");
+
+        for invalid in [
+            "pascalCase",
+            "Pascal_Case",
+            "Pascal-Case",
+            "PascalCase!",
+            "",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "label",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
+    }
+
+    #[test]
+    fn upper_case_snake_case_format_enforces_pattern() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::UpperCaseSnakeCase);
+
+        rules
+            .validate_rules(
+                "label",
+                &ColumnType::Text,
+                &ComparableValue::Text("CONST_VALUE_1".to_string()),
+            )
+            .expect("valid constant should pass");
+
+        for invalid in [
+            "Const_Value",
+            "_LEADING",
+            "TRAILING_",
+            "DOUBLE__UNDERSCORE",
+            "CONST-VALUE",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "label",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
     }
 }

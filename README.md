@@ -77,8 +77,8 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
        "hidden": false,
        "hidden_fields": [],
        "column_types": {
-         "first_name": { "type": "text", "required": true, "format": "email" },
-         "last_name": {
+         "email": { "type": "text", "required": true, "format": "email" },
+         "name": {
            "type": "text",
            "rules": { "length": { "min": "1", "max": "64" } }
          }
@@ -116,6 +116,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
        --field status=active
      ```
    - If the server is stopped, the same CLI command writes to the local RocksDB store directly.
+   - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort created_at:desc --take 5` or drill into the payload of a specific event via `dbx event <snowflake_id> --json`.
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
 
@@ -198,6 +199,13 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 - `dbx aggregate remove --aggregate <type> --aggregate-id <id>` Removes an aggregate that has no events (version still 0).
 - `dbx aggregate commit`  
   Flushes all staged events in a single atomic transaction.
+
+### Events
+
+- `dbx events [--aggregate <type>] [--aggregate-id <id>] [--skip <n>] [--take <n>] [--filter <expr>] [--sort <field[:order],...>] [--json] [--include-archived|--archived-only]`  
+  Streams events with optional aggregate scoping, SQL-like filters (e.g. `payload.status = "open" AND metadata.note LIKE "retry%"`), and multi-key sorting. Prefix fields with `payload.`, `metadata.`, or `extensions.` to target nested JSON; `created_at`, `event_id`, `version`, and other top-level keys are also available.
+- `dbx event <snowflake_id> [--json]`  
+  Displays a single event by Snowflake identifier, including payload, metadata, and extensions.
 - `dbx aggregate export [<type>] [--all] --output <path> [--format csv|json] [--zip] [--pretty]`  
   Writes the current aggregate state (no metadata) as CSV or JSON. Exports default to one file per aggregate type; pass `--zip` to bundle the output into an archive.
 
@@ -391,6 +399,34 @@ Example HTTP/TCP payload (`EventRecord`):
 
 > **Heads-up for plugin authors**  
 > The [dbx_plugins](https://github.com/thachp/dbx_plugins) surfaces now receive `event_id` values as Snowflake strings and may optionally see an `extensions` object alongside `payload`. Update custom handlers to treat `metadata.event_id` as a stringified Snowflake and to ignore or consume the new `extensions` envelope as needed.
+
+## Column definitions
+
+Each entry in the `column_types` map declares both a storage type and the rules EventDBX enforces. Supported types:
+
+| Type                       | Accepted input                                                 | Notes                                                                                                   |
+| -------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `integer`                  | JSON numbers or strings that parse to a signed 64-bit integer  | Rejects values outside the i64 range.                                                                   |
+| `float`                    | JSON numbers or numeric strings                                | Stored as `f64`; scientific notation is accepted.                                                       |
+| `decimal(precision,scale)` | JSON numbers or strings                                        | Enforces total digits ≤ precision and fractional digits ≤ scale.                                        |
+| `boolean`                  | JSON booleans, `0` / `1`, or `"true"`, `"false"`, `"1"`, `"0"` | Values are normalised to `true` / `false`.                                                              |
+| `text`                     | UTF-8 strings                                                  | Use `length`, `contains`, or `regex` rules for additional constraints.                                  |
+| `timestamp`                | RFC 3339 timestamps as strings                                 | Normalised to UTC.                                                                                      |
+| `date`                     | `YYYY-MM-DD` strings                                           | Parsed as a calendar date without a timezone.                                                           |
+| `json`                     | Any JSON value                                                 | No per-field validation is applied; use when you want to store free-form payloads.                      |
+| `binary`                   | Base64-encoded strings                                         | Decoded to raw bytes before validation; `length` counts bytes after decoding.                           |
+| `object`                   | JSON objects                                                   | Enable nested validation via the `properties` rule (see below). Extra keys not listed remain untouched. |
+
+Rules are optional and can be combined when the target type supports them:
+
+- `required`: the field must be present in every event payload.
+- `contains` / `does_not_contain`: case-sensitive substring checks for `text` fields.
+- `regex`: one or more regular expressions that `text` fields must satisfy.
+- `format`: built-in string validators; choose `email`, `url`, `credit_card`, `country_code` (ISO&nbsp;3166-1 alpha-2), `iso_8601` (RFC&nbsp;3339 timestamp), `wgs_84` (latitude/longitude in decimal degrees), `camel_case`, `snake_case`, `kebab_case`, `pascal_case`, or `upper_case_snake_case`.
+- `length`: `{ "min": <usize>, "max": <usize> }` bounds the length of `text` (characters) or `binary` (decoded bytes).
+- `range`: `{ "min": <value>, "max": <value> }` for numeric and temporal types (`integer`, `float`, `decimal`, `timestamp`, `date`). Boundary values must parse to the column’s type.
+- `must_match`: requires the field to equal another dot-path in the same payload (e.g. `"password_confirmation"` must match `"password"`). Both columns must share the same type.
+- `properties`: nested `column_types` definitions for `object` columns, enabling recursion with the same rule set as top-level fields.
 
 ## Contributing
 
