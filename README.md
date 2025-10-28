@@ -18,12 +18,12 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 
    ```bash
    # Install prebuilt binaries via shell script
-   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v3.5.2/eventdbx-installer.sh | sh
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v3.6.5/eventdbx-installer.sh | sh
    ```
 
    ```bash
    # Install prebuilt binaries via powershell script
-   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v3.5.2/eventdbx-installer.ps1 | iex"
+   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v3.6.5/eventdbx-installer.ps1 | iex"
    ```
 
 2. **Start the server**
@@ -131,6 +131,8 @@ You now have a working EventDBX instance with an initial aggregate. Explore the 
 - **Built-in Observability**: A Prometheus-compatible `/metrics` endpoint reports HTTP traffic and plugin queue health so you can wire EventDBX into Grafana, Datadog, or any other monitoring stack out of the box.
 - **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. Tokens are signed with an Ed25519 key pair stored under `[auth]` in `config.toml`; keep `private_key` secret and distribute `public_key` to services that need to validate them. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes.
 - **Encrypted Payloads & Secrets at Rest**: Event payloads, aggregate snapshots, and `tokens.json` are encrypted transparently when a DEK is configured. Metadata such as aggregate identifiers, versions, and Merkle roots remain readable so plugins, replication, and integrity checks keep working without additional configuration.
+- **Peer replication**: Keep deployments in sync with `dbx push` and `dbx pull`, selectively streaming aggregates, schemas, or both between trusted peers over the builtin Cap'n Proto transport.
+- **Schema validation**: Enforce aggregate contracts with builtin formats (`email`, `url`, `wgs_84`, and more), rule blocks for length, range, regex, required fields, and nested `properties`, plus strict/relaxed enforcement modes.
 - **Powered by RocksDB and Rust**: At its core, EventDBX utilizes RocksDB for storage, taking advantage of its high performance and efficiency. The system is developed in Rust, known for its safety, efficiency, and concurrency capabilities, ensuring that it is both rapid and dependable.
 
 ## Restriction Modes

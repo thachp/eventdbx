@@ -299,59 +299,12 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
-  publish-npm:
-    needs:
-      - plan
-      - host
-    if: ${{ needs.host.result == 'success' && needs.plan.outputs.publishing == 'true' }}
-    runs-on: 'ubuntu-22.04'
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-    steps:
-      - name: Ensure npm token is available
-        shell: bash
-        run: |
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "The secret NPM_TOKEN must be provided to publish to npm." >&2
-            exit 1
-          fi
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-      - name: Download npm artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: artifacts-*
-          path: artifacts
-          merge-multiple: true
-      - name: Publish packages to npm
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm config set //registry.npmjs.org/:_authToken "${NODE_AUTH_TOKEN}"
-
-          mapfile -t npm_packages < <(find artifacts -type f -path '*/npm/*' -name '*.tgz' -print)
-          if [ "${#npm_packages[@]}" -eq 0 ]; then
-            echo "No npm package artifacts found for publishing." >&2
-            exit 1
-          fi
-
-          for pkg in "${npm_packages[@]}"; do
-            echo "Publishing $pkg"
-            npm publish "$pkg" --access public
-          done
-
   announce:
     needs:
       - plan
       - host
-      - publish-npm
-    # use "always() && ..." to allow us to wait for all publish jobs while
-    # still allowing individual publish jobs to skip themselves (for prereleases).
-    # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && (needs.publish-npm.result == 'skipped' || needs.publish-npm.result == 'success') }}
+    # Ensure host succeeds before announcing.
+    if: ${{ always() && needs.host.result == 'success' }}
     runs-on: 'ubuntu-22.04'
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
