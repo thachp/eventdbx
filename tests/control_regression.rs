@@ -176,6 +176,9 @@ async fn control_capnp_regression_flows() -> Result<()> {
                 payload::VerifyAggregate(_) => Err(anyhow!(
                     "unexpected verify_aggregate response to patch_event"
                 )),
+                payload::CreateAggregate(_) => Err(anyhow!(
+                    "unexpected create_aggregate response to patch_event"
+                )),
                 payload::SelectAggregate(_) => Err(anyhow!(
                     "unexpected select_aggregate response to patch_event"
                 )),
@@ -291,6 +294,9 @@ async fn control_capnp_regression_flows() -> Result<()> {
                 }
                 payload::VerifyAggregate(_) => Err(anyhow!(
                     "unexpected verify_aggregate response to get_aggregate"
+                )),
+                payload::CreateAggregate(_) => Err(anyhow!(
+                    "unexpected create_aggregate response to get_aggregate"
                 )),
                 payload::SelectAggregate(_) => Err(anyhow!(
                     "unexpected select_aggregate response to get_aggregate"
@@ -695,6 +701,9 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
                 }
                 payload::VerifyAggregate(_) => Err(anyhow!(
                     "unexpected verify_aggregate response to patch_event"
+                )),
+                payload::CreateAggregate(_) => Err(anyhow!(
+                    "unexpected create_aggregate response to patch_event"
                 )),
                 payload::SelectAggregate(_) => Err(anyhow!(
                     "unexpected select_aggregate response to patch_event"

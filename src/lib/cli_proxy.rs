@@ -36,7 +36,7 @@ use crate::{
     },
     replication_capnp_client::REPLICATION_PROTOCOL_VERSION,
     schema::{AggregateSchema, SchemaManager},
-    service::{AppendEventInput, CoreContext},
+    service::{AppendEventInput, CoreContext, CreateAggregateInput},
     store::{
         AggregatePositionEntry, AggregateQueryScope, AggregateSort, AggregateSortField,
         EventMetadata, EventRecord, EventStore,
@@ -83,6 +83,7 @@ enum ControlReply {
         found: bool,
         selection_json: Option<String>,
     },
+    CreateAggregate(String),
 }
 
 enum ControlCommand {
@@ -109,6 +110,7 @@ enum ControlCommand {
         aggregate_type: String,
         aggregate_id: String,
         event_type: String,
+        require_existing: bool,
         payload: Option<Value>,
         metadata: Option<Value>,
         note: Option<String>,
@@ -130,6 +132,11 @@ enum ControlCommand {
         aggregate_type: String,
         aggregate_id: String,
         fields: Vec<String>,
+    },
+    CreateAggregate {
+        token: String,
+        aggregate_type: String,
+        aggregate_id: String,
     },
 }
 
@@ -161,6 +168,7 @@ fn control_command_name(command: &ControlCommand) -> &'static str {
         ControlCommand::PatchEvent { .. } => "patch_event",
         ControlCommand::VerifyAggregate { .. } => "verify_aggregate",
         ControlCommand::SelectAggregate { .. } => "select_aggregate",
+        ControlCommand::CreateAggregate { .. } => "create_aggregate",
     }
 }
 
@@ -490,6 +498,10 @@ where
                                     builder.set_selection_json("");
                                 }
                             }
+                            ControlReply::CreateAggregate(json) => {
+                                let mut builder = payload.init_create_aggregate();
+                                builder.set_aggregate_json(&json);
+                            }
                         }
                     }
                     Err(err) => {
@@ -663,12 +675,14 @@ fn parse_control_command(
             } else {
                 None
             };
+            let require_existing = req.get_require_existing();
 
             Ok(ControlCommand::AppendEvent {
                 token,
                 aggregate_type,
                 aggregate_id,
                 event_type,
+                require_existing,
                 payload,
                 metadata,
                 note,
@@ -725,6 +739,20 @@ fn parse_control_command(
                 patch,
                 metadata,
                 note,
+            })
+        }
+        payload::CreateAggregate(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+            let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+
+            Ok(ControlCommand::CreateAggregate {
+                token,
+                aggregate_type,
+                aggregate_id,
             })
         }
         payload::VerifyAggregate(req) => {
@@ -853,6 +881,7 @@ async fn execute_control_command(
             aggregate_type,
             aggregate_id,
             event_type,
+            require_existing,
             payload,
             metadata,
             note,
@@ -866,7 +895,7 @@ async fn execute_control_command(
                 patch: None,
                 metadata,
                 note,
-                require_existing: false,
+                require_existing,
             };
             handle_append_event_command(
                 core.clone(),
@@ -947,6 +976,30 @@ async fn execute_control_command(
                     selection_json: None,
                 }),
             }
+        }
+        ControlCommand::CreateAggregate {
+            token,
+            aggregate_type,
+            aggregate_id,
+        } => {
+            let aggregate = spawn_blocking({
+                let core = core.clone();
+                let aggregate_type = aggregate_type.clone();
+                let aggregate_id = aggregate_id.clone();
+                let token = token.clone();
+                move || {
+                    core.create_aggregate(CreateAggregateInput {
+                        token,
+                        aggregate_type,
+                        aggregate_id,
+                    })
+                }
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("create aggregate task failed: {err}")))??;
+
+            let json = serde_json::to_string(&aggregate)?;
+            Ok(ControlReply::CreateAggregate(json))
         }
     }
 }

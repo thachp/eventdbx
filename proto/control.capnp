@@ -10,6 +10,7 @@ struct ControlRequest {
     verifyAggregate @5 :VerifyAggregateRequest;
     patchEvent @6 :PatchEventRequest;
     selectAggregate @7 :SelectAggregateRequest;
+    createAggregate @8 :CreateAggregateRequest;
   }
 }
 
@@ -23,6 +24,7 @@ struct ControlResponse {
     verifyAggregate @5 :VerifyAggregateResponse;
     selectAggregate @6 :SelectAggregateResponse;
     error @7 :ControlError;
+    createAggregate @8 :CreateAggregateResponse;
   }
 }
 
@@ -76,6 +78,7 @@ struct AppendEventRequest {
   hasNote @6 :Bool;
   metadataJson @7 :Text;
   hasMetadata @8 :Bool;
+  requireExisting @9 :Bool;
 }
 
 struct AppendEventResponse {
@@ -112,6 +115,16 @@ struct SelectAggregateRequest {
 struct SelectAggregateResponse {
   found @0 :Bool;
   selectionJson @1 :Text;
+}
+
+struct CreateAggregateRequest {
+  token @0 :Text;
+  aggregateType @1 :Text;
+  aggregateId @2 :Text;
+}
+
+struct CreateAggregateResponse {
+  aggregateJson @0 :Text;
 }
 
 struct AggregateSort {

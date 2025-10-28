@@ -98,6 +98,11 @@ impl CliTest {
         Ok(parsed)
     }
 
+    fn create_aggregate(&self, aggregate: &str, aggregate_id: &str) -> Result<()> {
+        self.run(&["aggregate", "create", aggregate, aggregate_id])?;
+        Ok(())
+    }
+
     fn run_failure(&self, args: &[&str]) -> Result<FailureOutput> {
         let output = self.exec(args)?;
         if output.status.success() {
@@ -1202,6 +1207,7 @@ fn aggregate_get_unknown_fails() -> Result<()> {
         "--events",
         "existing_created",
     ])?;
+    cli.create_aggregate("existing", "existing-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1230,6 +1236,7 @@ fn aggregate_replay_unknown_fails() -> Result<()> {
         "--events",
         "existing_created",
     ])?;
+    cli.create_aggregate("existing", "existing-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1258,6 +1265,7 @@ fn aggregate_remove_unknown_fails() -> Result<()> {
         "--events",
         "existing_created",
     ])?;
+    cli.create_aggregate("existing", "existing-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1286,6 +1294,7 @@ fn aggregate_verify_unknown_fails() -> Result<()> {
         "--events",
         "existing_created",
     ])?;
+    cli.create_aggregate("existing", "existing-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1336,6 +1345,7 @@ fn aggregate_apply_requires_schema_in_strict_mode() -> Result<()> {
 #[test]
 fn aggregate_apply_allows_missing_schema_in_default_mode() -> Result<()> {
     let cli = CliTest::new()?;
+    cli.create_aggregate("order", "order-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1345,6 +1355,68 @@ fn aggregate_apply_allows_missing_schema_in_default_mode() -> Result<()> {
         "--field",
         "status=created",
     ])?;
+    Ok(())
+}
+
+#[test]
+fn aggregate_apply_without_create_requires_flag() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run_json(&[
+        "schema",
+        "create",
+        "legacy",
+        "--events",
+        "legacy_created",
+        "--json",
+    ])?;
+
+    let failure = cli.run_failure(&[
+        "aggregate",
+        "apply",
+        "legacy",
+        "legacy-1",
+        "legacy_created",
+        "--field",
+        "status=pending",
+    ])?;
+    assert!(
+        failure.stderr.contains("does not exist"),
+        "unexpected error when applying without create:\n{}",
+        failure.stderr
+    );
+
+    let record = cli.run_json(&[
+        "aggregate",
+        "apply",
+        "legacy",
+        "legacy-1",
+        "legacy_created",
+        "--field",
+        "status=pending",
+        "--allow-create",
+    ])?;
+    assert_eq!(record["aggregate_id"], json!("legacy-1"));
+    assert_eq!(record["version"], json!(1));
+    Ok(())
+}
+
+#[test]
+fn aggregate_create_outputs_state() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run_json(&[
+        "schema",
+        "create",
+        "patient",
+        "--events",
+        "patient_created",
+        "--json",
+    ])?;
+
+    let state = cli.run_json(&["aggregate", "create", "patient", "patient-1", "--json"])?;
+    assert_eq!(state["aggregate_type"], json!("patient"));
+    assert_eq!(state["aggregate_id"], json!("patient-1"));
+    assert_eq!(state["version"], json!(0));
+    assert!(state["state"].as_object().unwrap().is_empty());
     Ok(())
 }
 
@@ -1382,6 +1454,7 @@ fn aggregate_apply_metadata_invalid_key_fails() -> Result<()> {
         "--events",
         "metadata_created",
     ])?;
+    cli.create_aggregate("metadata", "id-1")?;
     let failure = cli.run_failure(&[
         "aggregate",
         "apply",
@@ -1407,6 +1480,7 @@ fn aggregate_apply_metadata_invalid_key_fails() -> Result<()> {
 fn aggregate_apply_note_too_long_fails() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run(&["schema", "create", "notes", "--events", "note_created"])?;
+    cli.create_aggregate("notes", "id-1")?;
     let long_note = "n".repeat(129);
     let failure = cli.run_failure(&[
         "aggregate",
@@ -1447,6 +1521,7 @@ fn aggregate_stage_enforces_first_event_rule() -> Result<()> {
         "--json",
     ])?;
 
+    cli.create_aggregate("order", "order-1")?;
     let failure = cli.run_failure(&[
         "aggregate",
         "apply",
@@ -1487,6 +1562,7 @@ fn aggregate_apply_payload_and_field_conflict() -> Result<()> {
         "conflict_created",
         "--json",
     ])?;
+    cli.create_aggregate("conflict", "id-1")?;
     let failure = cli.run_failure(&[
         "aggregate",
         "apply",
@@ -1525,6 +1601,7 @@ fn aggregate_apply_and_get_flow() -> Result<()> {
         "expected schema to include order_created event"
     );
 
+    cli.create_aggregate("order", "order-1")?;
     let record = cli.run_json(&[
         "aggregate",
         "apply",
@@ -1575,6 +1652,7 @@ fn aggregate_patch_and_select_flow() -> Result<()> {
         "person_created,person_updated",
     ])?;
 
+    cli.create_aggregate("person", "person-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1625,6 +1703,10 @@ fn aggregate_patch_and_select_flow() -> Result<()> {
 #[test]
 fn aggregate_list_supports_sorting() -> Result<()> {
     let cli = CliTest::new()?;
+
+    cli.create_aggregate("order", "order-1")?;
+    cli.create_aggregate("order", "order-2")?;
+    cli.create_aggregate("invoice", "invoice-1")?;
 
     cli.run(&[
         "aggregate",
@@ -1727,6 +1809,7 @@ fn aggregate_list_hides_archived_by_default() -> Result<()> {
         "archive_created",
     ])?;
 
+    cli.create_aggregate("archive_demo", "demo-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1778,6 +1861,7 @@ fn aggregate_replay_after_apply_returns_events() -> Result<()> {
         "order_created",
         "--json",
     ])?;
+    cli.create_aggregate("replay_order", "order-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1809,6 +1893,7 @@ fn aggregate_snapshot_creates_record() -> Result<()> {
         "snap_created",
         "--json",
     ])?;
+    cli.create_aggregate("snap", "snap-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1837,6 +1922,7 @@ fn aggregate_verify_success_json() -> Result<()> {
         "verify_created",
         "--json",
     ])?;
+    cli.create_aggregate("verify", "verify-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1870,6 +1956,7 @@ fn aggregate_archive_and_restore_flow() -> Result<()> {
         "archive_created",
         "--json",
     ])?;
+    cli.create_aggregate("archive", "archive-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1921,6 +2008,7 @@ fn aggregate_replay_with_skip_take() -> Result<()> {
         "order_created,order_updated",
         "--json",
     ])?;
+    cli.create_aggregate("timeline", "order-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -1967,6 +2055,7 @@ fn aggregate_export_json_creates_file() -> Result<()> {
         "export_created",
         "--json",
     ])?;
+    cli.create_aggregate("export", "export-1")?;
     cli.run(&[
         "aggregate",
         "apply",
@@ -2014,6 +2103,8 @@ fn aggregate_stage_and_commit_flow() -> Result<()> {
         "--json",
     ])?;
     assert_eq!(schema["aggregate"], "order");
+
+    cli.create_aggregate("order", "order-1")?;
 
     let staged = cli.run(&[
         "aggregate",

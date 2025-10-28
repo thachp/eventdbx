@@ -159,6 +159,10 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "Manage aggregates",
     },
     HelpCase {
+        path: &["aggregate", "create"],
+        expected_snippet: "Create a new aggregate instance",
+    },
+    HelpCase {
         path: &["aggregate", "apply"],
         expected_snippet: "Apply an event to an aggregate instance",
     },

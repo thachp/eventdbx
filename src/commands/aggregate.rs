@@ -24,8 +24,8 @@ use eventdbx::{
     restrict,
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
-        self, ActorClaims, AggregateQueryScope, AggregateSort, AggregateSortField, AppendEvent,
-        EventRecord, EventStore, payload_to_map, select_state_field,
+        self, ActorClaims, AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState,
+        AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
     },
     token::{IssueTokenInput, JwtLimits, TokenManager},
     validation::{
@@ -42,6 +42,8 @@ use tracing::warn;
 
 #[derive(Subcommand)]
 pub enum AggregateCommands {
+    /// Create a new aggregate instance
+    Create(AggregateCreateArgs),
     /// Apply an event to an aggregate instance
     Apply(AggregateApplyArgs),
     /// Apply a JSON Patch event to an aggregate instance
@@ -68,6 +70,23 @@ pub enum AggregateCommands {
     Commit,
     /// Export aggregate state to CSV or JSON
     Export(AggregateExportArgs),
+}
+
+#[derive(Args)]
+pub struct AggregateCreateArgs {
+    /// Aggregate type
+    pub aggregate: String,
+
+    /// Aggregate identifier
+    pub aggregate_id: String,
+
+    /// Authorization token used when proxying through a running server
+    #[arg(long, value_name = "TOKEN")]
+    pub token: Option<String>,
+
+    /// Emit results as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -108,6 +127,10 @@ pub struct AggregateApplyArgs {
     /// JSON Patch (RFC 6902) document to apply server-side
     #[arg(long)]
     pub patch: Option<String>,
+
+    /// Allow creating the aggregate when it does not already exist
+    #[arg(long, default_value_t = false)]
+    pub allow_create: bool,
 }
 
 #[derive(Args)]
@@ -325,6 +348,60 @@ const EXPORT_ID_KEY: &str = "__aggregate_id";
 pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     match command {
+        AggregateCommands::Create(args) => {
+            let AggregateCreateArgs {
+                aggregate,
+                aggregate_id,
+                token,
+                json,
+            } = args;
+
+            ensure_snake_case("aggregate_type", &aggregate)?;
+            ensure_aggregate_id(&aggregate_id)?;
+
+            let restrict_mode = config.restrict;
+            let schema_manager = SchemaManager::load(config.schema_store_path())?;
+            let schema_present = match schema_manager.get(&aggregate) {
+                Ok(_) => true,
+                Err(EventError::SchemaNotFound) => false,
+                Err(err) => return Err(err.into()),
+            };
+            if !schema_present && restrict_mode.requires_declared_schema() {
+                bail!(restrict::strict_mode_missing_schema_message(&aggregate));
+            }
+
+            let encryption = config.encryption_key()?;
+            match EventStore::open(
+                config.event_store_path(),
+                encryption,
+                config.snowflake_worker_id,
+            ) {
+                Ok(store) => {
+                    store.create_aggregate(&aggregate, &aggregate_id)?;
+                    let state = store.get_aggregate_state(&aggregate, &aggregate_id)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&state)?);
+                    } else {
+                        println!(
+                            "aggregate_type={} aggregate_id={} version={} archived={}",
+                            state.aggregate_type, state.aggregate_id, state.version, state.archived
+                        );
+                    }
+                }
+                Err(EventError::Storage(message)) if is_lock_error(&message) => {
+                    let state = proxy_create_via_socket(&config, token, &aggregate, &aggregate_id)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&state)?);
+                    } else {
+                        println!(
+                            "aggregate_type={} aggregate_id={} version={} archived={}",
+                            state.aggregate_type, state.aggregate_id, state.version, state.archived
+                        );
+                    }
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
         AggregateCommands::List(args) => {
             if args.stage {
                 let staging_path = config.staging_path();
@@ -487,6 +564,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 metadata,
                 note,
                 patch,
+                allow_create,
             } = args;
             if payload_arg.is_some() && !fields.is_empty() {
                 bail!("--payload cannot be used together with --field");
@@ -529,7 +607,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 patch: patch_ops,
                 metadata: metadata_value,
                 note,
-                require_existing: false,
+                require_existing: !allow_create,
             };
 
             execute_append_command(&config, command)?;
@@ -899,11 +977,11 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                         schema_manager.validate_event(&aggregate, &event, &effective_payload)?;
                     }
                 }
-                let is_new = match store.aggregate_version(&aggregate, &aggregate_id)? {
-                    Some(version) if version > 0 => false,
-                    Some(_) | None => true,
+                let (exists, is_new) = match store.aggregate_version(&aggregate, &aggregate_id)? {
+                    Some(version) => (true, version == 0),
+                    None => (false, true),
                 };
-                if require_existing && is_new {
+                if require_existing && !exists {
                     bail!("aggregate {}::{} does not exist", aggregate, aggregate_id);
                 }
                 ensure_first_event_rule(is_new, &event)?;
@@ -964,11 +1042,13 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                     schema_manager.validate_event(&aggregate, &event, &effective_payload)?;
                 }
             }
-            let is_new = match store.aggregate_version(&aggregate, &aggregate_id)? {
+            let version_opt = store.aggregate_version(&aggregate, &aggregate_id)?;
+            let is_new = match version_opt {
                 Some(version) if version > 0 => false,
-                Some(_) | None => true,
+                _ => true,
             };
-            if require_existing && is_new {
+            let exists = version_opt.is_some();
+            if require_existing && !exists {
                 bail!("aggregate {}::{} does not exist", aggregate, aggregate_id);
             }
             ensure_first_event_rule(is_new, &event)?;
@@ -1012,6 +1092,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 &aggregate,
                 &aggregate_id,
                 &event,
+                require_existing,
                 if patch.is_some() {
                     None
                 } else {
@@ -1034,6 +1115,7 @@ fn proxy_append_via_socket(
     aggregate: &str,
     aggregate_id: &str,
     event: &str,
+    require_existing: bool,
     payload: Option<&Value>,
     patch: Option<&Value>,
     metadata: Option<&Value>,
@@ -1065,6 +1147,7 @@ fn proxy_append_via_socket(
                 aggregate,
                 aggregate_id,
                 event,
+                require_existing,
                 payload,
                 metadata,
                 note,
@@ -1077,6 +1160,25 @@ fn proxy_append_via_socket(
             })?
     };
     Ok(record)
+}
+
+fn proxy_create_via_socket(
+    config: &Config,
+    token: Option<String>,
+    aggregate: &str,
+    aggregate_id: &str,
+) -> Result<AggregateState> {
+    let token = ensure_proxy_token(config, token)?;
+    let client = ServerClient::new(config)?;
+    let state = client
+        .create_aggregate(&token, aggregate, aggregate_id)
+        .with_context(|| {
+            format!(
+                "failed to create aggregate via running server socket {}",
+                config.socket.bind_addr
+            )
+        })?;
+    Ok(state)
 }
 
 fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> {
