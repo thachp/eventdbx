@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, io::Cursor};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{
     Engine as _,
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
 };
 use capnp::message::ReaderOptions;
 use capnp::serialize::{OwnedSegments, write_message_to_words};
@@ -428,12 +428,91 @@ pub fn decode_public_key_bytes(raw: &str) -> Result<Vec<u8>> {
         bail!("public key cannot be empty");
     }
 
-    let bytes = STANDARD_NO_PAD
-        .decode(trimmed)
-        .or_else(|_| STANDARD.decode(trimmed))
-        .map_err(|err| anyhow!("invalid base64 public key: {err}"))?;
+    fn push_unique(list: &mut Vec<String>, candidate: String) {
+        if !list.iter().any(|existing| existing == &candidate) {
+            list.push(candidate);
+        }
+    }
+
+    fn pad_base64(value: &str) -> String {
+        let mut padded = value.to_string();
+        let remainder = padded.len() % 4;
+        if remainder != 0 {
+            padded.extend(std::iter::repeat('=').take(4 - remainder));
+        }
+        padded
+    }
+
+    fn try_decode(candidate: &str) -> Option<Vec<u8>> {
+        URL_SAFE_NO_PAD
+            .decode(candidate)
+            .ok()
+            .or_else(|| URL_SAFE.decode(candidate).ok())
+            .or_else(|| STANDARD_NO_PAD.decode(candidate).ok())
+            .or_else(|| STANDARD.decode(candidate).ok())
+    }
+
+    let mut candidates = Vec::new();
+    push_unique(&mut candidates, trimmed.to_string());
+    push_unique(&mut candidates, pad_base64(trimmed));
+
+    if trimmed.contains('+') || trimmed.contains('/') {
+        let url_safe = trimmed.replace('+', "-").replace('/', "_");
+        push_unique(&mut candidates, url_safe.clone());
+        push_unique(&mut candidates, pad_base64(&url_safe));
+    }
+
+    if trimmed.contains('-') || trimmed.contains('_') {
+        let standard = trimmed.replace('-', "+").replace('_', "/");
+        push_unique(&mut candidates, standard.clone());
+        push_unique(&mut candidates, pad_base64(&standard));
+    }
+
+    let bytes = candidates
+        .iter()
+        .filter_map(|candidate| try_decode(candidate))
+        .next()
+        .ok_or_else(|| anyhow!("invalid base64 public key"))?;
+
     if bytes.len() != 32 {
         bail!("public key must decode to 32 bytes");
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_public_key_accepts_multiple_encodings() {
+        let expected_a =
+            hex::decode("76b9e1fca8f39727ddccc1c2bdf80f3551549206089acdb8a4c34bc7a4fb04fe")
+                .unwrap();
+        let expected_b =
+            hex::decode("e37a9238adf3fb5d08407f40624dc7abdc95961bbc7829eb6c67776812148e8d")
+                .unwrap();
+
+        let variants_a = [
+            "drnh_KjzlyfdzMHCvfgPNVFUkgYIms24pMNLx6T7BP4",
+            "drnh/KjzlyfdzMHCvfgPNVFUkgYIms24pMNLx6T7BP4",
+            "drnh/KjzlyfdzMHCvfgPNVFUkgYIms24pMNLx6T7BP4=",
+        ];
+
+        for variant in variants_a {
+            let decoded = decode_public_key_bytes(variant).expect("variant A should decode");
+            assert_eq!(decoded, expected_a, "variant: {}", variant);
+        }
+
+        let variants_b = [
+            "43qSOK3z-10IQH9AYk3Hq9yVlhu8eCnrbGd3aBIUjo0",
+            "43qSOK3z+10IQH9AYk3Hq9yVlhu8eCnrbGd3aBIUjo0",
+            "43qSOK3z+10IQH9AYk3Hq9yVlhu8eCnrbGd3aBIUjo0=",
+        ];
+
+        for variant in variants_b {
+            let decoded = decode_public_key_bytes(variant).expect("variant B should decode");
+            assert_eq!(decoded, expected_b, "variant: {}", variant);
+        }
+    }
 }

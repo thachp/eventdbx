@@ -5,136 +5,103 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "type": "lldb",
-            "request": "launch",
             "name": "Debug unit tests in library 'eventdbx'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test"
+                ]
+            }
+        },
+        {
+            "name": "Debug executable 'dbx'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=dbx"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in executable 'dbx'",
+            "type": "lldb",
+            "request": "launch",
             "cargo": {
                 "args": [
                     "test",
-                    "--no-run",
-                    "--lib",
-                    "--package=eventdbx"
-                ],
-                "filter": {
-                    "name": "eventdbx",
-                    "kind": "lib"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
+                    "--bin=dbx"
+                ]
+            }
         },
         {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug executable 'eventdbx'",
-            "cargo": {
-                "args": [
-                    "build",
-                    "--bin=eventdbx",
-                    "--package=eventdbx"
-                ],
-                "filter": {
-                    "name": "eventdbx",
-                    "kind": "bin"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in executable 'eventdbx'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--bin=eventdbx",
-                    "--package=eventdbx"
-                ],
-                "filter": {
-                    "name": "eventdbx",
-                    "kind": "bin"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
             "name": "Debug integration test 'adminapi_regression'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--test=adminapi_regression",
-                    "--package=eventdbx"
-                ],
-                "filter": {
-                    "name": "adminapi_regression",
-                    "kind": "test"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug integration test 'graphql_regression'",
             "cargo": {
                 "args": [
                     "test",
-                    "--no-run",
-                    "--test=graphql_regression",
-                    "--package=eventdbx"
-                ],
-                "filter": {
-                    "name": "graphql_regression",
-                    "kind": "test"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
+                    "--test=adminapi_regression"
+                ]
+            }
         },
         {
+            "name": "Debug integration test 'cli_help'",
             "type": "lldb",
             "request": "launch",
-            "name": "Debug integration test 'grpc_regression'",
             "cargo": {
                 "args": [
                     "test",
-                    "--no-run",
-                    "--test=grpc_regression",
-                    "--package=eventdbx"
-                ],
-                "filter": {
-                    "name": "grpc_regression",
-                    "kind": "test"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
+                    "--test=cli_help"
+                ]
+            }
         },
         {
+            "name": "Debug integration test 'cli_smoke'",
             "type": "lldb",
             "request": "launch",
-            "name": "Debug integration test 'rest_regression'",
             "cargo": {
                 "args": [
                     "test",
-                    "--no-run",
-                    "--test=rest_regression",
-                    "--package=eventdbx"
-                ],
-                "filter": {
-                    "name": "rest_regression",
-                    "kind": "test"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
+                    "--test=cli_smoke"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'control_regression'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=control_regression"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'plugin_regression'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=plugin_regression"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'replication_regression'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=replication_regression"
+                ]
+            }
         }
     ]
 }

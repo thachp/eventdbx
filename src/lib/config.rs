@@ -7,7 +7,7 @@ use std::{
 
 use base64::{
     Engine as _,
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::SigningKey;
@@ -1098,7 +1098,7 @@ fn write_public_key(path: &Path, data: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let encoded = STANDARD_NO_PAD.encode(data);
+    let encoded = URL_SAFE_NO_PAD.encode(data);
     fs::write(path, encoded)?;
     Ok(())
 }
