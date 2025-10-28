@@ -11,6 +11,7 @@ struct ControlRequest {
     patchEvent @6 :PatchEventRequest;
     selectAggregate @7 :SelectAggregateRequest;
     createAggregate @8 :CreateAggregateRequest;
+    setAggregateArchive @9 :SetAggregateArchiveRequest;
   }
 }
 
@@ -25,6 +26,7 @@ struct ControlResponse {
     selectAggregate @6 :SelectAggregateResponse;
     error @7 :ControlError;
     createAggregate @8 :CreateAggregateResponse;
+    setAggregateArchive @9 :SetAggregateArchiveResponse;
   }
 }
 
@@ -130,6 +132,19 @@ struct CreateAggregateRequest {
 }
 
 struct CreateAggregateResponse {
+  aggregateJson @0 :Text;
+}
+
+struct SetAggregateArchiveRequest {
+  token @0 :Text;
+  aggregateType @1 :Text;
+  aggregateId @2 :Text;
+  archived @3 :Bool;
+  comment @4 :Text;
+  hasComment @5 :Bool;
+}
+
+struct SetAggregateArchiveResponse {
   aggregateJson @0 :Text;
 }
 

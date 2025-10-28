@@ -255,6 +255,36 @@ impl CoreContext {
         Ok(self.sanitize_aggregate(aggregate))
     }
 
+    pub fn set_aggregate_archive(&self, input: SetAggregateArchiveInput) -> Result<AggregateState> {
+        let SetAggregateArchiveInput {
+            token,
+            aggregate_type,
+            aggregate_id,
+            archived,
+            comment,
+        } = input;
+
+        ensure_snake_case("aggregate_type", &aggregate_type)?;
+        ensure_aggregate_id(&aggregate_id)?;
+
+        let resource = format!("aggregate:{}:{}", aggregate_type, aggregate_id);
+        let claims =
+            self.tokens()
+                .authorize_action(&token, "aggregate.archive", Some(resource.as_str()))?;
+
+        if claims.actor_claims().is_none() {
+            return Err(EventError::Unauthorized);
+        }
+
+        let comment = comment
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        let store = self.store();
+        let state = store.set_archive(&aggregate_type, &aggregate_id, archived, comment)?;
+        Ok(self.sanitize_aggregate(state))
+    }
+
     pub fn append_event(&self, input: AppendEventInput) -> Result<EventRecord> {
         let AppendEventInput {
             token,
@@ -404,4 +434,13 @@ pub struct CreateAggregateInput {
     pub payload: Value,
     pub metadata: Option<Value>,
     pub note: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SetAggregateArchiveInput {
+    pub token: String,
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    pub archived: bool,
+    pub comment: Option<String>,
 }
