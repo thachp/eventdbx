@@ -182,6 +182,9 @@ async fn control_capnp_regression_flows() -> Result<()> {
                 payload::SelectAggregate(_) => Err(anyhow!(
                     "unexpected select_aggregate response to patch_event"
                 )),
+                payload::SetAggregateArchive(_) => Err(anyhow!(
+                    "unexpected set_aggregate_archive response to patch_event"
+                )),
             }
         },
     )
@@ -300,6 +303,9 @@ async fn control_capnp_regression_flows() -> Result<()> {
                 )),
                 payload::SelectAggregate(_) => Err(anyhow!(
                     "unexpected select_aggregate response to get_aggregate"
+                )),
+                payload::SetAggregateArchive(_) => Err(anyhow!(
+                    "unexpected set_aggregate_archive response to get_aggregate"
                 )),
             }
         },
@@ -708,6 +714,9 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
                 payload::SelectAggregate(_) => Err(anyhow!(
                     "unexpected select_aggregate response to patch_event"
                 )),
+                payload::SetAggregateArchive(_) => Err(anyhow!(
+                    "unexpected set_aggregate_archive response to patch_event"
+                )),
             }
         },
     )
@@ -879,6 +888,229 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     assert_eq!(selection_body["firstName"], json!("Jane"));
     assert_eq!(selection_body["address.street"], json!("123 Main"));
     assert!(selection_body["address.zipCode"].is_null());
+
+    next_request_id += 1;
+
+    let archived_state: Value = send_control_request(
+        &mut writer,
+        &mut reader,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut archive = payload.init_set_aggregate_archive();
+            archive.set_token(&token_record.token);
+            archive.set_aggregate_type("order");
+            archive.set_aggregate_id("order-1");
+            archive.set_archived(true);
+            archive.set_comment("closed via control");
+            archive.set_has_comment(true);
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::SetAggregateArchive(Ok(archive)) => {
+                let json = archive
+                    .get_aggregate_json()
+                    .context("missing aggregate_json")?
+                    .to_str()
+                    .context("aggregate_json utf-8 error")?;
+                let parsed: Value =
+                    serde_json::from_str(json).context("failed to parse aggregate_json")?;
+                Ok(parsed)
+            }
+            control_response::payload::SetAggregateArchive(Err(err)) => Err(anyhow!(
+                "failed to decode set_aggregate_archive response: {err}"
+            )),
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert_eq!(archived_state["aggregate_type"], json!("order"));
+    assert_eq!(archived_state["archived"], json!(true));
+
+    next_request_id += 1;
+
+    let active_after_archive: Vec<Value> = send_control_request(
+        &mut writer,
+        &mut reader,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut list = payload.init_list_aggregates();
+            list.set_skip(0);
+            list.set_take(10);
+            list.set_has_take(true);
+            list.set_has_filter(false);
+            list.set_has_sort(false);
+            list.set_include_archived(false);
+            list.set_archived_only(false);
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::ListAggregates(Ok(list)) => {
+                let json = list
+                    .get_aggregates_json()
+                    .context("missing aggregates_json")?
+                    .to_str()
+                    .context("aggregates_json utf-8 error")?;
+                let parsed: Vec<Value> =
+                    serde_json::from_str(json).context("failed to parse aggregates_json")?;
+                Ok(parsed)
+            }
+            control_response::payload::ListAggregates(Err(err)) => {
+                Err(anyhow!("failed to decode list_aggregates response: {err}"))
+            }
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert!(
+        active_after_archive.is_empty(),
+        "archived aggregates should be hidden when include_archived=false"
+    );
+
+    next_request_id += 1;
+
+    let archived_only_listing: Vec<Value> = send_control_request(
+        &mut writer,
+        &mut reader,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut list = payload.init_list_aggregates();
+            list.set_skip(0);
+            list.set_take(10);
+            list.set_has_take(true);
+            list.set_has_filter(false);
+            list.set_has_sort(false);
+            list.set_include_archived(false);
+            list.set_archived_only(true);
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::ListAggregates(Ok(list)) => {
+                let json = list
+                    .get_aggregates_json()
+                    .context("missing aggregates_json")?
+                    .to_str()
+                    .context("aggregates_json utf-8 error")?;
+                let parsed: Vec<Value> =
+                    serde_json::from_str(json).context("failed to parse aggregates_json")?;
+                Ok(parsed)
+            }
+            control_response::payload::ListAggregates(Err(err)) => {
+                Err(anyhow!("failed to decode list_aggregates response: {err}"))
+            }
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert_eq!(archived_only_listing.len(), 1);
+    assert_eq!(archived_only_listing[0]["archived"], json!(true));
+
+    next_request_id += 1;
+
+    let restored_state: Value = send_control_request(
+        &mut writer,
+        &mut reader,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut archive = payload.init_set_aggregate_archive();
+            archive.set_token(&token_record.token);
+            archive.set_aggregate_type("order");
+            archive.set_aggregate_id("order-1");
+            archive.set_archived(false);
+            archive.set_comment("");
+            archive.set_has_comment(false);
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::SetAggregateArchive(Ok(archive)) => {
+                let json = archive
+                    .get_aggregate_json()
+                    .context("missing aggregate_json")?
+                    .to_str()
+                    .context("aggregate_json utf-8 error")?;
+                let parsed: Value =
+                    serde_json::from_str(json).context("failed to parse aggregate_json")?;
+                Ok(parsed)
+            }
+            control_response::payload::SetAggregateArchive(Err(err)) => Err(anyhow!(
+                "failed to decode set_aggregate_archive response: {err}"
+            )),
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    let restored_archived = restored_state
+        .get("archived")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    assert!(
+        !restored_archived,
+        "archived flag should be absent or false after restoration"
+    );
+
+    next_request_id += 1;
+
+    let active_after_restore: Vec<Value> = send_control_request(
+        &mut writer,
+        &mut reader,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut list = payload.init_list_aggregates();
+            list.set_skip(0);
+            list.set_take(10);
+            list.set_has_take(true);
+            list.set_has_filter(false);
+            list.set_has_sort(false);
+            list.set_include_archived(false);
+            list.set_archived_only(false);
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::ListAggregates(Ok(list)) => {
+                let json = list
+                    .get_aggregates_json()
+                    .context("missing aggregates_json")?
+                    .to_str()
+                    .context("aggregates_json utf-8 error")?;
+                let parsed: Vec<Value> =
+                    serde_json::from_str(json).context("failed to parse aggregates_json")?;
+                Ok(parsed)
+            }
+            control_response::payload::ListAggregates(Err(err)) => {
+                Err(anyhow!("failed to decode list_aggregates response: {err}"))
+            }
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert_eq!(active_after_restore.len(), 1);
+    let restored_entry_archived = active_after_restore[0]
+        .get("archived")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    assert!(
+        !restored_entry_archived,
+        "active aggregates should not report archived flag"
+    );
 
     drop(writer);
     drop(reader);

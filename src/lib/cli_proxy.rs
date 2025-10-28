@@ -36,7 +36,10 @@ use crate::{
     },
     replication_capnp_client::REPLICATION_PROTOCOL_VERSION,
     schema::{AggregateSchema, SchemaManager},
-    service::{AppendEventInput, CoreContext, CreateAggregateInput},
+    service::{
+        AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
+        normalize_optional_comment,
+    },
     store::{
         AggregatePositionEntry, AggregateQueryScope, AggregateSort, AggregateSortField,
         EventMetadata, EventRecord, EventStore,
@@ -84,6 +87,7 @@ enum ControlReply {
         selection_json: Option<String>,
     },
     CreateAggregate(String),
+    SetAggregateArchive(String),
 }
 
 enum ControlCommand {
@@ -142,6 +146,13 @@ enum ControlCommand {
         metadata: Option<Value>,
         note: Option<String>,
     },
+    SetAggregateArchive {
+        token: String,
+        aggregate_type: String,
+        aggregate_id: String,
+        archived: bool,
+        comment: Option<String>,
+    },
 }
 
 fn control_error_code(err: &EventError) -> &'static str {
@@ -173,6 +184,7 @@ fn control_command_name(command: &ControlCommand) -> &'static str {
         ControlCommand::VerifyAggregate { .. } => "verify_aggregate",
         ControlCommand::SelectAggregate { .. } => "select_aggregate",
         ControlCommand::CreateAggregate { .. } => "create_aggregate",
+        ControlCommand::SetAggregateArchive { .. } => "set_aggregate_archive",
     }
 }
 
@@ -506,6 +518,10 @@ where
                                 let mut builder = payload.init_create_aggregate();
                                 builder.set_aggregate_json(&json);
                             }
+                            ControlReply::SetAggregateArchive(json) => {
+                                let mut builder = payload.init_set_aggregate_archive();
+                                builder.set_aggregate_json(&json);
+                            }
                         }
                     }
                     Err(err) => {
@@ -830,6 +846,29 @@ fn parse_control_command(
                 fields,
             })
         }
+        payload::SetAggregateArchive(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+            let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+            let archived = req.get_archived();
+
+            let comment = normalize_optional_comment(if req.get_has_comment() {
+                Some(read_control_text(req.get_comment(), "comment")?)
+            } else {
+                None
+            });
+
+            Ok(ControlCommand::SetAggregateArchive {
+                token,
+                aggregate_type,
+                aggregate_id,
+                archived,
+                comment,
+            })
+        }
     }
 }
 
@@ -1053,6 +1092,37 @@ async fn execute_control_command(
 
             let json = serde_json::to_string(&aggregate)?;
             Ok(ControlReply::CreateAggregate(json))
+        }
+        ControlCommand::SetAggregateArchive {
+            token,
+            aggregate_type,
+            aggregate_id,
+            archived,
+            comment,
+        } => {
+            let aggregate = spawn_blocking({
+                let core = core.clone();
+                let aggregate_type = aggregate_type.clone();
+                let aggregate_id = aggregate_id.clone();
+                let token = token.clone();
+                let comment = comment.clone();
+                move || {
+                    core.set_aggregate_archive(SetAggregateArchiveInput {
+                        token,
+                        aggregate_type,
+                        aggregate_id,
+                        archived,
+                        comment,
+                    })
+                }
+            })
+            .await
+            .map_err(|err| {
+                EventError::Storage(format!("set aggregate archive task failed: {err}"))
+            })??;
+
+            let json = serde_json::to_string(&aggregate)?;
+            Ok(ControlReply::SetAggregateArchive(json))
         }
     }
 }
