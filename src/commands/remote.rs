@@ -540,7 +540,7 @@ async fn pull_remote_impl(
     filter: Option<ReplicationFilter>,
 ) -> Result<()> {
     let mut client = connect_client(&remote).await?;
-    let remote_positions = client
+    let remote_positions: Vec<AggregatePositionEntry> = client
         .list_positions()
         .await
         .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?;
