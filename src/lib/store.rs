@@ -27,6 +27,8 @@ const SEP: u8 = 0x1F;
 const PREFIX_EVENT: &str = "evt";
 const PREFIX_META: &str = "meta";
 const PREFIX_STATE: &str = "state";
+const PREFIX_META_ARCHIVED: &str = "meta-arch";
+const PREFIX_STATE_ARCHIVED: &str = "state-arch";
 const PREFIX_SNAPSHOT: &str = "snapshot";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,6 +348,7 @@ pub struct AggregateState {
     pub version: u64,
     pub state: BTreeMap<String, String>,
     pub merkle_root: String,
+    #[serde(skip_serializing_if = "is_false")]
     pub archived: bool,
 }
 
@@ -362,6 +365,19 @@ pub enum AggregateSortField {
 pub struct AggregateSort {
     pub field: AggregateSortField,
     pub descending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateQueryScope {
+    ActiveOnly,
+    ArchivedOnly,
+    IncludeArchived,
+}
+
+#[derive(Clone, Copy)]
+enum AggregateIndex {
+    Active,
+    Archived,
 }
 
 impl AggregateSortField {
@@ -413,6 +429,22 @@ impl std::str::FromStr for AggregateSortField {
     }
 }
 
+impl AggregateIndex {
+    fn meta_prefix(self) -> &'static str {
+        match self {
+            AggregateIndex::Active => PREFIX_META,
+            AggregateIndex::Archived => PREFIX_META_ARCHIVED,
+        }
+    }
+
+    fn state_prefix(self) -> &'static str {
+        match self {
+            AggregateIndex::Active => PREFIX_STATE,
+            AggregateIndex::Archived => PREFIX_STATE_ARCHIVED,
+        }
+    }
+}
+
 fn compare_aggregate_sort_keys(
     lhs: &AggregateState,
     rhs: &AggregateState,
@@ -425,6 +457,10 @@ fn compare_aggregate_sort_keys(
         }
     }
     StdOrdering::Equal
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -755,10 +791,10 @@ impl EventStore {
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<AggregateState> {
-        let meta = self
-            .load_meta(aggregate_type, aggregate_id)?
+        let (meta, index) = self
+            .load_meta_any(aggregate_type, aggregate_id)?
             .ok_or(EventError::AggregateNotFound)?;
-        let state = self.load_state_map(aggregate_type, aggregate_id)?;
+        let state = self.load_state_map_from(index, aggregate_type, aggregate_id)?;
 
         Ok(AggregateState {
             aggregate_type: meta.aggregate_type,
@@ -848,8 +884,8 @@ impl EventStore {
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Option<u64>> {
-        let meta = self.load_meta(aggregate_type, aggregate_id)?;
-        Ok(meta.map(|meta| meta.version))
+        let meta = self.load_meta_any(aggregate_type, aggregate_id)?;
+        Ok(meta.map(|(meta, _)| meta.version))
     }
 
     pub fn list_aggregate_ids(&self, aggregate_type: &str) -> Result<Vec<String>> {
@@ -888,8 +924,8 @@ impl EventStore {
     }
 
     pub fn verify(&self, aggregate_type: &str, aggregate_id: &str) -> Result<String> {
-        let meta = self
-            .load_meta(aggregate_type, aggregate_id)?
+        let (meta, _) = self
+            .load_meta_any(aggregate_type, aggregate_id)?
             .ok_or(EventError::AggregateNotFound)?;
         Ok(meta.merkle_root)
     }
@@ -931,9 +967,10 @@ impl EventStore {
     ) -> Result<AggregateState> {
         self.ensure_writable()?;
         let _guard = self.write_lock.lock();
-        let mut meta = self
-            .load_meta(aggregate_type, aggregate_id)?
+        let (mut meta, current_index) = self
+            .load_meta_any(aggregate_type, aggregate_id)?
             .ok_or(EventError::AggregateNotFound)?;
+        let state_map = self.load_state_map_from(current_index, aggregate_type, aggregate_id)?;
 
         meta.archived = archived;
         if archived {
@@ -944,14 +981,73 @@ impl EventStore {
             meta.archive_comment = None;
         }
 
-        self.db
-            .put(
-                meta_key(aggregate_type, aggregate_id),
-                serde_json::to_vec(&meta)?,
-            )
-            .map_err(|err| EventError::Storage(err.to_string()))?;
+        let destination_index = if archived {
+            AggregateIndex::Archived
+        } else {
+            AggregateIndex::Active
+        };
 
-        drop(meta);
+        let encoded_meta = serde_json::to_vec(&meta)?;
+        let encoded_state = self.encode_state_map(&state_map)?;
+
+        let mut batch = WriteBatch::default();
+        match (current_index, destination_index) {
+            (AggregateIndex::Active, AggregateIndex::Archived) => {
+                batch.delete(meta_key(aggregate_type, aggregate_id));
+                batch.delete(state_key(aggregate_type, aggregate_id));
+                batch_put(
+                    &mut batch,
+                    meta_archived_key(aggregate_type, aggregate_id),
+                    encoded_meta.clone(),
+                )?;
+                batch_put(
+                    &mut batch,
+                    state_archived_key(aggregate_type, aggregate_id),
+                    encoded_state.clone(),
+                )?;
+            }
+            (AggregateIndex::Archived, AggregateIndex::Active) => {
+                batch.delete(meta_archived_key(aggregate_type, aggregate_id));
+                batch.delete(state_archived_key(aggregate_type, aggregate_id));
+                batch_put(
+                    &mut batch,
+                    meta_key(aggregate_type, aggregate_id),
+                    encoded_meta.clone(),
+                )?;
+                batch_put(
+                    &mut batch,
+                    state_key(aggregate_type, aggregate_id),
+                    encoded_state.clone(),
+                )?;
+            }
+            (AggregateIndex::Active, AggregateIndex::Active) => {
+                batch_put(
+                    &mut batch,
+                    meta_key(aggregate_type, aggregate_id),
+                    encoded_meta.clone(),
+                )?;
+                batch_put(
+                    &mut batch,
+                    state_key(aggregate_type, aggregate_id),
+                    encoded_state.clone(),
+                )?;
+            }
+            (AggregateIndex::Archived, AggregateIndex::Archived) => {
+                batch_put(
+                    &mut batch,
+                    meta_archived_key(aggregate_type, aggregate_id),
+                    encoded_meta.clone(),
+                )?;
+                batch_put(
+                    &mut batch,
+                    state_archived_key(aggregate_type, aggregate_id),
+                    encoded_state.clone(),
+                )?;
+            }
+        }
+
+        self.write_batch(batch)?;
+
         self.get_aggregate_state(aggregate_type, aggregate_id)
     }
 
@@ -1051,7 +1147,13 @@ impl EventStore {
     }
 
     pub fn aggregates_paginated(&self, skip: usize, take: Option<usize>) -> Vec<AggregateState> {
-        self.aggregates_paginated_with_transform(skip, take, None, |aggregate| Some(aggregate))
+        self.aggregates_paginated_with_transform(
+            skip,
+            take,
+            None,
+            AggregateQueryScope::ActiveOnly,
+            |aggregate| Some(aggregate),
+        )
     }
 
     pub fn aggregates_paginated_with_transform<F>(
@@ -1059,13 +1161,73 @@ impl EventStore {
         skip: usize,
         take: Option<usize>,
         sort: Option<&[AggregateSort]>,
+        scope: AggregateQueryScope,
         mut transform: F,
     ) -> Vec<AggregateState>
     where
         F: FnMut(AggregateState) -> Option<AggregateState>,
     {
+        match scope {
+            AggregateQueryScope::ActiveOnly => self.collect_index_paginated(
+                AggregateIndex::Active,
+                skip,
+                take,
+                sort,
+                &mut transform,
+            ),
+            AggregateQueryScope::ArchivedOnly => self.collect_index_paginated(
+                AggregateIndex::Archived,
+                skip,
+                take,
+                sort,
+                &mut transform,
+            ),
+            AggregateQueryScope::IncludeArchived => {
+                let mut items = self.collect_index_paginated(
+                    AggregateIndex::Active,
+                    0,
+                    None,
+                    None,
+                    &mut transform,
+                );
+                let mut archived_items = self.collect_index_paginated(
+                    AggregateIndex::Archived,
+                    0,
+                    None,
+                    None,
+                    &mut transform,
+                );
+                items.append(&mut archived_items);
+
+                if let Some(keys) = sort {
+                    items.sort_by(|a, b| compare_aggregate_sort_keys(a, b, keys));
+                }
+
+                let total = items.len();
+                let start = skip.min(total);
+                let end = if let Some(limit) = take {
+                    start.saturating_add(limit).min(total)
+                } else {
+                    total
+                };
+                items[start..end].to_vec()
+            }
+        }
+    }
+
+    fn collect_index_paginated<F>(
+        &self,
+        index: AggregateIndex,
+        skip: usize,
+        take: Option<usize>,
+        sort: Option<&[AggregateSort]>,
+        transform: &mut F,
+    ) -> Vec<AggregateState>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
         let start = Instant::now();
-        let prefix = meta_prefix();
+        let prefix = meta_prefix_for(index);
         let iter = self
             .db
             .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
@@ -1090,13 +1252,14 @@ impl EventStore {
                 Err(_) => continue,
             };
 
-            let state = match self.load_state_map(&meta.aggregate_type, &meta.aggregate_id) {
-                Ok(state) => state,
-                Err(_) => {
-                    status = "err";
-                    continue;
-                }
-            };
+            let state =
+                match self.load_state_map_from(index, &meta.aggregate_type, &meta.aggregate_id) {
+                    Ok(state) => state,
+                    Err(_) => {
+                        status = "err";
+                        continue;
+                    }
+                };
 
             let aggregate = AggregateState {
                 aggregate_type: meta.aggregate_type.clone(),
@@ -1146,7 +1309,11 @@ impl EventStore {
         }
 
         let duration = start.elapsed().as_secs_f64();
-        record_store_op("rocksdb_iter_meta", status, duration);
+        let metric = match index {
+            AggregateIndex::Active => "rocksdb_iter_meta",
+            AggregateIndex::Archived => "rocksdb_iter_meta_archived",
+        };
+        record_store_op(metric, status, duration);
         items
     }
 
@@ -1187,10 +1354,15 @@ impl EventStore {
         result
     }
 
-    fn load_meta(&self, aggregate_type: &str, aggregate_id: &str) -> Result<Option<AggregateMeta>> {
+    fn load_meta_from(
+        &self,
+        index: AggregateIndex,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Option<AggregateMeta>> {
         let start = Instant::now();
         let result = (|| {
-            let key = meta_key(aggregate_type, aggregate_id);
+            let key = meta_key_for(index, aggregate_type, aggregate_id);
             let value = self
                 .db
                 .get(key)
@@ -1210,11 +1382,33 @@ impl EventStore {
         result
     }
 
+    fn load_meta_any(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Option<(AggregateMeta, AggregateIndex)>> {
+        if let Some(meta) =
+            self.load_meta_from(AggregateIndex::Active, aggregate_type, aggregate_id)?
+        {
+            return Ok(Some((meta, AggregateIndex::Active)));
+        }
+        if let Some(meta) =
+            self.load_meta_from(AggregateIndex::Archived, aggregate_type, aggregate_id)?
+        {
+            return Ok(Some((meta, AggregateIndex::Archived)));
+        }
+        Ok(None)
+    }
+
+    fn load_meta(&self, aggregate_type: &str, aggregate_id: &str) -> Result<Option<AggregateMeta>> {
+        self.load_meta_from(AggregateIndex::Active, aggregate_type, aggregate_id)
+    }
+
     pub fn create_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<()> {
         self.ensure_writable()?;
         let _guard = self.write_lock.lock();
 
-        if self.load_meta(aggregate_type, aggregate_id)?.is_some() {
+        if self.load_meta_any(aggregate_type, aggregate_id)?.is_some() {
             return Err(EventError::Storage(format!(
                 "aggregate {}:{} already exists",
                 aggregate_type, aggregate_id
@@ -1303,14 +1497,15 @@ impl EventStore {
         Ok(())
     }
 
-    fn load_state_map(
+    fn load_state_map_from(
         &self,
+        index: AggregateIndex,
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<BTreeMap<String, String>> {
         let start = Instant::now();
         let result = (|| {
-            let key = state_key(aggregate_type, aggregate_id);
+            let key = state_key_for(index, aggregate_type, aggregate_id);
             let value = self
                 .db
                 .get(key)
@@ -1329,18 +1524,46 @@ impl EventStore {
         );
         result
     }
+
+    fn load_state_map(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<BTreeMap<String, String>> {
+        self.load_state_map_from(AggregateIndex::Active, aggregate_type, aggregate_id)
+    }
+}
+
+fn meta_prefix_for(index: AggregateIndex) -> Vec<u8> {
+    key_with_segments(&[index.meta_prefix()])
 }
 
 fn meta_prefix() -> Vec<u8> {
-    key_with_segments(&[PREFIX_META])
+    meta_prefix_for(AggregateIndex::Active)
 }
 
 fn meta_key(aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
-    key_with_segments(&[PREFIX_META, aggregate_type, aggregate_id])
+    meta_key_for(AggregateIndex::Active, aggregate_type, aggregate_id)
+}
+
+fn meta_archived_key(aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
+    meta_key_for(AggregateIndex::Archived, aggregate_type, aggregate_id)
 }
 
 fn state_key(aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
-    key_with_segments(&[PREFIX_STATE, aggregate_type, aggregate_id])
+    state_key_for(AggregateIndex::Active, aggregate_type, aggregate_id)
+}
+
+fn state_archived_key(aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
+    state_key_for(AggregateIndex::Archived, aggregate_type, aggregate_id)
+}
+
+fn meta_key_for(index: AggregateIndex, aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
+    key_with_segments(&[index.meta_prefix(), aggregate_type, aggregate_id])
+}
+
+fn state_key_for(index: AggregateIndex, aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
+    key_with_segments(&[index.state_prefix(), aggregate_type, aggregate_id])
 }
 
 fn event_prefix(aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {

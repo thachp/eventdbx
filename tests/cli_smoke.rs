@@ -1717,6 +1717,57 @@ fn aggregate_list_supports_sorting() -> Result<()> {
 }
 
 #[test]
+fn aggregate_list_hides_archived_by_default() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&[
+        "schema",
+        "create",
+        "archive_demo",
+        "--events",
+        "archive_created",
+    ])?;
+
+    cli.run(&[
+        "aggregate",
+        "apply",
+        "archive_demo",
+        "demo-1",
+        "archive_created",
+        "--field",
+        "status=active",
+    ])?;
+
+    cli.run(&["aggregate", "archive", "archive_demo", "demo-1"])?;
+
+    let active_only = cli.run_json(&["aggregate", "list", "--json"])?;
+    let active_list = active_only
+        .as_array()
+        .context("active list did not return an array")?;
+    assert!(
+        active_list.is_empty(),
+        "archived aggregate should be hidden by default"
+    );
+
+    let include_archived = cli.run_json(&["aggregate", "list", "--json", "--include-archived"])?;
+    let include_list = include_archived
+        .as_array()
+        .context("include archived list did not return an array")?;
+    assert_eq!(include_list.len(), 1);
+    assert_eq!(include_list[0]["aggregate_type"], json!("archive_demo"));
+    assert_eq!(include_list[0]["aggregate_id"], json!("demo-1"));
+    assert_eq!(include_list[0]["archived"], json!(true));
+
+    let archived_only = cli.run_json(&["aggregate", "list", "--json", "--archived-only"])?;
+    let archived_list = archived_only
+        .as_array()
+        .context("archived-only list did not return an array")?;
+    assert_eq!(archived_list.len(), 1);
+    assert_eq!(archived_list[0]["aggregate_id"], json!("demo-1"));
+
+    Ok(())
+}
+
+#[test]
 fn aggregate_replay_after_apply_returns_events() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run_json(&[

@@ -24,8 +24,8 @@ use eventdbx::{
     restrict,
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
-        self, ActorClaims, AggregateSort, AggregateSortField, AppendEvent, EventRecord, EventStore,
-        payload_to_map, select_state_field,
+        self, ActorClaims, AggregateQueryScope, AggregateSort, AggregateSortField, AppendEvent,
+        EventRecord, EventStore, payload_to_map, select_state_field,
     },
     token::{IssueTokenInput, JwtLimits, TokenManager},
     validation::{
@@ -272,6 +272,14 @@ pub struct AggregateListArgs {
     /// Sort aggregates by comma-separated fields (e.g. `aggregate_type:asc,version:desc`)
     #[arg(long, value_name = "FIELD[:ORDER][,...]")]
     pub sort: Option<String>,
+
+    /// Include archived aggregates alongside active ones
+    #[arg(long, default_value_t = false, conflicts_with = "archived_only")]
+    pub include_archived: bool,
+
+    /// Show only archived aggregates
+    #[arg(long, default_value_t = false, conflicts_with = "include_archived")]
+    pub archived_only: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -340,6 +348,22 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 ),
                 None => None,
             };
+            let mut scope = if args.archived_only {
+                AggregateQueryScope::ArchivedOnly
+            } else if args.include_archived {
+                AggregateQueryScope::IncludeArchived
+            } else {
+                AggregateQueryScope::ActiveOnly
+            };
+
+            if matches!(scope, AggregateQueryScope::ActiveOnly) {
+                if let Some(expr) = filter_expr.as_ref() {
+                    if expr.references_field("archived") {
+                        scope = AggregateQueryScope::IncludeArchived;
+                    }
+                }
+            }
+
             let take = args.take.or(Some(config.list_page_size));
             let sort_directives = if let Some(spec) = args.sort.as_deref() {
                 Some(
@@ -354,6 +378,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 args.skip,
                 take,
                 sort_keys,
+                scope,
                 |aggregate| {
                     if let Some(expr) = filter_expr.as_ref() {
                         if !expr.matches_aggregate(&aggregate) {
@@ -366,15 +391,29 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&aggregates)?);
             } else {
+                let show_archived = matches!(
+                    scope,
+                    AggregateQueryScope::IncludeArchived | AggregateQueryScope::ArchivedOnly
+                );
                 for aggregate in aggregates {
-                    println!(
-                        "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
-                        aggregate.aggregate_type,
-                        aggregate.aggregate_id,
-                        aggregate.version,
-                        aggregate.merkle_root,
-                        aggregate.archived
-                    );
+                    if show_archived {
+                        println!(
+                            "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
+                            aggregate.aggregate_type,
+                            aggregate.aggregate_id,
+                            aggregate.version,
+                            aggregate.merkle_root,
+                            aggregate.archived
+                        );
+                    } else {
+                        println!(
+                            "aggregate_type={} aggregate_id={} version={} merkle_root={}",
+                            aggregate.aggregate_type,
+                            aggregate.aggregate_id,
+                            aggregate.version,
+                            aggregate.merkle_root
+                        );
+                    }
                 }
             }
         }

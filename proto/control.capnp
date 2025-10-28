@@ -34,6 +34,8 @@ struct ListAggregatesRequest {
   hasFilter @4 :Bool;
   sort @5 :List(AggregateSort);
   hasSort @6 :Bool;
+  includeArchived @7 :Bool;
+  archivedOnly @8 :Bool;
 }
 
 struct ListAggregatesResponse {

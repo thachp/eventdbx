@@ -6,8 +6,8 @@ use crate::{
     restrict::{self, RestrictMode},
     schema::SchemaManager,
     store::{
-        ActorClaims, AggregateSort, AggregateState, AppendEvent, EventRecord, EventStore,
-        select_state_field,
+        ActorClaims, AggregateQueryScope, AggregateSort, AggregateState, AppendEvent, EventRecord,
+        EventStore, select_state_field,
     },
     token::TokenManager,
     validation::{
@@ -90,6 +90,7 @@ impl CoreContext {
         take: Option<usize>,
         filter: Option<FilterExpr>,
         sort: Option<&[AggregateSort]>,
+        scope: AggregateQueryScope,
     ) -> Vec<AggregateState> {
         let mut effective_take = take.unwrap_or(self.list_page_size);
         if effective_take == 0 {
@@ -104,6 +105,7 @@ impl CoreContext {
             skip,
             Some(effective_take),
             sort,
+            scope,
             |aggregate| {
                 if self.is_hidden_aggregate(&aggregate.aggregate_type) {
                     return None;

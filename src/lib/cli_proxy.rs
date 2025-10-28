@@ -38,8 +38,8 @@ use crate::{
     schema::{AggregateSchema, SchemaManager},
     service::{AppendEventInput, CoreContext},
     store::{
-        AggregatePositionEntry, AggregateSort, AggregateSortField, EventMetadata, EventRecord,
-        EventStore,
+        AggregatePositionEntry, AggregateQueryScope, AggregateSort, AggregateSortField,
+        EventMetadata, EventRecord, EventStore,
     },
 };
 
@@ -91,6 +91,8 @@ enum ControlCommand {
         take: Option<usize>,
         filter: Option<FilterExpr>,
         sort: Option<Vec<AggregateSort>>,
+        include_archived: bool,
+        archived_only: bool,
     },
     GetAggregate {
         aggregate_type: String,
@@ -576,11 +578,16 @@ fn parse_control_command(
                 None
             };
 
+            let include_archived = req.get_include_archived();
+            let archived_only = req.get_archived_only();
+
             Ok(ControlCommand::ListAggregates {
                 skip,
                 take,
                 filter,
                 sort,
+                include_archived,
+                archived_only,
             })
         }
         payload::GetAggregate(req) => {
@@ -768,12 +775,31 @@ async fn execute_control_command(
             take,
             filter,
             sort,
+            include_archived,
+            archived_only,
         } => {
+            let mut scope = if archived_only {
+                AggregateQueryScope::ArchivedOnly
+            } else if include_archived {
+                AggregateQueryScope::IncludeArchived
+            } else {
+                AggregateQueryScope::ActiveOnly
+            };
+            if matches!(scope, AggregateQueryScope::ActiveOnly) {
+                if let Some(expr) = filter.as_ref() {
+                    if expr.references_field("archived") {
+                        scope = AggregateQueryScope::IncludeArchived;
+                    }
+                }
+            }
+
             let aggregates = spawn_blocking({
                 let core = core.clone();
+                let filter = filter;
+                let sort = sort;
                 move || {
                     let sort_ref = sort.as_ref().map(|keys| keys.as_slice());
-                    core.list_aggregates(skip, take, filter, sort_ref)
+                    core.list_aggregates(skip, take, filter, sort_ref, scope)
                 }
             })
             .await

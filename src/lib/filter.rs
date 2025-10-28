@@ -72,6 +72,16 @@ impl FilterExpr {
         }
     }
 
+    pub fn references_field(&self, target: &str) -> bool {
+        match self {
+            FilterExpr::And(children) | FilterExpr::Or(children) => {
+                children.iter().any(|child| child.references_field(target))
+            }
+            FilterExpr::Not(expr) => expr.references_field(target),
+            FilterExpr::Comparison { field, .. } => field.eq_ignore_ascii_case(target),
+        }
+    }
+
     pub fn write_to_capnp(
         &self,
         builder: filter_expression::Builder<'_>,
