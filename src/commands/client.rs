@@ -9,7 +9,7 @@ use capnp::{message::ReaderOptions, serialize};
 use eventdbx::{
     config::Config,
     control_capnp::{control_request, control_response},
-    store::EventRecord,
+    store::{AggregateState, EventRecord},
 };
 use serde_json::Value;
 
@@ -25,12 +25,59 @@ impl ServerClient {
         Ok(Self { connect_addr })
     }
 
+    pub fn create_aggregate(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        event_type: &str,
+        payload: &Value,
+        metadata: Option<&Value>,
+        note: Option<&str>,
+    ) -> Result<AggregateState> {
+        let connect_addr = self.connect_addr.clone();
+        let token = token.to_string();
+        let aggregate_type = aggregate_type.to_string();
+        let aggregate_id = aggregate_id.to_string();
+        let event_type = event_type.to_string();
+        let payload = payload.clone();
+        let metadata = metadata.cloned();
+        let note = note.map(|value| value.to_string());
+
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return tokio::task::block_in_place(move || {
+                create_aggregate_blocking(
+                    connect_addr,
+                    token,
+                    aggregate_type,
+                    aggregate_id,
+                    event_type,
+                    payload,
+                    metadata.clone(),
+                    note.clone(),
+                )
+            });
+        }
+
+        create_aggregate_blocking(
+            connect_addr,
+            token,
+            aggregate_type,
+            aggregate_id,
+            event_type,
+            payload,
+            metadata,
+            note,
+        )
+    }
+
     pub fn append_event(
         &self,
         token: &str,
         aggregate_type: &str,
         aggregate_id: &str,
         event_type: &str,
+        require_existing: bool,
         payload: Option<&Value>,
         metadata: Option<&Value>,
         note: Option<&str>,
@@ -52,6 +99,7 @@ impl ServerClient {
                     aggregate_type,
                     aggregate_id,
                     event_type,
+                    require_existing,
                     payload,
                     metadata.clone(),
                     note.clone(),
@@ -65,6 +113,7 @@ impl ServerClient {
             aggregate_type,
             aggregate_id,
             event_type,
+            require_existing,
             payload,
             metadata,
             note,
@@ -118,12 +167,119 @@ impl ServerClient {
     }
 }
 
+fn create_aggregate_blocking(
+    connect_addr: String,
+    token: String,
+    aggregate_type: String,
+    aggregate_id: String,
+    event_type: String,
+    payload: Value,
+    metadata: Option<Value>,
+    note: Option<String>,
+) -> Result<AggregateState> {
+    let mut stream = TcpStream::connect(&connect_addr)
+        .with_context(|| format!("failed to connect to CLI proxy at {}", connect_addr))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .context("failed to configure proxy write timeout")?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .context("failed to configure proxy read timeout")?;
+
+    let request_id = next_request_id();
+
+    let payload_json = serde_json::to_string(&payload)
+        .context("failed to serialize payload for proxy create request")?;
+    let (metadata_json, has_metadata) = match metadata {
+        Some(value) => (
+            serde_json::to_string(&value)
+                .context("failed to serialize metadata for proxy create request")?,
+            true,
+        ),
+        None => (String::new(), false),
+    };
+    let (note_text, has_note) = match note {
+        Some(value) => (value, true),
+        None => (String::new(), false),
+    };
+
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let mut request = message.init_root::<control_request::Builder>();
+        request.set_id(request_id);
+        let payload_builder = request.reborrow().init_payload();
+        let mut create = payload_builder.init_create_aggregate();
+        create.set_token(&token);
+        create.set_aggregate_type(&aggregate_type);
+        create.set_aggregate_id(&aggregate_id);
+        create.set_event_type(&event_type);
+        create.set_payload_json(&payload_json);
+        create.set_metadata_json(&metadata_json);
+        create.set_has_metadata(has_metadata);
+        create.set_note(&note_text);
+        create.set_has_note(has_note);
+    }
+
+    serialize::write_message(&mut stream, &message)
+        .context("failed to send create request via CLI proxy")?;
+    stream
+        .flush()
+        .context("failed to flush create request via CLI proxy")?;
+
+    let mut reader = BufReader::new(stream);
+    let response_message = serialize::read_message(&mut reader, ReaderOptions::new())
+        .context("failed to read create response from CLI proxy")?;
+    let response = response_message
+        .get_root::<control_response::Reader>()
+        .context("failed to decode create response from CLI proxy")?;
+
+    if response.get_id() != request_id {
+        bail!(
+            "CLI proxy returned response id {} but expected {}",
+            response.get_id(),
+            request_id
+        );
+    }
+
+    use control_response::payload;
+
+    match response
+        .get_payload()
+        .which()
+        .context("failed to decode create response payload")?
+    {
+        payload::CreateAggregate(Ok(create)) => {
+            let aggregate_json = read_text(create.get_aggregate_json(), "aggregate_json")?;
+            let state: AggregateState = serde_json::from_str(&aggregate_json)
+                .context("failed to parse create response payload")?;
+            Ok(state)
+        }
+        payload::CreateAggregate(Err(err)) => Err(anyhow!(
+            "failed to decode create_aggregate payload from CLI proxy: {}",
+            err
+        )),
+        payload::Error(Ok(error)) => {
+            let code = read_text(error.get_code(), "code")?;
+            let message = read_text(error.get_message(), "message")?;
+            Err(anyhow!("server returned {}: {}", code, message))
+        }
+        payload::Error(Err(err)) => Err(anyhow!(
+            "failed to decode error payload from CLI proxy: {}",
+            err
+        )),
+        _ => Err(anyhow!(
+            "unexpected payload returned from CLI proxy response"
+        )),
+    }
+}
+
 fn append_event_blocking(
     connect_addr: String,
     token: String,
     aggregate_type: String,
     aggregate_id: String,
     event_type: String,
+    require_existing: bool,
     payload: Option<Value>,
     metadata: Option<Value>,
     note: Option<String>,
@@ -172,6 +328,7 @@ fn append_event_blocking(
         append.set_has_metadata(has_metadata);
         append.set_note(&note_text);
         append.set_has_note(has_note);
+        append.set_require_existing(require_existing);
     }
 
     serialize::write_message(&mut stream, &message)

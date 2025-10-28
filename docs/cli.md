@@ -52,7 +52,9 @@ Run without flags to print the current configuration. The first invocation must 
 
 ## Aggregates
 
-- `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--patch <json>] [--stage]`
+- `dbx aggregate create --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--metadata <json>] [--note <text>] [--json]`
+- `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--stage]`
+- `dbx aggregate patch --aggregate <type> --aggregate-id <id> --event <name> --patch <json> [--stage] [--metadata <json>] [--note <text>]`
 - `dbx aggregate list [--skip <n>] [--take <n>] [--stage]`
 - `dbx aggregate get --aggregate <type> --aggregate-id <id> [--include-events]`
 - `dbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`

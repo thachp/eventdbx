@@ -60,6 +60,10 @@ enum Commands {
         #[command(subcommand)]
         command: PluginCommands,
     },
+    /// List events in the store
+    Events(commands::events::EventsArgs),
+    /// Inspect a single event by Snowflake identifier
+    Event(commands::events::EventArgs),
     /// Show or manage the plugin retry queue
     Queue(QueueArgs),
     /// Manage aggregates
@@ -114,6 +118,8 @@ async fn main() -> Result<()> {
         Commands::Token { command } => commands::token::execute(config, command)?,
         Commands::Schema { command } => commands::schema::execute(config, command)?,
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
+        Commands::Events(args) => commands::events::list(config, args)?,
+        Commands::Event(args) => commands::events::show(config, args)?,
         Commands::Queue(args) => commands::queue::execute(config, args)?,
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
         Commands::Push(args) => commands::remote::push(config, args).await?,

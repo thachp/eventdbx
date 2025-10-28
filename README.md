@@ -18,12 +18,12 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 
    ```bash
    # Install prebuilt binaries via shell script
-   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v3.5.2/eventdbx-installer.sh | sh
+   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v3.6.5/eventdbx-installer.sh | sh
    ```
 
    ```bash
    # Install prebuilt binaries via powershell script
-   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v3.5.2/eventdbx-installer.ps1 | iex"
+   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v3.6.5/eventdbx-installer.ps1 | iex"
    ```
 
 2. **Start the server**
@@ -77,8 +77,8 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
        "hidden": false,
        "hidden_fields": [],
        "column_types": {
-         "first_name": { "type": "text", "required": true, "format": "email" },
-         "last_name": {
+         "email": { "type": "text", "required": true, "format": "email" },
+         "name": {
            "type": "text",
            "rules": { "length": { "min": "1", "max": "64" } }
          }
@@ -116,6 +116,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
        --field status=active
      ```
    - If the server is stopped, the same CLI command writes to the local RocksDB store directly.
+   - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort created_at:desc --take 5` or drill into the payload of a specific event via `dbx event <snowflake_id> --json`.
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
 
@@ -130,6 +131,8 @@ You now have a working EventDBX instance with an initial aggregate. Explore the 
 - **Built-in Observability**: A Prometheus-compatible `/metrics` endpoint reports HTTP traffic and plugin queue health so you can wire EventDBX into Grafana, Datadog, or any other monitoring stack out of the box.
 - **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. Tokens are signed with an Ed25519 key pair stored under `[auth]` in `config.toml`; keep `private_key` secret and distribute `public_key` to services that need to validate them. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes.
 - **Encrypted Payloads & Secrets at Rest**: Event payloads, aggregate snapshots, and `tokens.json` are encrypted transparently when a DEK is configured. Metadata such as aggregate identifiers, versions, and Merkle roots remain readable so plugins, replication, and integrity checks keep working without additional configuration.
+- **Peer replication**: Keep deployments in sync with `dbx push` and `dbx pull`, selectively streaming aggregates, schemas, or both between trusted peers over the builtin Cap'n Proto transport.
+- **Schema validation**: Enforce aggregate contracts with builtin formats (`email`, `url`, `wgs_84`, and more), rule blocks for length, range, regex, required fields, and nested `properties`, plus strict/relaxed enforcement modes.
 - **Powered by RocksDB and Rust**: At its core, EventDBX utilizes RocksDB for storage, taking advantage of its high performance and efficiency. The system is developed in Rust, known for its safety, efficiency, and concurrency capabilities, ensuring that it is both rapid and dependable.
 
 ## Restriction Modes
@@ -185,8 +188,11 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 
 ### Aggregates
 
-- `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--payload <json>] [--patch <json>] [--stage] [--token <value>] [--note <text>]`  
+- `dbx aggregate create --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--metadata <json>] [--note <text>] [--token <value>] [--json]`  
+- `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--payload <json>] [--stage] [--token <value>] [--note <text>]`  
   Appends an event immediately—use `--stage` to queue it for a later commit.
+- `dbx aggregate patch --aggregate <type> --aggregate-id <id> --event <name> --patch <json> [--stage] [--token <value>] [--metadata <json>] [--note <text>]`  
+  Applies an RFC 6902 JSON Patch to the current state and persists the delta as a new event.
 - `dbx aggregate list [--skip <n>] [--take <n>] [--stage]`  
   Lists aggregates with version, Merkle root, and archive status; pass `--stage` to display queued events instead.
 - `dbx aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
@@ -198,10 +204,17 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 - `dbx aggregate remove --aggregate <type> --aggregate-id <id>` Removes an aggregate that has no events (version still 0).
 - `dbx aggregate commit`  
   Flushes all staged events in a single atomic transaction.
+
+### Events
+
+- `dbx events [--aggregate <type>] [--aggregate-id <id>] [--skip <n>] [--take <n>] [--filter <expr>] [--sort <field[:order],...>] [--json] [--include-archived|--archived-only]`  
+  Streams events with optional aggregate scoping, SQL-like filters (e.g. `payload.status = "open" AND metadata.note LIKE "retry%"`), and multi-key sorting. Prefix fields with `payload.`, `metadata.`, or `extensions.` to target nested JSON; `created_at`, `event_id`, `version`, and other top-level keys are also available.
+- `dbx event <snowflake_id> [--json]`  
+  Displays a single event by Snowflake identifier, including payload, metadata, and extensions.
 - `dbx aggregate export [<type>] [--all] --output <path> [--format csv|json] [--zip] [--pretty]`  
   Writes the current aggregate state (no metadata) as CSV or JSON. Exports default to one file per aggregate type; pass `--zip` to bundle the output into an archive.
 
-`--payload` and `--patch` are mutually exclusive. Use `--payload` when you want to supply the full document explicitly; use `--patch` for an RFC 6902 JSON Patch that the server applies before validation and persistence.
+`--payload` lets you provide the full event document explicitly; use `dbx aggregate patch` when you need to apply an RFC 6902 JSON Patch server-side.
 
 #### Aggregate Operation Costs
 
@@ -391,6 +404,33 @@ Example HTTP/TCP payload (`EventRecord`):
 
 > **Heads-up for plugin authors**  
 > The [dbx_plugins](https://github.com/thachp/dbx_plugins) surfaces now receive `event_id` values as Snowflake strings and may optionally see an `extensions` object alongside `payload`. Update custom handlers to treat `metadata.event_id` as a stringified Snowflake and to ignore or consume the new `extensions` envelope as needed.
+
+## Column definitions
+
+Each entry in the `column_types` map declares both a storage type and the rules EventDBX enforces. Supported types:
+
+| Type                       | Accepted input                                                 | Notes                                                                                                   |
+| -------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `integer`                  | JSON numbers or strings that parse to a signed 64-bit integer  | Rejects values outside the i64 range.                                                                   |
+| `float`                    | JSON numbers or numeric strings                                | Stored as `f64`; scientific notation is accepted.                                                       |
+| `decimal(precision,scale)` | JSON numbers or strings                                        | Enforces total digits ≤ precision and fractional digits ≤ scale.                                        |
+| `boolean`                  | JSON booleans, `0` / `1`, or `"true"`, `"false"`, `"1"`, `"0"` | Values are normalised to `true` / `false`.                                                              |
+| `text`                     | UTF-8 strings                                                  | Use `length`, `contains`, or `regex` rules for additional constraints.                                  |
+| `timestamp`                | RFC 3339 timestamps as strings                                 | Normalised to UTC.                                                                                      |
+| `date`                     | `YYYY-MM-DD` strings                                           | Parsed as a calendar date without a timezone.                                                           |
+| `json`                     | Any JSON value                                                 | No per-field validation is applied; use when you want to store free-form payloads.                      |
+| `binary`                   | Base64-encoded strings                                         | Decoded to raw bytes before validation; `length` counts bytes after decoding.                           |
+| `object`                   | JSON objects                                                   | Enable nested validation via the `properties` rule (see below). Extra keys not listed remain untouched. |
+
+Rules are optional and can be combined when the target type supports them:
+
+- `required`: the field must be present in every event payload.
+- `contains` / `does_not_contain`: case-sensitive substring checks for `text` fields.
+- `regex`: one or more regular expressions that `text` fields must satisfy.
+- `format`: built-in string validators; choose `email`, `url`, `credit_card`, `country_code` (ISO&nbsp;3166-1 alpha-2), `iso_8601` (RFC&nbsp;3339 timestamp), `wgs_84` (latitude/longitude in decimal degrees), `camel_case`, `snake_case`, `kebab_case`, `pascal_case`, or `upper_case_snake_case`.
+- `length`: `{ "min": <usize>, "max": <usize> }` bounds the length of `text` (characters) or `binary` (decoded bytes).
+- `range`: `{ "min": <value>, "max": <value> }` for numeric and temporal types (`integer`, `float`, `decimal`, `timestamp`, `date`). Boundary values must parse to the column’s type.
+- `properties`: nested `column_types` definitions for `object` columns, enabling recursion with the same rule set as top-level fields.
 
 ## Contributing
 

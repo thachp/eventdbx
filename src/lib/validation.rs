@@ -67,12 +67,7 @@ pub fn ensure_payload_size(payload: &Value) -> Result<()> {
     Ok(())
 }
 
-pub fn ensure_first_event_rule(is_new_aggregate: bool, event_type: &str) -> Result<()> {
-    if is_new_aggregate && !event_type.ends_with("_created") {
-        return Err(EventError::InvalidSchema(
-            "first event for a new aggregate must end with '_created'".into(),
-        ));
-    }
+pub fn ensure_first_event_rule(_is_new_aggregate: bool, _event_type: &str) -> Result<()> {
     Ok(())
 }
 
@@ -147,13 +142,6 @@ mod tests {
         let oversized = "x".repeat(MAX_EVENT_PAYLOAD_BYTES + 1);
         let err = ensure_payload_size(&json!(oversized)).unwrap_err();
         assert!(matches!(err, EventError::InvalidSchema(_)));
-    }
-
-    #[test]
-    fn first_event_rule_requires_created_suffix() {
-        let err = ensure_first_event_rule(true, "order_updated").unwrap_err();
-        assert!(matches!(err, EventError::InvalidSchema(_)));
-        ensure_first_event_rule(true, "order_created").expect("created suffix required");
     }
 
     #[test]

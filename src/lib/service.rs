@@ -2,10 +2,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     error::{EventError, Result},
+    filter::FilterExpr,
     restrict::{self, RestrictMode},
     schema::SchemaManager,
     store::{
-        ActorClaims, AggregateState, AppendEvent, EventRecord, EventStore, select_state_field,
+        ActorClaims, AggregateQueryScope, AggregateSort, AggregateState, AppendEvent, EventRecord,
+        EventStore, select_state_field,
     },
     token::TokenManager,
     validation::{
@@ -82,7 +84,14 @@ impl CoreContext {
         aggregate
     }
 
-    pub fn list_aggregates(&self, skip: usize, take: Option<usize>) -> Vec<AggregateState> {
+    pub fn list_aggregates(
+        &self,
+        skip: usize,
+        take: Option<usize>,
+        filter: Option<FilterExpr>,
+        sort: Option<&[AggregateSort]>,
+        scope: AggregateQueryScope,
+    ) -> Vec<AggregateState> {
         let mut effective_take = take.unwrap_or(self.list_page_size);
         if effective_take == 0 {
             return Vec::new();
@@ -91,12 +100,25 @@ impl CoreContext {
             effective_take = self.page_limit;
         }
 
-        self.store
-            .aggregates_paginated(skip, Some(effective_take))
-            .into_iter()
-            .filter(|aggregate| !self.is_hidden_aggregate(&aggregate.aggregate_type))
-            .map(|aggregate| self.sanitize_aggregate(aggregate))
-            .collect()
+        let filter_ref = filter.as_ref();
+        self.store.aggregates_paginated_with_transform(
+            skip,
+            Some(effective_take),
+            sort,
+            scope,
+            |aggregate| {
+                if self.is_hidden_aggregate(&aggregate.aggregate_type) {
+                    return None;
+                }
+                let sanitized = self.sanitize_aggregate(aggregate);
+                if let Some(expr) = filter_ref {
+                    if !expr.matches_aggregate(&sanitized) {
+                        return None;
+                    }
+                }
+                Some(sanitized)
+            },
+        )
     }
 
     pub fn get_aggregate(
@@ -176,6 +198,61 @@ impl CoreContext {
             return Err(EventError::AggregateNotFound);
         }
         self.store.verify(aggregate_type, aggregate_id)
+    }
+
+    pub fn create_aggregate(&self, input: CreateAggregateInput) -> Result<AggregateState> {
+        let CreateAggregateInput {
+            token,
+            aggregate_type,
+            aggregate_id,
+            event_type,
+            payload,
+            metadata,
+            note,
+        } = input;
+
+        ensure_snake_case("aggregate_type", &aggregate_type)?;
+        ensure_snake_case("event_type", &event_type)?;
+        ensure_aggregate_id(&aggregate_id)?;
+        if let Some(ref metadata) = metadata {
+            ensure_metadata_extensions(metadata)?;
+        }
+        ensure_payload_size(&payload)?;
+
+        let store = self.store();
+        if store
+            .aggregate_version(&aggregate_type, &aggregate_id)?
+            .is_some()
+        {
+            return Err(EventError::SchemaViolation(format!(
+                "aggregate {}::{} already exists",
+                aggregate_type, aggregate_id
+            )));
+        }
+
+        let resource = format!("aggregate:{}:{}", aggregate_type, aggregate_id);
+        let claims =
+            self.tokens()
+                .authorize_action(&token, "aggregate.create", Some(resource.as_str()))?;
+
+        if claims.actor_claims().is_none() {
+            return Err(EventError::Unauthorized);
+        }
+
+        let _record = self.append_event(AppendEventInput {
+            token,
+            aggregate_type: aggregate_type.clone(),
+            aggregate_id: aggregate_id.clone(),
+            event_type,
+            payload: Some(payload),
+            patch: None,
+            metadata,
+            note,
+            require_existing: false,
+        })?;
+
+        let aggregate = store.get_aggregate_state(&aggregate_type, &aggregate_id)?;
+        Ok(self.sanitize_aggregate(aggregate))
     }
 
     pub fn append_event(&self, input: AppendEventInput) -> Result<EventRecord> {
@@ -316,4 +393,15 @@ pub struct AppendEventInput {
     pub metadata: Option<Value>,
     pub note: Option<String>,
     pub require_existing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateAggregateInput {
+    pub token: String,
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    pub event_type: String,
+    pub payload: Value,
+    pub metadata: Option<Value>,
+    pub note: Option<String>,
 }

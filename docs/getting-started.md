@@ -133,15 +133,16 @@ export EVENTDBX_TOKEN=<copied token>
 
 ## 6. Stage and commit events
 
-Append an event immediately:
+Initialize the aggregate with its first event:
 
 ```bash
-dbx aggregate apply patient p-001 patient-added \
+dbx aggregate create patient p-001 \
+  --event patient_created \
   --field name="Jane Doe" \
   --field status=active
 ```
 
-Or stage multiple events and commit them together:
+Append or stage additional events and commit them together:
 
 ```bash
 dbx aggregate apply patient p-001 patient-updated \

@@ -131,7 +131,9 @@ impl fmt::Display for ColumnTypeParseError {
 
 impl std::error::Error for ColumnTypeParseError {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+// Manual implementation of `Deserialize` for `FieldRules` is provided elsewhere.
+// This is necessary to ignore the deprecated `must_match` field during deserialization.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct FieldRules {
     #[serde(skip_serializing_if = "is_false")]
@@ -140,8 +142,6 @@ pub struct FieldRules {
     pub contains: Vec<String>,
     #[serde(skip_serializing_if = "vec_is_empty")]
     pub does_not_contain: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub must_match: Option<String>,
     #[serde(skip_serializing_if = "vec_is_empty")]
     pub regex: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,7 +159,6 @@ impl FieldRules {
         !self.required
             && self.contains.is_empty()
             && self.does_not_contain.is_empty()
-            && self.must_match.is_none()
             && self.regex.is_empty()
             && self.length.is_none()
             && self.range.is_none()
@@ -241,6 +240,70 @@ impl FieldRules {
                             )));
                         }
                     }
+                    FieldFormat::CountryCode => {
+                        if !validate_country_code(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be an ISO 3166-1 alpha-2 country code",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::Iso8601 => {
+                        if DateTime::parse_from_rfc3339(text).is_err() {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be a valid ISO 8601 timestamp",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::Wgs84 => {
+                        if !validate_wgs84(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be a valid WGS 84 coordinate (lat,lon)",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::CamelCase => {
+                        if !validate_camel_case(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be camelCase",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::SnakeCase => {
+                        if !validate_snake_case(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be snake_case",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::KebabCase => {
+                        if !validate_kebab_case(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be kebab-case",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::PascalCase => {
+                        if !validate_pascal_case(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be PascalCase",
+                                path
+                            )));
+                        }
+                    }
+                    FieldFormat::UpperCaseSnakeCase => {
+                        if !validate_upper_case_snake_case(text) {
+                            return Err(EventError::SchemaViolation(format!(
+                                "field {} must be UPPER_CASE_SNAKE_CASE",
+                                path
+                            )));
+                        }
+                    }
                 }
             }
         } else if let Some(length) = &self.length {
@@ -295,6 +358,50 @@ impl FieldRules {
     }
 }
 
+impl<'de> Deserialize<'de> for FieldRules {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct FieldRulesHelper {
+            #[serde(default)]
+            required: bool,
+            #[serde(default)]
+            contains: Vec<String>,
+            #[serde(default)]
+            does_not_contain: Vec<String>,
+            #[serde(default)]
+            // Retained for backward compatibility during deserialization of old schema files.
+            #[allow(dead_code)]
+            must_match: Option<String>,
+            #[serde(default)]
+            regex: Vec<String>,
+            #[serde(default)]
+            length: Option<LengthRule>,
+            #[serde(default)]
+            range: Option<RangeRule>,
+            #[serde(default)]
+            format: Option<FieldFormat>,
+            #[serde(default)]
+            properties: BTreeMap<String, ColumnSettings>,
+        }
+
+        let helper = FieldRulesHelper::deserialize(deserializer)?;
+        Ok(FieldRules {
+            required: helper.required,
+            contains: helper.contains,
+            does_not_contain: helper.does_not_contain,
+            regex: helper.regex,
+            length: helper.length,
+            range: helper.range,
+            format: helper.format,
+            properties: helper.properties,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct LengthRule {
@@ -337,6 +444,15 @@ pub enum FieldFormat {
     Email,
     Url,
     CreditCard,
+    CountryCode,
+    Iso8601,
+    #[serde(rename = "wgs_84")]
+    Wgs84,
+    CamelCase,
+    SnakeCase,
+    KebabCase,
+    PascalCase,
+    UpperCaseSnakeCase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,8 +475,7 @@ impl ColumnSettings {
         value_opt: Option<&Value>,
         root_value: &Value,
         root_definitions: &BTreeMap<String, ColumnSettings>,
-        normalized: &mut BTreeMap<String, ComparableValue>,
-    ) -> Result<Option<ComparableValue>> {
+    ) -> Result<()> {
         if value_opt.is_none() {
             if self.rules.required {
                 return Err(EventError::SchemaViolation(format!(
@@ -368,15 +483,14 @@ impl ColumnSettings {
                     path
                 )));
             }
-            return Ok(None);
+            return Ok(());
         }
 
         let value = value_opt.expect("value checked above");
-        let comparable =
-            self.coerce_value(path, value, root_value, root_definitions, normalized)?;
+        let comparable = self.coerce_value(path, value, root_value, root_definitions)?;
         self.rules
             .validate_rules(path, &self.column_type, &comparable)?;
-        Ok(Some(comparable))
+        Ok(())
     }
 
     fn coerce_value(
@@ -385,7 +499,6 @@ impl ColumnSettings {
         value: &Value,
         root_value: &Value,
         root_definitions: &BTreeMap<String, ColumnSettings>,
-        normalized: &mut BTreeMap<String, ComparableValue>,
     ) -> Result<ComparableValue> {
         match &self.column_type {
             ColumnType::Integer => Ok(ComparableValue::Integer(coerce_integer(value, path)?)),
@@ -411,33 +524,9 @@ impl ColumnSettings {
                     root_value,
                     root_definitions,
                     path,
-                    normalized,
                 )?;
                 Ok(ComparableValue::Json(value.clone()))
             }
-        }
-    }
-
-    fn same_kind(&self, other: &ColumnSettings) -> bool {
-        use std::mem::Discriminant;
-        fn discriminant(value: &ColumnType) -> Discriminant<ColumnType> {
-            std::mem::discriminant(value)
-        }
-        if discriminant(&self.column_type) != discriminant(&other.column_type) {
-            return false;
-        }
-        match (&self.column_type, &other.column_type) {
-            (
-                ColumnType::Decimal {
-                    precision: p1,
-                    scale: s1,
-                },
-                ColumnType::Decimal {
-                    precision: p2,
-                    scale: s2,
-                },
-            ) => p1 == p2 && s1 == s2,
-            _ => true,
         }
     }
 }
@@ -921,16 +1010,13 @@ impl SchemaManager {
                 ))
             })?;
 
-            let mut normalized = BTreeMap::new();
             validate_columns(
                 &schema.column_types,
                 object,
                 payload,
                 &schema.column_types,
                 "",
-                &mut normalized,
             )?;
-            validate_must_match(&schema.column_types, &schema.column_types, &normalized, "")?;
         }
 
         Ok(())
@@ -977,103 +1063,13 @@ fn validate_columns(
     root_value: &Value,
     root_definitions: &BTreeMap<String, ColumnSettings>,
     prefix: &str,
-    normalized: &mut BTreeMap<String, ComparableValue>,
 ) -> Result<()> {
     for (field, definition) in definitions {
         let path = join_path(prefix, field);
         let value_opt = payload.get(field);
-        if let Some(value) = definition.validate_with_path(
-            &path,
-            value_opt,
-            root_value,
-            root_definitions,
-            normalized,
-        )? {
-            normalized.insert(path.clone(), value);
-        }
+        definition.validate_with_path(&path, value_opt, root_value, root_definitions)?;
     }
     Ok(())
-}
-
-fn validate_must_match(
-    definitions: &BTreeMap<String, ColumnSettings>,
-    root_definitions: &BTreeMap<String, ColumnSettings>,
-    values: &BTreeMap<String, ComparableValue>,
-    prefix: &str,
-) -> Result<()> {
-    for (field, definition) in definitions {
-        let path = join_path(prefix, field);
-        if let Some(target_path) = &definition.rules.must_match {
-            if let Some(source_value) = values.get(&path) {
-                let target_value = values.get(target_path).ok_or_else(|| {
-                    EventError::SchemaViolation(format!(
-                        "field {} must match {}, but {} is missing",
-                        path, target_path, target_path
-                    ))
-                })?;
-
-                let target_definition = find_column_settings(root_definitions, target_path)
-                    .ok_or_else(|| {
-                        EventError::SchemaViolation(format!(
-                            "field {} must match {}, but {} is not defined in schema",
-                            path, target_path, target_path
-                        ))
-                    })?;
-
-                if !definition.same_kind(target_definition) {
-                    return Err(EventError::SchemaViolation(format!(
-                        "field {} must match {}, but their types differ",
-                        path, target_path
-                    )));
-                }
-
-                if source_value != target_value {
-                    return Err(EventError::SchemaViolation(format!(
-                        "field {} must match {}",
-                        path, target_path
-                    )));
-                }
-            } else if definition.rules.required {
-                return Err(EventError::SchemaViolation(format!(
-                    "field {} is required but missing",
-                    path
-                )));
-            }
-        }
-
-        if !definition.rules.properties.is_empty()
-            && matches!(definition.column_type, ColumnType::Object)
-        {
-            validate_must_match(
-                &definition.rules.properties,
-                root_definitions,
-                values,
-                &path,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn find_column_settings<'a>(
-    definitions: &'a BTreeMap<String, ColumnSettings>,
-    path: &str,
-) -> Option<&'a ColumnSettings> {
-    let mut map = definitions;
-    let mut segments = path.split('.').peekable();
-    while let Some(segment) = segments.next() {
-        let current = map.get(segment)?;
-        if segments.peek().is_some() {
-            if let ColumnType::Object = current.column_type {
-                map = &current.rules.properties;
-            } else {
-                return None;
-            }
-        } else {
-            return Some(current);
-        }
-    }
-    None
 }
 
 fn join_path(prefix: &str, key: &str) -> String {
@@ -1423,6 +1419,169 @@ fn parse_date_literal(raw: &str, path: &str) -> Result<NaiveDate> {
     })
 }
 
+fn validate_country_code(value: &str) -> bool {
+    if value.len() != 2 {
+        return false;
+    }
+    if !value.chars().all(|c| c.is_ascii_uppercase()) {
+        return false;
+    }
+    ISO_COUNTRY_CODES.binary_search(&value).is_ok()
+}
+
+fn validate_wgs84(value: &str) -> bool {
+    let mut parts = value.split(',');
+    let lat_raw = match parts.next() {
+        Some(part) => part.trim(),
+        None => return false,
+    };
+    let lon_raw = match parts.next() {
+        Some(part) => part.trim(),
+        None => return false,
+    };
+    if parts.next().is_some() || lat_raw.is_empty() || lon_raw.is_empty() {
+        return false;
+    }
+
+    let lat: f64 = match lat_raw.parse() {
+        Ok(val) => val,
+        Err(_) => return false,
+    };
+    let lon: f64 = match lon_raw.parse() {
+        Ok(val) => val,
+        Err(_) => return false,
+    };
+
+    lat.is_finite()
+        && lon.is_finite()
+        && (-90.0..=90.0).contains(&lat)
+        && (-180.0..=180.0).contains(&lon)
+}
+
+fn validate_camel_case(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric())
+}
+
+fn validate_pascal_case(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric())
+}
+
+fn validate_snake_case(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    let mut prev_was_separator = false;
+    for c in value.chars() {
+        match c {
+            'a'..='z' | '0'..='9' => prev_was_separator = false,
+            '_' => {
+                if prev_was_separator {
+                    return false;
+                }
+                prev_was_separator = true;
+                continue;
+            }
+            _ => return false,
+        }
+    }
+    !prev_was_separator
+}
+
+fn validate_kebab_case(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    let mut prev_was_separator = false;
+    for c in value.chars() {
+        match c {
+            'a'..='z' | '0'..='9' => prev_was_separator = false,
+            '-' => {
+                if prev_was_separator {
+                    return false;
+                }
+                prev_was_separator = true;
+                continue;
+            }
+            _ => return false,
+        }
+    }
+    !prev_was_separator
+}
+
+fn validate_upper_case_snake_case(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    let mut prev_was_separator = false;
+    for c in value.chars() {
+        match c {
+            'A'..='Z' | '0'..='9' => prev_was_separator = false,
+            '_' => {
+                if prev_was_separator {
+                    return false;
+                }
+                prev_was_separator = true;
+                continue;
+            }
+            _ => return false,
+        }
+    }
+    !prev_was_separator
+}
+
+const ISO_COUNTRY_CODES: &[&str] = &[
+    "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ",
+    "BA", "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BL", "BM", "BN", "BO", "BQ", "BR", "BS",
+    "BT", "BV", "BW", "BY", "BZ", "CA", "CC", "CD", "CF", "CG", "CH", "CI", "CK", "CL", "CM", "CN",
+    "CO", "CR", "CU", "CV", "CW", "CX", "CY", "CZ", "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE",
+    "EG", "EH", "ER", "ES", "ET", "FI", "FJ", "FK", "FM", "FO", "FR", "GA", "GB", "GD", "GE", "GF",
+    "GG", "GH", "GI", "GL", "GM", "GN", "GP", "GQ", "GR", "GS", "GT", "GU", "GW", "GY", "HK", "HM",
+    "HN", "HR", "HT", "HU", "ID", "IE", "IL", "IM", "IN", "IO", "IQ", "IR", "IS", "IT", "JE", "JM",
+    "JO", "JP", "KE", "KG", "KH", "KI", "KM", "KN", "KP", "KR", "KW", "KY", "KZ", "LA", "LB", "LC",
+    "LI", "LK", "LR", "LS", "LT", "LU", "LV", "LY", "MA", "MC", "MD", "ME", "MF", "MG", "MH", "MK",
+    "ML", "MM", "MN", "MO", "MP", "MQ", "MR", "MS", "MT", "MU", "MV", "MW", "MX", "MY", "MZ", "NA",
+    "NC", "NE", "NF", "NG", "NI", "NL", "NO", "NP", "NR", "NU", "NZ", "OM", "PA", "PE", "PF", "PG",
+    "PH", "PK", "PL", "PM", "PN", "PR", "PS", "PT", "PW", "PY", "QA", "RE", "RO", "RS", "RU", "RW",
+    "SA", "SB", "SC", "SD", "SE", "SG", "SH", "SI", "SJ", "SK", "SL", "SM", "SN", "SO", "SR", "SS",
+    "ST", "SV", "SX", "SY", "SZ", "TC", "TD", "TF", "TG", "TH", "TJ", "TK", "TL", "TM", "TN", "TO",
+    "TR", "TT", "TV", "TW", "TZ", "UA", "UG", "UM", "US", "UY", "UZ", "VA", "VC", "VE", "VG", "VI",
+    "VN", "VU", "WF", "WS", "YE", "YT", "ZA", "ZM", "ZW",
+];
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1761,59 +1920,6 @@ mod tests {
     }
 
     #[test]
-    fn enforces_must_match_rule() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("schemas.json");
-        let manager = SchemaManager::load(path).unwrap();
-
-        manager
-            .create(CreateSchemaInput {
-                aggregate: "user".into(),
-                events: vec!["user_created".into()],
-                snapshot_threshold: None,
-            })
-            .unwrap();
-
-        let mut update = SchemaUpdate::default();
-        update.column_type = Some(("password".into(), Some(ColumnType::Text)));
-        manager.update("user", update).unwrap();
-        let mut update_confirm = SchemaUpdate::default();
-        update_confirm.column_type = Some(("password_confirmation".into(), Some(ColumnType::Text)));
-        manager.update("user", update_confirm).unwrap();
-
-        let mut rules = FieldRules::default();
-        rules.must_match = Some("password".into());
-        rules.required = true;
-
-        let mut rules_update = SchemaUpdate::default();
-        rules_update.column_rules = Some(("password_confirmation".into(), Some(rules)));
-        manager.update("user", rules_update).unwrap();
-
-        manager
-            .validate_event(
-                "user",
-                "user_created",
-                &json!({
-                    "password": "secret",
-                    "password_confirmation": "secret"
-                }),
-            )
-            .unwrap();
-
-        let err = manager
-            .validate_event(
-                "user",
-                "user_created",
-                &json!({
-                    "password": "secret",
-                    "password_confirmation": "mismatch"
-                }),
-            )
-            .unwrap_err();
-        assert!(matches!(err, EventError::SchemaViolation(_)));
-    }
-
-    #[test]
     fn validates_nested_object_properties() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("schemas.json");
@@ -1859,5 +1965,259 @@ mod tests {
             .validate_event("customer", "customer_created", &json!({ "address": {} }))
             .unwrap_err();
         assert!(matches!(err, EventError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn date_columns_accept_calendar_strings() {
+        let accepted = coerce_date(&json!("2024-01-01"), "birthday").unwrap();
+        assert_eq!(accepted.to_string(), "2024-01-01");
+
+        let err_timestamp = coerce_date(&json!("2024-01-01T00:00:00Z"), "birthday").unwrap_err();
+        assert!(matches!(err_timestamp, EventError::SchemaViolation(_)));
+
+        let err_malformed = coerce_date(&json!("20240101"), "birthday").unwrap_err();
+        assert!(matches!(err_malformed, EventError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn country_code_format_requires_known_iso_entries() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::CountryCode);
+
+        rules
+            .validate_rules(
+                "country",
+                &ColumnType::Text,
+                &ComparableValue::Text("US".to_string()),
+            )
+            .expect("US should be accepted");
+
+        let err = rules
+            .validate_rules(
+                "country",
+                &ColumnType::Text,
+                &ComparableValue::Text("XX".to_string()),
+            )
+            .unwrap_err();
+        assert!(matches!(err, EventError::SchemaViolation(_)));
+
+        let err_lowercase = rules
+            .validate_rules(
+                "country",
+                &ColumnType::Text,
+                &ComparableValue::Text("us".to_string()),
+            )
+            .unwrap_err();
+        assert!(matches!(err_lowercase, EventError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn iso_8601_format_requires_valid_timestamps() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::Iso8601);
+
+        rules
+            .validate_rules(
+                "timestamp",
+                &ColumnType::Text,
+                &ComparableValue::Text("2024-05-02T13:45:00Z".to_string()),
+            )
+            .expect("valid ISO 8601 should pass");
+
+        let err = rules
+            .validate_rules(
+                "timestamp",
+                &ColumnType::Text,
+                &ComparableValue::Text("02/05/2024".to_string()),
+            )
+            .unwrap_err();
+        assert!(matches!(err, EventError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn wgs84_format_requires_lat_lon_pair() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::Wgs84);
+
+        rules
+            .validate_rules(
+                "location",
+                &ColumnType::Text,
+                &ComparableValue::Text("37.7749,-122.4194".to_string()),
+            )
+            .expect("valid coordinates should pass");
+
+        for invalid in [
+            "91.0,0.0",
+            "10.0,181.0",
+            "10.0",
+            "lat,lon",
+            "37.0,-122.0,5.0",
+            "",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "location",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
+    }
+
+    #[test]
+    fn camel_case_format_enforces_pattern() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::CamelCase);
+
+        rules
+            .validate_rules(
+                "label",
+                &ColumnType::Text,
+                &ComparableValue::Text("camelCaseValue1".to_string()),
+            )
+            .expect("valid camelCase should pass");
+
+        for invalid in [
+            "CamelCase",
+            "snake_case",
+            "kebab-case",
+            "camel_case",
+            "camel-case",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "label",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
+    }
+
+    #[test]
+    fn snake_case_format_enforces_pattern() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::SnakeCase);
+
+        rules
+            .validate_rules(
+                "label",
+                &ColumnType::Text,
+                &ComparableValue::Text("snake_case_value1".to_string()),
+            )
+            .expect("valid snake_case should pass");
+
+        for invalid in [
+            "Snake_Case",
+            "_leading",
+            "trailing_",
+            "double__underscore",
+            "snake-case",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "label",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
+    }
+
+    #[test]
+    fn kebab_case_format_enforces_pattern() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::KebabCase);
+
+        rules
+            .validate_rules(
+                "label",
+                &ColumnType::Text,
+                &ComparableValue::Text("kebab-case-value1".to_string()),
+            )
+            .expect("valid kebab-case should pass");
+
+        for invalid in [
+            "Kebab-Case",
+            "-leading",
+            "trailing-",
+            "double--dash",
+            "kebab_case",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "label",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
+    }
+
+    #[test]
+    fn pascal_case_format_enforces_pattern() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::PascalCase);
+
+        rules
+            .validate_rules(
+                "label",
+                &ColumnType::Text,
+                &ComparableValue::Text("PascalCaseValue1".to_string()),
+            )
+            .expect("valid PascalCase should pass");
+
+        for invalid in [
+            "pascalCase",
+            "Pascal_Case",
+            "Pascal-Case",
+            "PascalCase!",
+            "",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "label",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
+    }
+
+    #[test]
+    fn upper_case_snake_case_format_enforces_pattern() {
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::UpperCaseSnakeCase);
+
+        rules
+            .validate_rules(
+                "label",
+                &ColumnType::Text,
+                &ComparableValue::Text("CONST_VALUE_1".to_string()),
+            )
+            .expect("valid constant should pass");
+
+        for invalid in [
+            "Const_Value",
+            "_LEADING",
+            "TRAILING_",
+            "DOUBLE__UNDERSCORE",
+            "CONST-VALUE",
+        ] {
+            let err = rules
+                .validate_rules(
+                    "label",
+                    &ColumnType::Text,
+                    &ComparableValue::Text(invalid.to_string()),
+                )
+                .unwrap_err();
+            assert!(matches!(err, EventError::SchemaViolation(_)), "{}", invalid);
+        }
     }
 }

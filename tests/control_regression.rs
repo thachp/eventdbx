@@ -66,6 +66,9 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_skip(0);
             list.set_take(0);
             list.set_has_take(false);
+            list.set_has_sort(false);
+            list.set_include_archived(false);
+            list.set_archived_only(false);
         },
         |response| match response
             .get_payload()
@@ -119,7 +122,6 @@ async fn control_capnp_regression_flows() -> Result<()> {
             append.set_payload_json(
                 r#"{"status":"created","firstName":"John","address":{"street":"123 Main","zipCode":"94107"}}"#,
             );
-            append.set_patch_json("");
             append.set_metadata_json("");
             append.set_note("");
             append.set_has_note(false);
@@ -174,6 +176,9 @@ async fn control_capnp_regression_flows() -> Result<()> {
                 payload::VerifyAggregate(_) => Err(anyhow!(
                     "unexpected verify_aggregate response to patch_event"
                 )),
+                payload::CreateAggregate(_) => Err(anyhow!(
+                    "unexpected create_aggregate response to patch_event"
+                )),
                 payload::SelectAggregate(_) => Err(anyhow!(
                     "unexpected select_aggregate response to patch_event"
                 )),
@@ -196,6 +201,9 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_skip(0);
             list.set_take(10);
             list.set_has_take(true);
+            list.set_has_sort(false);
+            list.set_include_archived(false);
+            list.set_archived_only(false);
         },
         |response| match response
             .get_payload()
@@ -286,6 +294,9 @@ async fn control_capnp_regression_flows() -> Result<()> {
                 }
                 payload::VerifyAggregate(_) => Err(anyhow!(
                     "unexpected verify_aggregate response to get_aggregate"
+                )),
+                payload::CreateAggregate(_) => Err(anyhow!(
+                    "unexpected create_aggregate response to get_aggregate"
                 )),
                 payload::SelectAggregate(_) => Err(anyhow!(
                     "unexpected select_aggregate response to get_aggregate"
@@ -417,7 +428,6 @@ async fn control_capnp_regression_flows() -> Result<()> {
             append.set_aggregate_id("order-1");
             append.set_event_type("order_created");
             append.set_payload_json(r#"{"status":"ignored"}"#);
-            append.set_patch_json("");
             append.set_metadata_json("");
             append.set_note("");
             append.set_has_note(false);
@@ -582,7 +592,6 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             append.set_payload_json(
                 r#"{"status":"created","firstName":"John","address":{"street":"123 Main","zipCode":"94107"}}"#,
             );
-            append.set_patch_json("");
             append.set_metadata_json("");
             append.set_note("");
             append.set_has_note(false);
@@ -692,6 +701,9 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
                 }
                 payload::VerifyAggregate(_) => Err(anyhow!(
                     "unexpected verify_aggregate response to patch_event"
+                )),
+                payload::CreateAggregate(_) => Err(anyhow!(
+                    "unexpected create_aggregate response to patch_event"
                 )),
                 payload::SelectAggregate(_) => Err(anyhow!(
                     "unexpected select_aggregate response to patch_event"

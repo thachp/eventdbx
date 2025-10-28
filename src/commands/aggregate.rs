@@ -4,6 +4,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,12 +18,14 @@ use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 use eventdbx::{
     config::{Config, load_or_default},
     error::EventError,
+    filter,
     merkle::compute_merkle_root,
     plugin::PluginManager,
     restrict,
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
-        self, ActorClaims, AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
+        self, ActorClaims, AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState,
+        AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
     },
     token::{IssueTokenInput, JwtLimits, TokenManager},
     validation::{
@@ -39,6 +42,8 @@ use tracing::warn;
 
 #[derive(Subcommand)]
 pub enum AggregateCommands {
+    /// Create a new aggregate instance
+    Create(AggregateCreateArgs),
     /// Apply an event to an aggregate instance
     Apply(AggregateApplyArgs),
     /// Apply a JSON Patch event to an aggregate instance
@@ -65,6 +70,43 @@ pub enum AggregateCommands {
     Commit,
     /// Export aggregate state to CSV or JSON
     Export(AggregateExportArgs),
+}
+
+#[derive(Args)]
+pub struct AggregateCreateArgs {
+    /// Aggregate type
+    pub aggregate: String,
+
+    /// Aggregate identifier
+    pub aggregate_id: String,
+
+    /// Event type to append as the initial write
+    #[arg(long)]
+    pub event: String,
+
+    /// Event fields expressed as KEY=VALUE pairs
+    #[arg(long = "field", value_parser = parse_key_value, value_name = "KEY=VALUE")]
+    pub fields: Vec<KeyValue>,
+
+    /// Raw JSON payload to use instead of key-value fields
+    #[arg(long, value_name = "JSON")]
+    pub payload: Option<String>,
+
+    /// JSON metadata with plugin-specific keys prefixed by '@'
+    #[arg(long)]
+    pub metadata: Option<String>,
+
+    /// Optional note associated with the event (up to 128 characters)
+    #[arg(long, value_name = "NOTE")]
+    pub note: Option<String>,
+
+    /// Authorization token used when proxying through a running server
+    #[arg(long, value_name = "TOKEN")]
+    pub token: Option<String>,
+
+    /// Emit results as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -101,10 +143,6 @@ pub struct AggregateApplyArgs {
     /// Optional note associated with the event (up to 128 characters)
     #[arg(long, value_name = "NOTE")]
     pub note: Option<String>,
-
-    /// JSON Patch (RFC 6902) document to apply server-side
-    #[arg(long)]
-    pub patch: Option<String>,
 }
 
 #[derive(Args)]
@@ -246,6 +284,10 @@ pub struct AggregateRemoveArgs {
 
 #[derive(Args)]
 pub struct AggregateListArgs {
+    /// Limit results to a single aggregate type
+    #[arg(value_name = "AGGREGATE")]
+    pub aggregate: Option<String>,
+
     /// Number of aggregates to skip
     #[arg(long, default_value_t = 0)]
     pub skip: usize,
@@ -261,6 +303,22 @@ pub struct AggregateListArgs {
     /// Emit results as JSON
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Filter aggregates using a SQL-like expression (e.g. `last_name = "thach"`)
+    #[arg(long)]
+    pub filter: Option<String>,
+
+    /// Sort aggregates by comma-separated fields (e.g. `aggregate_type:asc,version:desc`)
+    #[arg(long, value_name = "FIELD[:ORDER][,...]")]
+    pub sort: Option<String>,
+
+    /// Include archived aggregates alongside active ones
+    #[arg(long, default_value_t = false, conflicts_with = "archived_only")]
+    pub include_archived: bool,
+
+    /// Show only archived aggregates
+    #[arg(long, default_value_t = false, conflicts_with = "include_archived")]
+    pub archived_only: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -306,14 +364,72 @@ const EXPORT_ID_KEY: &str = "__aggregate_id";
 pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     match command {
+        AggregateCommands::Create(args) => {
+            let AggregateCreateArgs {
+                aggregate,
+                aggregate_id,
+                event,
+                fields,
+                payload: payload_arg,
+                metadata,
+                note,
+                token,
+                json,
+            } = args;
+
+            if payload_arg.is_some() && !fields.is_empty() {
+                bail!("--payload cannot be used together with --field");
+            }
+
+            let payload = if let Some(raw) = payload_arg {
+                serde_json::from_str::<Value>(&raw)
+                    .with_context(|| "failed to parse JSON payload provided via --payload")?
+            } else {
+                collect_payload(fields)
+            };
+
+            let metadata_value = match metadata {
+                Some(raw) => Some(
+                    serde_json::from_str::<Value>(&raw)
+                        .with_context(|| "failed to parse JSON metadata provided via --metadata")?,
+                ),
+                None => None,
+            };
+
+            let command = CreateCommand {
+                aggregate,
+                aggregate_id,
+                event,
+                payload,
+                metadata: metadata_value,
+                note,
+                token,
+                json,
+            };
+
+            execute_create_command(&config, command)?;
+        }
         AggregateCommands::List(args) => {
+            let aggregate_filter = args.aggregate.as_deref();
+            if let Some(name) = aggregate_filter {
+                ensure_snake_case("aggregate_type", name)?;
+            }
+
             if args.stage {
                 let staging_path = config.staging_path();
                 let staged_events = load_staged_events(staging_path.as_path())?;
-                if staged_events.is_empty() {
+                let filtered: Vec<_> = staged_events
+                    .into_iter()
+                    .filter(|event| {
+                        aggregate_filter
+                            .map(|target| event.aggregate == target)
+                            .unwrap_or(true)
+                    })
+                    .collect();
+                if filtered.is_empty() {
                     println!("no staged events");
                 } else {
-                    for event in staged_events {
+                    for event in filtered {
                         println!("{}", serde_json::to_string_pretty(&event)?);
                     }
                 }
@@ -322,20 +438,99 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
 
             let store =
                 EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
+            let mut filter_expr = match args.filter.as_ref() {
+                Some(raw) => Some(
+                    filter::parse_shorthand(raw)
+                        .with_context(|| format!("invalid filter expression: {raw}"))?,
+                ),
+                None => None,
+            };
+
+            if let Some(name) = aggregate_filter {
+                filter_expr = match filter_expr {
+                    Some(existing) => Some(filter::FilterExpr::And(vec![
+                        filter::FilterExpr::Comparison {
+                            field: "aggregate_type".to_string(),
+                            op: filter::ComparisonOp::Equals(filter::FilterValue::String(
+                                name.to_string(),
+                            )),
+                        },
+                        existing,
+                    ])),
+                    None => Some(filter::FilterExpr::Comparison {
+                        field: "aggregate_type".to_string(),
+                        op: filter::ComparisonOp::Equals(filter::FilterValue::String(
+                            name.to_string(),
+                        )),
+                    }),
+                };
+            }
+            let mut scope = if args.archived_only {
+                AggregateQueryScope::ArchivedOnly
+            } else if args.include_archived {
+                AggregateQueryScope::IncludeArchived
+            } else {
+                AggregateQueryScope::ActiveOnly
+            };
+
+            if matches!(scope, AggregateQueryScope::ActiveOnly) {
+                if let Some(expr) = filter_expr.as_ref() {
+                    if expr.references_field("archived") {
+                        scope = AggregateQueryScope::IncludeArchived;
+                    }
+                }
+            }
+
             let take = args.take.or(Some(config.list_page_size));
-            let aggregates = store.aggregates_paginated(args.skip, take);
+            let sort_directives = if let Some(spec) = args.sort.as_deref() {
+                Some(
+                    parse_sort_directives(spec)
+                        .map_err(|err| anyhow!("invalid sort specification: {err}"))?,
+                )
+            } else {
+                None
+            };
+            let sort_keys = sort_directives.as_ref().map(|keys| keys.as_slice());
+            let aggregates = store.aggregates_paginated_with_transform(
+                args.skip,
+                take,
+                sort_keys,
+                scope,
+                |aggregate| {
+                    if let Some(expr) = filter_expr.as_ref() {
+                        if !expr.matches_aggregate(&aggregate) {
+                            return None;
+                        }
+                    }
+                    Some(aggregate)
+                },
+            );
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&aggregates)?);
             } else {
+                let show_archived = matches!(
+                    scope,
+                    AggregateQueryScope::IncludeArchived | AggregateQueryScope::ArchivedOnly
+                );
                 for aggregate in aggregates {
-                    println!(
-                        "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
-                        aggregate.aggregate_type,
-                        aggregate.aggregate_id,
-                        aggregate.version,
-                        aggregate.merkle_root,
-                        aggregate.archived
-                    );
+                    if show_archived {
+                        println!(
+                            "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
+                            aggregate.aggregate_type,
+                            aggregate.aggregate_id,
+                            aggregate.version,
+                            aggregate.merkle_root,
+                            aggregate.archived
+                        );
+                    } else {
+                        println!(
+                            "aggregate_type={} aggregate_id={} version={} merkle_root={}",
+                            aggregate.aggregate_type,
+                            aggregate.aggregate_id,
+                            aggregate.version,
+                            aggregate.merkle_root
+                        );
+                    }
                 }
             }
         }
@@ -408,30 +603,17 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 payload: payload_arg,
                 metadata,
                 note,
-                patch,
             } = args;
             if payload_arg.is_some() && !fields.is_empty() {
                 bail!("--payload cannot be used together with --field");
-            }
-            if patch.is_some() && (payload_arg.is_some() || !fields.is_empty()) {
-                bail!("--patch cannot be combined with --payload or --field");
             }
             let payload_value = if let Some(raw) = payload_arg {
                 Some(
                     serde_json::from_str(&raw)
                         .with_context(|| "failed to parse JSON payload provided via --payload")?,
                 )
-            } else if patch.is_some() {
-                None
             } else {
                 Some(collect_payload(fields))
-            };
-            let patch_ops = match patch {
-                Some(raw) => Some(
-                    serde_json::from_str::<serde_json::Value>(&raw)
-                        .with_context(|| "failed to parse JSON patch provided via --patch")?,
-                ),
-                None => None,
             };
             let metadata_value = match metadata {
                 Some(raw) => Some(
@@ -448,10 +630,10 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 stage,
                 token,
                 payload: payload_value,
-                patch: patch_ops,
+                patch: None,
                 metadata: metadata_value,
                 note,
-                require_existing: false,
+                require_existing: true,
             };
 
             execute_append_command(&config, command)?;
@@ -739,6 +921,139 @@ fn ensure_schema_for_mode(
     Ok(())
 }
 
+struct CreateCommand {
+    aggregate: String,
+    aggregate_id: String,
+    event: String,
+    payload: Value,
+    metadata: Option<Value>,
+    note: Option<String>,
+    token: Option<String>,
+    json: bool,
+}
+
+fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()> {
+    let CreateCommand {
+        aggregate,
+        aggregate_id,
+        event,
+        payload,
+        metadata,
+        note,
+        token,
+        json,
+    } = command;
+
+    if let Some(ref note_value) = note {
+        if note_value.chars().count() > MAX_EVENT_NOTE_LENGTH {
+            bail!("note cannot exceed {} characters", MAX_EVENT_NOTE_LENGTH);
+        }
+    }
+    if let Some(ref metadata_value) = metadata {
+        ensure_metadata_extensions(metadata_value)?;
+    }
+
+    ensure_snake_case("aggregate_type", &aggregate)?;
+    ensure_snake_case("event_type", &event)?;
+    ensure_aggregate_id(&aggregate_id)?;
+    ensure_payload_size(&payload)?;
+
+    let restrict_mode = config.restrict;
+    let schema_manager = SchemaManager::load(config.schema_store_path())?;
+    let schema_present = match schema_manager.get(&aggregate) {
+        Ok(_) => true,
+        Err(EventError::SchemaNotFound) => false,
+        Err(err) => return Err(err.into()),
+    };
+    if !schema_present && restrict_mode.requires_declared_schema() {
+        bail!(restrict::strict_mode_missing_schema_message(&aggregate));
+    }
+    if schema_present {
+        schema_manager.validate_event(&aggregate, &event, &payload)?;
+    }
+
+    let encryption = config.encryption_key()?;
+    match EventStore::open(
+        config.event_store_path(),
+        encryption,
+        config.snowflake_worker_id,
+    ) {
+        Ok(store) => {
+            if store
+                .aggregate_version(&aggregate, &aggregate_id)?
+                .is_some()
+            {
+                bail!("aggregate {}::{} already exists", aggregate, aggregate_id);
+            }
+
+            let plugins = PluginManager::from_config(&config)?;
+            let record = store.append(AppendEvent {
+                aggregate_type: aggregate.clone(),
+                aggregate_id: aggregate_id.clone(),
+                event_type: event.clone(),
+                payload: payload.clone(),
+                metadata: metadata.clone(),
+                issued_by: None,
+                note: note.clone(),
+            })?;
+
+            maybe_auto_snapshot(&store, &schema_manager, &record);
+
+            if !plugins.is_empty() {
+                let schema = schema_manager.get(&record.aggregate_type).ok();
+                match store.get_aggregate_state(&record.aggregate_type, &record.aggregate_id) {
+                    Ok(current_state) => {
+                        if let Err(err) =
+                            plugins.notify_event(&record, &current_state, schema.as_ref())
+                        {
+                            eprintln!("plugin notification failed: {}", err);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "plugin notification skipped (failed to load state): {}",
+                            err
+                        );
+                    }
+                }
+            }
+
+            let state = store.get_aggregate_state(&aggregate, &aggregate_id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&state)?);
+            } else {
+                println!(
+                    "aggregate_type={} aggregate_id={} version={} archived={}",
+                    state.aggregate_type, state.aggregate_id, state.version, state.archived
+                );
+            }
+            Ok(())
+        }
+        Err(EventError::Storage(message)) if is_lock_error(&message) => {
+            let state = proxy_create_via_socket(
+                config,
+                token,
+                &aggregate,
+                &aggregate_id,
+                &event,
+                &payload,
+                metadata.as_ref(),
+                note.as_deref(),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&state)?);
+            } else {
+                println!(
+                    "aggregate_type={} aggregate_id={} version={} archived={}",
+                    state.aggregate_type, state.aggregate_id, state.version, state.archived
+                );
+            }
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
 struct AppendCommand {
     aggregate: String,
     aggregate_id: String,
@@ -794,7 +1109,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
     if patch.is_none() {
         let payload_value = payload
             .as_ref()
-            .ok_or_else(|| anyhow!("payload is required when --patch is omitted"))?;
+            .ok_or_else(|| anyhow!("payload must be provided via --field or --payload"))?;
         ensure_payload_size(payload_value)?;
         if schema_present {
             schema_manager.validate_event(&aggregate, &event, payload_value)?;
@@ -811,9 +1126,9 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 let effective_payload = if let Some(ref patch_ops) = patch {
                     store.prepare_payload_from_patch(&aggregate, &aggregate_id, patch_ops)?
                 } else {
-                    payload
-                        .clone()
-                        .ok_or_else(|| anyhow!("payload is required when --patch is omitted"))?
+                    payload.clone().ok_or_else(|| {
+                        anyhow!("payload must be provided via --field or --payload")
+                    })?
                 };
                 if patch.is_some() {
                     ensure_payload_size(&effective_payload)?;
@@ -821,11 +1136,11 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                         schema_manager.validate_event(&aggregate, &event, &effective_payload)?;
                     }
                 }
-                let is_new = match store.aggregate_version(&aggregate, &aggregate_id)? {
-                    Some(version) if version > 0 => false,
-                    Some(_) | None => true,
+                let (exists, is_new) = match store.aggregate_version(&aggregate, &aggregate_id)? {
+                    Some(version) => (true, version == 0),
+                    None => (false, true),
                 };
-                if require_existing && is_new {
+                if require_existing && !exists {
                     bail!("aggregate {}::{} does not exist", aggregate, aggregate_id);
                 }
                 ensure_first_event_rule(is_new, &event)?;
@@ -878,7 +1193,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
             } else {
                 payload
                     .clone()
-                    .ok_or_else(|| anyhow!("payload is required when --patch is omitted"))?
+                    .ok_or_else(|| anyhow!("payload must be provided via --field or --payload"))?
             };
             if patch.is_some() {
                 ensure_payload_size(&effective_payload)?;
@@ -886,11 +1201,13 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                     schema_manager.validate_event(&aggregate, &event, &effective_payload)?;
                 }
             }
-            let is_new = match store.aggregate_version(&aggregate, &aggregate_id)? {
+            let version_opt = store.aggregate_version(&aggregate, &aggregate_id)?;
+            let is_new = match version_opt {
                 Some(version) if version > 0 => false,
-                Some(_) | None => true,
+                _ => true,
             };
-            if require_existing && is_new {
+            let exists = version_opt.is_some();
+            if require_existing && !exists {
                 bail!("aggregate {}::{} does not exist", aggregate, aggregate_id);
             }
             ensure_first_event_rule(is_new, &event)?;
@@ -934,6 +1251,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 &aggregate,
                 &aggregate_id,
                 &event,
+                require_existing,
                 if patch.is_some() {
                     None
                 } else {
@@ -956,6 +1274,7 @@ fn proxy_append_via_socket(
     aggregate: &str,
     aggregate_id: &str,
     event: &str,
+    require_existing: bool,
     payload: Option<&Value>,
     patch: Option<&Value>,
     metadata: Option<&Value>,
@@ -987,6 +1306,7 @@ fn proxy_append_via_socket(
                 aggregate,
                 aggregate_id,
                 event,
+                require_existing,
                 payload,
                 metadata,
                 note,
@@ -999,6 +1319,37 @@ fn proxy_append_via_socket(
             })?
     };
     Ok(record)
+}
+
+fn proxy_create_via_socket(
+    config: &Config,
+    token: Option<String>,
+    aggregate: &str,
+    aggregate_id: &str,
+    event: &str,
+    payload: &Value,
+    metadata: Option<&Value>,
+    note: Option<&str>,
+) -> Result<AggregateState> {
+    let token = ensure_proxy_token(config, token)?;
+    let client = ServerClient::new(config)?;
+    let state = client
+        .create_aggregate(
+            &token,
+            aggregate,
+            aggregate_id,
+            event,
+            payload,
+            metadata,
+            note,
+        )
+        .with_context(|| {
+            format!(
+                "failed to create aggregate via running server socket {}",
+                config.socket.bind_addr
+            )
+        })?;
+    Ok(state)
 }
 
 fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> {
@@ -1441,6 +1792,56 @@ fn create_zip_archive(files: &[(PathBuf, String)], output: &Path) -> Result<()> 
 
     zip.finish()?;
     Ok(())
+}
+
+fn parse_sort_directives(raw: &str) -> Result<Vec<AggregateSort>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("sort specification cannot be empty".to_string());
+    }
+
+    let mut directives = Vec::new();
+    for segment in trimmed.split(',') {
+        let spec = segment.trim();
+        if spec.is_empty() {
+            return Err("sort segments cannot be empty".to_string());
+        }
+        directives.push(parse_single_sort(spec)?);
+    }
+
+    Ok(directives)
+}
+
+fn parse_single_sort(spec: &str) -> Result<AggregateSort, String> {
+    let mut parts = spec.split(':');
+    let field_str = parts
+        .next()
+        .ok_or_else(|| "missing sort field".to_string())?
+        .trim();
+
+    if field_str.is_empty() {
+        return Err("sort field cannot be empty".to_string());
+    }
+
+    let field = AggregateSortField::from_str(field_str)?;
+    let descending = match parts.next() {
+        Some(order) => match order.trim().to_ascii_lowercase().as_str() {
+            "asc" => false,
+            "desc" => true,
+            other => {
+                return Err(format!(
+                    "invalid sort order '{other}' (expected 'asc' or 'desc')"
+                ));
+            }
+        },
+        None => false,
+    };
+
+    if parts.next().is_some() {
+        return Err("sort specification contains too many ':' separators".to_string());
+    }
+
+    Ok(AggregateSort { field, descending })
 }
 
 fn parse_key_value(raw: &str) -> Result<KeyValue, String> {

@@ -24,8 +24,11 @@ use tracing::{debug, error, info, warn};
 use crate::{
     cli_capnp::{cli_request, cli_response},
     config::Config,
-    control_capnp::{control_request, control_response},
+    control_capnp::{
+        AggregateSortField as CapnpAggregateSortField, control_request, control_response,
+    },
     error::EventError,
+    filter::FilterExpr,
     observability,
     plugin::PluginManager,
     replication_capnp::{
@@ -33,8 +36,11 @@ use crate::{
     },
     replication_capnp_client::REPLICATION_PROTOCOL_VERSION,
     schema::{AggregateSchema, SchemaManager},
-    service::{AppendEventInput, CoreContext},
-    store::{AggregatePositionEntry, EventMetadata, EventRecord, EventStore},
+    service::{AppendEventInput, CoreContext, CreateAggregateInput},
+    store::{
+        AggregatePositionEntry, AggregateQueryScope, AggregateSort, AggregateSortField,
+        EventMetadata, EventRecord, EventStore,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -77,12 +83,17 @@ enum ControlReply {
         found: bool,
         selection_json: Option<String>,
     },
+    CreateAggregate(String),
 }
 
 enum ControlCommand {
     ListAggregates {
         skip: usize,
         take: Option<usize>,
+        filter: Option<FilterExpr>,
+        sort: Option<Vec<AggregateSort>>,
+        include_archived: bool,
+        archived_only: bool,
     },
     GetAggregate {
         aggregate_type: String,
@@ -99,6 +110,7 @@ enum ControlCommand {
         aggregate_type: String,
         aggregate_id: String,
         event_type: String,
+        require_existing: bool,
         payload: Option<Value>,
         metadata: Option<Value>,
         note: Option<String>,
@@ -120,6 +132,15 @@ enum ControlCommand {
         aggregate_type: String,
         aggregate_id: String,
         fields: Vec<String>,
+    },
+    CreateAggregate {
+        token: String,
+        aggregate_type: String,
+        aggregate_id: String,
+        event_type: String,
+        payload: Value,
+        metadata: Option<Value>,
+        note: Option<String>,
     },
 }
 
@@ -151,6 +172,7 @@ fn control_command_name(command: &ControlCommand) -> &'static str {
         ControlCommand::PatchEvent { .. } => "patch_event",
         ControlCommand::VerifyAggregate { .. } => "verify_aggregate",
         ControlCommand::SelectAggregate { .. } => "select_aggregate",
+        ControlCommand::CreateAggregate { .. } => "create_aggregate",
     }
 }
 
@@ -480,6 +502,10 @@ where
                                     builder.set_selection_json("");
                                 }
                             }
+                            ControlReply::CreateAggregate(json) => {
+                                let mut builder = payload.init_create_aggregate();
+                                builder.set_aggregate_json(&json);
+                            }
                         }
                     }
                     Err(err) => {
@@ -528,7 +554,57 @@ fn parse_control_command(
                 None
             };
 
-            Ok(ControlCommand::ListAggregates { skip, take })
+            let filter = if req.get_has_filter() {
+                let reader = req
+                    .get_filter()
+                    .map_err(|err| EventError::Serialization(err.to_string()))?;
+                Some(FilterExpr::from_capnp(reader)?)
+            } else {
+                None
+            };
+
+            let sort = if req.get_has_sort() {
+                let list = req
+                    .get_sort()
+                    .map_err(|err| EventError::Serialization(err.to_string()))?;
+                let mut directives = Vec::with_capacity(list.len() as usize);
+                for entry in list.iter() {
+                    let field = match entry.get_field().map_err(|err| {
+                        EventError::InvalidSchema(format!(
+                            "unknown aggregate sort field value: {err}"
+                        ))
+                    })? {
+                        CapnpAggregateSortField::AggregateType => AggregateSortField::AggregateType,
+                        CapnpAggregateSortField::AggregateId => AggregateSortField::AggregateId,
+                        CapnpAggregateSortField::Version => AggregateSortField::Version,
+                        CapnpAggregateSortField::MerkleRoot => AggregateSortField::MerkleRoot,
+                        CapnpAggregateSortField::Archived => AggregateSortField::Archived,
+                    };
+                    directives.push(AggregateSort {
+                        field,
+                        descending: entry.get_descending(),
+                    });
+                }
+                if directives.is_empty() {
+                    None
+                } else {
+                    Some(directives)
+                }
+            } else {
+                None
+            };
+
+            let include_archived = req.get_include_archived();
+            let archived_only = req.get_archived_only();
+
+            Ok(ControlCommand::ListAggregates {
+                skip,
+                take,
+                filter,
+                sort,
+                include_archived,
+                archived_only,
+            })
         }
         payload::GetAggregate(req) => {
             let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
@@ -603,12 +679,14 @@ fn parse_control_command(
             } else {
                 None
             };
+            let require_existing = req.get_require_existing();
 
             Ok(ControlCommand::AppendEvent {
                 token,
                 aggregate_type,
                 aggregate_id,
                 event_type,
+                require_existing,
                 payload,
                 metadata,
                 note,
@@ -667,6 +745,57 @@ fn parse_control_command(
                 note,
             })
         }
+        payload::CreateAggregate(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+            let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+            let event_type = read_control_text(req.get_event_type(), "event_type")?;
+
+            let payload_raw = read_control_text(req.get_payload_json(), "payload_json")?;
+            let payload_trimmed = payload_raw.trim();
+            if payload_trimmed.is_empty() {
+                return Err(EventError::InvalidSchema(
+                    "payload_json must be provided when creating an aggregate".into(),
+                ));
+            }
+            let payload = serde_json::from_str::<Value>(payload_trimmed)
+                .map_err(|err| EventError::InvalidSchema(format!("invalid payload_json: {err}")))?;
+
+            let metadata = if req.get_has_metadata() {
+                let metadata_raw = read_control_text(req.get_metadata_json(), "metadata_json")?;
+                let metadata_trimmed = metadata_raw.trim();
+                if metadata_trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        serde_json::from_str::<Value>(metadata_trimmed).map_err(|err| {
+                            EventError::InvalidSchema(format!("invalid metadata_json: {err}"))
+                        })?,
+                    )
+                }
+            } else {
+                None
+            };
+
+            let note = if req.get_has_note() {
+                Some(read_control_text(req.get_note(), "note")?)
+            } else {
+                None
+            };
+
+            Ok(ControlCommand::CreateAggregate {
+                token,
+                aggregate_type,
+                aggregate_id,
+                event_type,
+                payload,
+                metadata,
+                note,
+            })
+        }
         payload::VerifyAggregate(req) => {
             let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
             let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
@@ -710,10 +839,37 @@ async fn execute_control_command(
     shared_config: Arc<RwLock<Config>>,
 ) -> std::result::Result<ControlReply, EventError> {
     match command {
-        ControlCommand::ListAggregates { skip, take } => {
+        ControlCommand::ListAggregates {
+            skip,
+            take,
+            filter,
+            sort,
+            include_archived,
+            archived_only,
+        } => {
+            let mut scope = if archived_only {
+                AggregateQueryScope::ArchivedOnly
+            } else if include_archived {
+                AggregateQueryScope::IncludeArchived
+            } else {
+                AggregateQueryScope::ActiveOnly
+            };
+            if matches!(scope, AggregateQueryScope::ActiveOnly) {
+                if let Some(expr) = filter.as_ref() {
+                    if expr.references_field("archived") {
+                        scope = AggregateQueryScope::IncludeArchived;
+                    }
+                }
+            }
+
             let aggregates = spawn_blocking({
                 let core = core.clone();
-                move || core.list_aggregates(skip, take)
+                let filter = filter;
+                let sort = sort;
+                move || {
+                    let sort_ref = sort.as_ref().map(|keys| keys.as_slice());
+                    core.list_aggregates(skip, take, filter, sort_ref, scope)
+                }
             })
             .await
             .map_err(|err| EventError::Storage(format!("list aggregates task failed: {err}")))?;
@@ -766,6 +922,7 @@ async fn execute_control_command(
             aggregate_type,
             aggregate_id,
             event_type,
+            require_existing,
             payload,
             metadata,
             note,
@@ -779,7 +936,7 @@ async fn execute_control_command(
                 patch: None,
                 metadata,
                 note,
-                require_existing: false,
+                require_existing,
             };
             handle_append_event_command(
                 core.clone(),
@@ -860,6 +1017,42 @@ async fn execute_control_command(
                     selection_json: None,
                 }),
             }
+        }
+        ControlCommand::CreateAggregate {
+            token,
+            aggregate_type,
+            aggregate_id,
+            event_type,
+            payload,
+            metadata,
+            note,
+        } => {
+            let aggregate = spawn_blocking({
+                let core = core.clone();
+                let aggregate_type = aggregate_type.clone();
+                let aggregate_id = aggregate_id.clone();
+                let token = token.clone();
+                let event_type = event_type.clone();
+                let payload = payload.clone();
+                let metadata = metadata.clone();
+                let note = note.clone();
+                move || {
+                    core.create_aggregate(CreateAggregateInput {
+                        token,
+                        aggregate_type,
+                        aggregate_id,
+                        event_type,
+                        payload,
+                        metadata,
+                        note,
+                    })
+                }
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("create aggregate task failed: {err}")))??;
+
+            let json = serde_json::to_string(&aggregate)?;
+            Ok(ControlReply::CreateAggregate(json))
         }
     }
 }

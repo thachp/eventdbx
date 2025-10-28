@@ -10,6 +10,7 @@ struct ControlRequest {
     verifyAggregate @5 :VerifyAggregateRequest;
     patchEvent @6 :PatchEventRequest;
     selectAggregate @7 :SelectAggregateRequest;
+    createAggregate @8 :CreateAggregateRequest;
   }
 }
 
@@ -23,6 +24,7 @@ struct ControlResponse {
     verifyAggregate @5 :VerifyAggregateResponse;
     selectAggregate @6 :SelectAggregateResponse;
     error @7 :ControlError;
+    createAggregate @8 :CreateAggregateResponse;
   }
 }
 
@@ -30,6 +32,12 @@ struct ListAggregatesRequest {
   skip @0 :UInt64;
   take @1 :UInt64;
   hasTake @2 :Bool;
+  filter @3 :FilterExpression;
+  hasFilter @4 :Bool;
+  sort @5 :List(AggregateSort);
+  hasSort @6 :Bool;
+  includeArchived @7 :Bool;
+  archivedOnly @8 :Bool;
 }
 
 struct ListAggregatesResponse {
@@ -52,6 +60,8 @@ struct ListEventsRequest {
   skip @2 :UInt64;
   take @3 :UInt64;
   hasTake @4 :Bool;
+  filter @5 :FilterExpression;
+  hasFilter @6 :Bool;
 }
 
 struct ListEventsResponse {
@@ -64,11 +74,11 @@ struct AppendEventRequest {
   aggregateId @2 :Text;
   eventType @3 :Text;
   payloadJson @4 :Text;
-  patchJson @5 :Text;
-  note @6 :Text;
-  hasNote @7 :Bool;
-  metadataJson @8 :Text;
-  hasMetadata @9 :Bool;
+  note @5 :Text;
+  hasNote @6 :Bool;
+  metadataJson @7 :Text;
+  hasMetadata @8 :Bool;
+  requireExisting @9 :Bool;
 }
 
 struct AppendEventResponse {
@@ -105,6 +115,71 @@ struct SelectAggregateRequest {
 struct SelectAggregateResponse {
   found @0 :Bool;
   selectionJson @1 :Text;
+}
+
+struct CreateAggregateRequest {
+  token @0 :Text;
+  aggregateType @1 :Text;
+  aggregateId @2 :Text;
+  eventType @3 :Text;
+  payloadJson @4 :Text;
+  note @5 :Text;
+  hasNote @6 :Bool;
+  metadataJson @7 :Text;
+  hasMetadata @8 :Bool;
+}
+
+struct CreateAggregateResponse {
+  aggregateJson @0 :Text;
+}
+
+struct AggregateSort {
+  field @0 :AggregateSortField;
+  descending @1 :Bool;
+}
+
+enum AggregateSortField {
+  aggregateType @0;
+  aggregateId @1;
+  version @2;
+  merkleRoot @3;
+  archived @4;
+}
+
+struct FilterExpression {
+  union {
+    logical @0 :LogicalExpression;
+    comparison @1 :ComparisonExpression;
+  }
+}
+
+struct LogicalExpression {
+  union {
+    and @0 :List(FilterExpression);
+    or @1 :List(FilterExpression);
+    not @2 :FilterExpression;
+  }
+}
+
+struct ComparisonExpression {
+  union {
+    equals @0 :Comparison;
+    notEquals @1 :Comparison;
+    greaterThan @2 :Comparison;
+    lessThan @3 :Comparison;
+    inSet @4 :SetComparison;
+    like @5 :Comparison;
+  }
+}
+
+struct Comparison {
+  field @0 :Text;
+  value @1 :Text;
+}
+
+struct SetComparison {
+  field @0 :Text;
+  values @1 :List(Text);
 }
 
 struct ControlError {
