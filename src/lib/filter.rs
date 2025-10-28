@@ -1,8 +1,12 @@
-use std::fmt;
+use std::{fmt, num::NonZeroUsize};
 
 use capnp::Result as CapnpResult;
 use serde_json::Value;
 use thiserror::Error;
+
+use lru::LruCache;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 
 use crate::{
     control_capnp::{comparison_expression, filter_expression, logical_expression},
@@ -451,7 +455,59 @@ fn compare_numbers(value: &ComparableValue, expected: &FilterValue, ordering: Or
     }
 }
 
+const LIKE_REGEX_CACHE_CAPACITY: usize = 128;
+
+#[derive(Clone)]
+enum CachedRegex {
+    Compiled(regex::Regex),
+    Invalid,
+}
+
+impl CachedRegex {
+    fn as_regex(&self) -> Option<regex::Regex> {
+        match self {
+            CachedRegex::Compiled(regex) => Some(regex.clone()),
+            CachedRegex::Invalid => None,
+        }
+    }
+}
+
+static LIKE_REGEX_CACHE: Lazy<Mutex<LruCache<String, CachedRegex>>> = Lazy::new(|| {
+    Mutex::new(LruCache::new(
+        NonZeroUsize::new(LIKE_REGEX_CACHE_CAPACITY).expect("LIKE regex cache capacity > 0"),
+    ))
+});
+
 fn matches_like(text: &str, pattern: &str) -> bool {
+    like_regex(pattern)
+        .map(|regex| regex.is_match(text))
+        .unwrap_or(false)
+}
+
+fn like_regex(pattern: &str) -> Option<regex::Regex> {
+    {
+        let mut cache = LIKE_REGEX_CACHE.lock();
+        if let Some(entry) = cache.get(pattern) {
+            return entry.as_regex();
+        }
+    }
+
+    let regex_source = build_like_regex(pattern);
+    let entry = match regex::Regex::new(&regex_source) {
+        Ok(regex) => CachedRegex::Compiled(regex),
+        Err(_) => CachedRegex::Invalid,
+    };
+    let result = entry.as_regex();
+
+    {
+        let mut cache = LIKE_REGEX_CACHE.lock();
+        cache.put(pattern.to_owned(), entry);
+    }
+
+    result
+}
+
+fn build_like_regex(pattern: &str) -> String {
     let mut regex_pattern = String::from("^");
     for ch in pattern.chars() {
         match ch {
@@ -465,9 +521,7 @@ fn matches_like(text: &str, pattern: &str) -> bool {
         }
     }
     regex_pattern.push('$');
-    regex::Regex::new(&regex_pattern)
-        .map(|re| re.is_match(text))
-        .unwrap_or(false)
+    regex_pattern
 }
 
 fn matches_missing(op: &ComparisonOp) -> bool {
