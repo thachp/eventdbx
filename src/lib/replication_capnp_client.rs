@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, io::Cursor};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{
     Engine as _,
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE_NO_PAD},
 };
 use capnp::message::ReaderOptions;
 use capnp::serialize::{OwnedSegments, write_message_to_words};
@@ -428,8 +428,9 @@ pub fn decode_public_key_bytes(raw: &str) -> Result<Vec<u8>> {
         bail!("public key cannot be empty");
     }
 
-    let bytes = STANDARD_NO_PAD
+    let bytes = URL_SAFE_NO_PAD
         .decode(trimmed)
+        .or_else(|_| STANDARD_NO_PAD.decode(trimmed))
         .or_else(|_| STANDARD.decode(trimmed))
         .map_err(|err| anyhow!("invalid base64 public key: {err}"))?;
     if bytes.len() != 32 {
