@@ -425,7 +425,6 @@ Rules are optional and can be combined when the target type supports them:
 - `format`: built-in string validators; choose `email`, `url`, `credit_card`, `country_code` (ISO&nbsp;3166-1 alpha-2), `iso_8601` (RFC&nbsp;3339 timestamp), `wgs_84` (latitude/longitude in decimal degrees), `camel_case`, `snake_case`, `kebab_case`, `pascal_case`, or `upper_case_snake_case`.
 - `length`: `{ "min": <usize>, "max": <usize> }` bounds the length of `text` (characters) or `binary` (decoded bytes).
 - `range`: `{ "min": <value>, "max": <value> }` for numeric and temporal types (`integer`, `float`, `decimal`, `timestamp`, `date`). Boundary values must parse to the column’s type.
-- `must_match`: requires the field to equal another dot-path in the same payload (e.g. `"password_confirmation"` must match `"password"`). Both columns must share the same type.
 - `properties`: nested `column_types` definitions for `object` columns, enabling recursion with the same rule set as top-level fields.
 
 ## Contributing

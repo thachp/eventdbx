@@ -131,7 +131,7 @@ impl fmt::Display for ColumnTypeParseError {
 
 impl std::error::Error for ColumnTypeParseError {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct FieldRules {
     #[serde(skip_serializing_if = "is_false")]
@@ -140,8 +140,6 @@ pub struct FieldRules {
     pub contains: Vec<String>,
     #[serde(skip_serializing_if = "vec_is_empty")]
     pub does_not_contain: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub must_match: Option<String>,
     #[serde(skip_serializing_if = "vec_is_empty")]
     pub regex: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,7 +157,6 @@ impl FieldRules {
         !self.required
             && self.contains.is_empty()
             && self.does_not_contain.is_empty()
-            && self.must_match.is_none()
             && self.regex.is_empty()
             && self.length.is_none()
             && self.range.is_none()
@@ -359,6 +356,49 @@ impl FieldRules {
     }
 }
 
+impl<'de> Deserialize<'de> for FieldRules {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct FieldRulesHelper {
+            #[serde(default)]
+            required: bool,
+            #[serde(default)]
+            contains: Vec<String>,
+            #[serde(default)]
+            does_not_contain: Vec<String>,
+            #[serde(default)]
+            #[allow(dead_code)]
+            must_match: Option<String>,
+            #[serde(default)]
+            regex: Vec<String>,
+            #[serde(default)]
+            length: Option<LengthRule>,
+            #[serde(default)]
+            range: Option<RangeRule>,
+            #[serde(default)]
+            format: Option<FieldFormat>,
+            #[serde(default)]
+            properties: BTreeMap<String, ColumnSettings>,
+        }
+
+        let helper = FieldRulesHelper::deserialize(deserializer)?;
+        Ok(FieldRules {
+            required: helper.required,
+            contains: helper.contains,
+            does_not_contain: helper.does_not_contain,
+            regex: helper.regex,
+            length: helper.length,
+            range: helper.range,
+            format: helper.format,
+            properties: helper.properties,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct LengthRule {
@@ -432,8 +472,7 @@ impl ColumnSettings {
         value_opt: Option<&Value>,
         root_value: &Value,
         root_definitions: &BTreeMap<String, ColumnSettings>,
-        normalized: &mut BTreeMap<String, ComparableValue>,
-    ) -> Result<Option<ComparableValue>> {
+    ) -> Result<()> {
         if value_opt.is_none() {
             if self.rules.required {
                 return Err(EventError::SchemaViolation(format!(
@@ -441,15 +480,14 @@ impl ColumnSettings {
                     path
                 )));
             }
-            return Ok(None);
+            return Ok(());
         }
 
         let value = value_opt.expect("value checked above");
-        let comparable =
-            self.coerce_value(path, value, root_value, root_definitions, normalized)?;
+        let comparable = self.coerce_value(path, value, root_value, root_definitions)?;
         self.rules
             .validate_rules(path, &self.column_type, &comparable)?;
-        Ok(Some(comparable))
+        Ok(())
     }
 
     fn coerce_value(
@@ -458,7 +496,6 @@ impl ColumnSettings {
         value: &Value,
         root_value: &Value,
         root_definitions: &BTreeMap<String, ColumnSettings>,
-        normalized: &mut BTreeMap<String, ComparableValue>,
     ) -> Result<ComparableValue> {
         match &self.column_type {
             ColumnType::Integer => Ok(ComparableValue::Integer(coerce_integer(value, path)?)),
@@ -484,33 +521,9 @@ impl ColumnSettings {
                     root_value,
                     root_definitions,
                     path,
-                    normalized,
                 )?;
                 Ok(ComparableValue::Json(value.clone()))
             }
-        }
-    }
-
-    fn same_kind(&self, other: &ColumnSettings) -> bool {
-        use std::mem::Discriminant;
-        fn discriminant(value: &ColumnType) -> Discriminant<ColumnType> {
-            std::mem::discriminant(value)
-        }
-        if discriminant(&self.column_type) != discriminant(&other.column_type) {
-            return false;
-        }
-        match (&self.column_type, &other.column_type) {
-            (
-                ColumnType::Decimal {
-                    precision: p1,
-                    scale: s1,
-                },
-                ColumnType::Decimal {
-                    precision: p2,
-                    scale: s2,
-                },
-            ) => p1 == p2 && s1 == s2,
-            _ => true,
         }
     }
 }
@@ -994,16 +1007,13 @@ impl SchemaManager {
                 ))
             })?;
 
-            let mut normalized = BTreeMap::new();
             validate_columns(
                 &schema.column_types,
                 object,
                 payload,
                 &schema.column_types,
                 "",
-                &mut normalized,
             )?;
-            validate_must_match(&schema.column_types, &schema.column_types, &normalized, "")?;
         }
 
         Ok(())
@@ -1050,103 +1060,13 @@ fn validate_columns(
     root_value: &Value,
     root_definitions: &BTreeMap<String, ColumnSettings>,
     prefix: &str,
-    normalized: &mut BTreeMap<String, ComparableValue>,
 ) -> Result<()> {
     for (field, definition) in definitions {
         let path = join_path(prefix, field);
         let value_opt = payload.get(field);
-        if let Some(value) = definition.validate_with_path(
-            &path,
-            value_opt,
-            root_value,
-            root_definitions,
-            normalized,
-        )? {
-            normalized.insert(path.clone(), value);
-        }
+        definition.validate_with_path(&path, value_opt, root_value, root_definitions)?;
     }
     Ok(())
-}
-
-fn validate_must_match(
-    definitions: &BTreeMap<String, ColumnSettings>,
-    root_definitions: &BTreeMap<String, ColumnSettings>,
-    values: &BTreeMap<String, ComparableValue>,
-    prefix: &str,
-) -> Result<()> {
-    for (field, definition) in definitions {
-        let path = join_path(prefix, field);
-        if let Some(target_path) = &definition.rules.must_match {
-            if let Some(source_value) = values.get(&path) {
-                let target_value = values.get(target_path).ok_or_else(|| {
-                    EventError::SchemaViolation(format!(
-                        "field {} must match {}, but {} is missing",
-                        path, target_path, target_path
-                    ))
-                })?;
-
-                let target_definition = find_column_settings(root_definitions, target_path)
-                    .ok_or_else(|| {
-                        EventError::SchemaViolation(format!(
-                            "field {} must match {}, but {} is not defined in schema",
-                            path, target_path, target_path
-                        ))
-                    })?;
-
-                if !definition.same_kind(target_definition) {
-                    return Err(EventError::SchemaViolation(format!(
-                        "field {} must match {}, but their types differ",
-                        path, target_path
-                    )));
-                }
-
-                if source_value != target_value {
-                    return Err(EventError::SchemaViolation(format!(
-                        "field {} must match {}",
-                        path, target_path
-                    )));
-                }
-            } else if definition.rules.required {
-                return Err(EventError::SchemaViolation(format!(
-                    "field {} is required but missing",
-                    path
-                )));
-            }
-        }
-
-        if !definition.rules.properties.is_empty()
-            && matches!(definition.column_type, ColumnType::Object)
-        {
-            validate_must_match(
-                &definition.rules.properties,
-                root_definitions,
-                values,
-                &path,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn find_column_settings<'a>(
-    definitions: &'a BTreeMap<String, ColumnSettings>,
-    path: &str,
-) -> Option<&'a ColumnSettings> {
-    let mut map = definitions;
-    let mut segments = path.split('.').peekable();
-    while let Some(segment) = segments.next() {
-        let current = map.get(segment)?;
-        if segments.peek().is_some() {
-            if let ColumnType::Object = current.column_type {
-                map = &current.rules.properties;
-            } else {
-                return None;
-            }
-        } else {
-            return Some(current);
-        }
-    }
-    None
 }
 
 fn join_path(prefix: &str, key: &str) -> String {
@@ -1991,59 +1911,6 @@ mod tests {
                 "contact",
                 "contact_added",
                 &json!({ "email": "not-an-email" }),
-            )
-            .unwrap_err();
-        assert!(matches!(err, EventError::SchemaViolation(_)));
-    }
-
-    #[test]
-    fn enforces_must_match_rule() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("schemas.json");
-        let manager = SchemaManager::load(path).unwrap();
-
-        manager
-            .create(CreateSchemaInput {
-                aggregate: "user".into(),
-                events: vec!["user_created".into()],
-                snapshot_threshold: None,
-            })
-            .unwrap();
-
-        let mut update = SchemaUpdate::default();
-        update.column_type = Some(("password".into(), Some(ColumnType::Text)));
-        manager.update("user", update).unwrap();
-        let mut update_confirm = SchemaUpdate::default();
-        update_confirm.column_type = Some(("password_confirmation".into(), Some(ColumnType::Text)));
-        manager.update("user", update_confirm).unwrap();
-
-        let mut rules = FieldRules::default();
-        rules.must_match = Some("password".into());
-        rules.required = true;
-
-        let mut rules_update = SchemaUpdate::default();
-        rules_update.column_rules = Some(("password_confirmation".into(), Some(rules)));
-        manager.update("user", rules_update).unwrap();
-
-        manager
-            .validate_event(
-                "user",
-                "user_created",
-                &json!({
-                    "password": "secret",
-                    "password_confirmation": "secret"
-                }),
-            )
-            .unwrap();
-
-        let err = manager
-            .validate_event(
-                "user",
-                "user_created",
-                &json!({
-                    "password": "secret",
-                    "password_confirmation": "mismatch"
-                }),
             )
             .unwrap_err();
         assert!(matches!(err, EventError::SchemaViolation(_)));
