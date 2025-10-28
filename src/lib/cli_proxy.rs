@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     env,
+    io::Cursor,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, RwLock},
@@ -35,6 +36,7 @@ use crate::{
         replication_hello, replication_hello_response, replication_request, replication_response,
     },
     replication_capnp_client::REPLICATION_PROTOCOL_VERSION,
+    replication_noise::{perform_server_handshake, read_encrypted_frame, write_encrypted_frame},
     schema::{AggregateSchema, SchemaManager},
     service::{
         AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
@@ -242,6 +244,7 @@ pub async fn start(
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
     local_public_key: Arc<Vec<u8>>,
+    local_private_key: Arc<Vec<u8>>,
 ) -> Result<JoinHandle<()>> {
     let listener = TcpListener::bind(bind_addr)
         .await
@@ -256,8 +259,15 @@ pub async fn start(
         let core = core.clone();
         let shared_config = Arc::clone(&shared_config);
         async move {
-            if let Err(err) =
-                serve(listener, config_path, core, shared_config, local_public_key).await
+            if let Err(err) = serve(
+                listener,
+                config_path,
+                core,
+                shared_config,
+                local_public_key,
+                local_private_key,
+            )
+            .await
             {
                 warn!("CLI proxy server terminated: {err:?}");
             }
@@ -272,6 +282,7 @@ async fn serve(
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
     local_public_key: Arc<Vec<u8>>,
+    local_private_key: Arc<Vec<u8>>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener
@@ -282,9 +293,17 @@ async fn serve(
         let core = core.clone();
         let shared_config = Arc::clone(&shared_config);
         let local_public_key = Arc::clone(&local_public_key);
+        let local_private_key = Arc::clone(&local_private_key);
         tokio::spawn(async move {
-            if let Err(err) =
-                handle_connection(stream, config_path, core, shared_config, local_public_key).await
+            if let Err(err) = handle_connection(
+                stream,
+                config_path,
+                core,
+                shared_config,
+                local_public_key,
+                local_private_key,
+            )
+            .await
             {
                 warn!(target: "cli_proxy", peer = %peer, "CLI proxy connection error: {err:?}");
             }
@@ -298,6 +317,7 @@ async fn handle_connection(
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
     local_public_key: Arc<Vec<u8>>,
+    local_private_key: Arc<Vec<u8>>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = reader.compat();
@@ -345,6 +365,7 @@ async fn handle_connection(
         &mut writer,
         core,
         local_public_key,
+        local_private_key,
     )
     .await?;
     Ok(())
@@ -1215,6 +1236,7 @@ async fn handle_replication_session<R, W>(
     writer: &mut W,
     core: CoreContext,
     local_public_key: Arc<Vec<u8>>,
+    local_private_key: Arc<Vec<u8>>,
 ) -> Result<()>
 where
     R: futures::AsyncRead + Unpin,
@@ -1281,6 +1303,10 @@ where
         return Ok(());
     }
 
+    let mut noise = perform_server_handshake(reader, writer, local_private_key.as_slice())
+        .await
+        .context("failed to establish encrypted replication channel")?;
+
     let store = core.store();
     let schemas = core.schemas();
     let store = Arc::clone(&store);
@@ -1288,13 +1314,13 @@ where
     let mut last_sequence = 0u64;
 
     loop {
-        let message = match try_read_message(&mut *reader, ReaderOptions::new()).await {
-            Ok(Some(message)) => message,
-            Ok(None) => break,
-            Err(err) => {
-                return Err(anyhow::Error::new(err).context("failed to read replication request"));
-            }
+        let request_bytes = match read_encrypted_frame(reader, &mut noise).await? {
+            Some(bytes) => bytes,
+            None => break,
         };
+        let mut cursor = Cursor::new(&request_bytes);
+        let message = capnp::serialize::read_message(&mut cursor, ReaderOptions::new())
+            .context("failed to decode replication request")?;
 
         let response_bytes = {
             let mut response_message = capnp::message::Builder::new_default();
@@ -1325,14 +1351,9 @@ where
 
             write_message_to_words(&response_message)
         };
-        writer
-            .write_all(&response_bytes)
+        write_encrypted_frame(writer, &mut noise, &response_bytes)
             .await
-            .context("failed to write replication response")?;
-        writer
-            .flush()
-            .await
-            .context("failed to flush replication response")?;
+            .context("failed to send replication response")?;
     }
 
     Ok(())

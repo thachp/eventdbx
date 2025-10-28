@@ -127,6 +127,11 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         )
         .map_err(|err| EventError::Config(err.to_string()))?,
     );
+    let local_private_key = Arc::new(
+        config_snapshot
+            .load_identity_secret()
+            .map_err(|err| EventError::Config(err.to_string()))?,
+    );
     let schemas = Arc::new(SchemaManager::load(config_snapshot.schema_store_path())?);
 
     let core = CoreContext::new(
@@ -164,6 +169,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         core.clone(),
         Arc::clone(&shared_config),
         Arc::clone(&local_public_key),
+        Arc::clone(&local_private_key),
     )
     .await
     .map_err(|err| EventError::Config(format!("failed to start CLI proxy: {err}")))?;

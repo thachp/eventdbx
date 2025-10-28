@@ -536,6 +536,19 @@ impl Config {
         Ok(contents.trim().to_string())
     }
 
+    pub fn load_identity_secret(&self) -> Result<Vec<u8>> {
+        self.ensure_replication_identity()?;
+        let path = self.identity_key_path();
+        let bytes = fs::read(&path)?;
+        if bytes.len() != 32 {
+            return Err(EventError::Config(format!(
+                "invalid replication key length at {}",
+                path.display()
+            )));
+        }
+        Ok(bytes)
+    }
+
     pub fn event_store_path(&self) -> PathBuf {
         self.data_dir.join("event_store")
     }
