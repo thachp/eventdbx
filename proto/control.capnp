@@ -30,6 +30,16 @@ struct ControlResponse {
   }
 }
 
+struct ControlHello {
+  protocolVersion @0 :UInt16;
+  token @1 :Text;
+}
+
+struct ControlHelloResponse {
+  accepted @0 :Bool;
+  message @1 :Text;
+}
+
 struct ListAggregatesRequest {
   skip @0 :UInt64;
   take @1 :UInt64;

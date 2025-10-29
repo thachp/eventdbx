@@ -126,7 +126,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
        --field status=active
      ```
    - If the server is stopped, the same CLI command writes to the local RocksDB store directly.
-   - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort created_at:desc --take 5` or drill into the payload of a specific event via `dbx event <snowflake_id> --json`.
+   - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort created_at:desc --take 5` or drill into the payload of a specific event via `dbx events <snowflake_id> --json`.
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
 
@@ -223,8 +223,8 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 
 - `dbx events [--aggregate <type>] [--aggregate-id <id>] [--skip <n>] [--take <n>] [--filter <expr>] [--sort <field[:order],...>] [--json] [--include-archived|--archived-only]`  
   Streams events with optional aggregate scoping, SQL-like filters (e.g. `payload.status = "open" AND metadata.note LIKE "retry%"`), and multi-key sorting. Prefix fields with `payload.`, `metadata.`, or `extensions.` to target nested JSON; `created_at`, `event_id`, `version`, and other top-level keys are also available.
-- `dbx event <snowflake_id> [--json]`  
-  Displays a single event by Snowflake identifier, including payload, metadata, and extensions.
+- `dbx events --event <snowflake_id> [--json]`  
+  Displays a single event by Snowflake identifier, including payload, metadata, and extensions. You can also omit `--event` when the first positional argument is a valid Snowflake id.
 - `dbx aggregate export [<type>] [--all] --output <path> [--format csv|json] [--zip] [--pretty]`  
   Writes the current aggregate state (no metadata) as CSV or JSON. Exports default to one file per aggregate type; pass `--zip` to bundle the output into an archive.
 
