@@ -902,18 +902,6 @@ cli_failure_test!(
     "no remote named 'ghost' is configured"
 );
 
-#[test]
-fn remote_key_shows_path() -> Result<()> {
-    let cli = CliTest::new()?;
-    let output = cli.run(&["remote", "key", "--show-path"])?;
-    assert!(
-        output.contains("path:"),
-        "expected path in remote key output: {}",
-        output
-    );
-    Ok(())
-}
-
 cli_failure_test!(
     remote_push_unknown_remote_fails,
     ["push", "ghost"],

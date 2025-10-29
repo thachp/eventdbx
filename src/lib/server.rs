@@ -17,7 +17,6 @@ use super::{
     config::Config,
     error::{EventError, Result},
     observability,
-    replication_capnp_client::decode_public_key_bytes,
     schema::SchemaManager,
     service::CoreContext,
     store::EventStore,
@@ -119,19 +118,6 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         encryption.clone(),
         config_snapshot.snowflake_worker_id,
     )?);
-    let local_public_key = Arc::new(
-        decode_public_key_bytes(
-            &config_snapshot
-                .load_public_key()
-                .map_err(|err| EventError::Config(err.to_string()))?,
-        )
-        .map_err(|err| EventError::Config(err.to_string()))?,
-    );
-    let local_private_key = Arc::new(
-        config_snapshot
-            .load_identity_secret()
-            .map_err(|err| EventError::Config(err.to_string()))?,
-    );
     let schemas = Arc::new(SchemaManager::load(config_snapshot.schema_store_path())?);
 
     let core = CoreContext::new(
@@ -161,8 +147,6 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         Arc::clone(&config_path),
         core.clone(),
         Arc::clone(&shared_config),
-        Arc::clone(&local_public_key),
-        Arc::clone(&local_private_key),
     )
     .await
     .map_err(|err| EventError::Config(format!("failed to start CLI proxy: {err}")))?;

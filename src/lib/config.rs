@@ -4,12 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Duration, Utc};
-use ed25519_dalek::SigningKey;
 use rand_core::{OsRng, RngCore};
 use ring::{
     rand::SystemRandom,
@@ -17,7 +13,6 @@ use ring::{
 };
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 use super::{
     encryption::Encryptor,
@@ -211,7 +206,6 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
             false
         };
         cfg.ensure_data_dir()?;
-        cfg.ensure_replication_identity()?;
         let migrated = cfg.migrate_plugins()?;
         if updated || migrated || auth_updated || replication_updated {
             cfg.save(&config_path)?;
@@ -222,7 +216,6 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
         let _ = cfg.ensure_encryption_key();
         cfg.ensure_auth_keys()?;
         cfg.ensure_data_dir()?;
-        cfg.ensure_replication_identity()?;
         let _ = cfg.migrate_plugins()?;
         cfg.save(&config_path)?;
         Ok((cfg, config_path))
@@ -371,84 +364,6 @@ impl Config {
         Ok(true)
     }
 
-    pub fn identity_key_path(&self) -> PathBuf {
-        let path = &self.replication.identity_key;
-        if path.is_absolute() {
-            path.clone()
-        } else {
-            self.data_dir.join(path)
-        }
-    }
-
-    pub fn public_key_path(&self) -> PathBuf {
-        let mut path = self.identity_key_path();
-        path.set_extension("pub");
-        path
-    }
-
-    pub fn ensure_replication_identity(&self) -> Result<()> {
-        let key_path = self.identity_key_path();
-        if key_path.exists() {
-            self.ensure_public_key(&key_path)?;
-            return Ok(());
-        }
-
-        if let Some(parent) = key_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let signing_key = SigningKey::generate(&mut OsRng);
-        write_private_key(&key_path, signing_key.as_bytes())?;
-
-        let verifying_key = signing_key.verifying_key();
-        write_public_key(&self.public_key_path(), verifying_key.as_bytes())?;
-        Ok(())
-    }
-
-    fn ensure_public_key(&self, key_path: &Path) -> Result<()> {
-        let pub_path = self.public_key_path();
-        if pub_path.exists() {
-            return Ok(());
-        }
-
-        let bytes = fs::read(key_path)?;
-        if bytes.len() != 32 {
-            return Err(EventError::Config(format!(
-                "invalid replication key length at {}",
-                key_path.display()
-            )));
-        }
-
-        let key_bytes: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| EventError::Config("failed to parse replication key".into()))?;
-        let signing_key = SigningKey::from_bytes(&key_bytes);
-        let verifying_key = signing_key.verifying_key();
-        write_public_key(&pub_path, verifying_key.as_bytes())?;
-        Ok(())
-    }
-
-    pub fn load_public_key(&self) -> Result<String> {
-        self.ensure_replication_identity()?;
-        let path = self.public_key_path();
-        let contents = fs::read_to_string(&path)?;
-        Ok(contents.trim().to_string())
-    }
-
-    pub fn load_identity_secret(&self) -> Result<Vec<u8>> {
-        self.ensure_replication_identity()?;
-        let path = self.identity_key_path();
-        let bytes = fs::read(&path)?;
-        if bytes.len() != 32 {
-            return Err(EventError::Config(format!(
-                "invalid replication key length at {}",
-                path.display()
-            )));
-        }
-        Ok(bytes)
-    }
-
     pub fn event_store_path(&self) -> PathBuf {
         self.domain_data_dir().join("event_store")
     }
@@ -589,17 +504,17 @@ impl Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicationConfig {
-    #[serde(default = "default_identity_key")]
-    pub identity_key: PathBuf,
     #[serde(default = "default_replication_bind")]
     pub bind_addr: String,
+    #[serde(default, alias = "identity_key", skip_serializing)]
+    pub legacy_identity_key: Option<PathBuf>,
 }
 
 impl Default for ReplicationConfig {
     fn default() -> Self {
         Self {
-            identity_key: default_identity_key(),
             bind_addr: default_replication_bind(),
+            legacy_identity_key: None,
         }
     }
 }
@@ -656,7 +571,12 @@ pub struct AdminApiConfigUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
     pub endpoint: String,
-    pub public_key: String,
+    #[serde(default, alias = "public_key")]
+    pub token: String,
+    #[serde(default)]
+    pub locator: Option<String>,
+    #[serde(default)]
+    pub remote_domain: Option<String>,
 }
 
 fn default_config_root() -> Result<PathBuf> {
@@ -752,10 +672,6 @@ fn default_queue_prune_done_ttl_secs() -> u64 {
 
 fn default_queue_prune_interval_secs() -> u64 {
     300
-}
-
-fn default_identity_key() -> PathBuf {
-    PathBuf::from("replication.key")
 }
 
 fn default_replication_bind() -> String {
@@ -925,44 +841,6 @@ pub struct ProcessPluginConfig {
 
 fn default_log_level() -> String {
     "info".into()
-}
-
-fn write_private_key(path: &Path, data: &[u8]) -> Result<()> {
-    use std::fs::OpenOptions;
-    use std::io::Write as _;
-
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        match file.metadata() {
-            Ok(metadata) => {
-                let mut permissions = metadata.permissions();
-                permissions.set_mode(0o600);
-                if let Err(err) = file.set_permissions(permissions) {
-                    warn!("failed to set permissions on {}: {}", path.display(), err);
-                }
-            }
-            Err(err) => warn!(
-                "failed to read metadata for {} when setting permissions: {}",
-                path.display(),
-                err
-            ),
-        }
-    }
-
-    file.write_all(data)?;
-    Ok(())
-}
-
-fn write_public_key(path: &Path, data: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let encoded = URL_SAFE_NO_PAD.encode(data);
-    fs::write(path, encoded)?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -356,6 +356,24 @@ pub struct AggregateState {
     pub archived: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct StoreCounts {
+    pub active_aggregates: usize,
+    pub archived_aggregates: usize,
+    pub active_events: u64,
+    pub archived_events: u64,
+}
+
+impl StoreCounts {
+    pub fn total_aggregates(&self) -> usize {
+        self.active_aggregates + self.archived_aggregates
+    }
+
+    pub fn total_events(&self) -> u64 {
+        self.active_events + self.archived_events
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregateSortField {
     AggregateType,
@@ -706,6 +724,60 @@ impl EventStore {
             encryptor,
             id_generator: Mutex::new(SnowflakeGenerator::new(0)),
         })
+    }
+
+    pub fn counts(&self) -> Result<StoreCounts> {
+        let (active_aggregates, active_events) =
+            self.count_index_entries(AggregateIndex::Active)?;
+        let (archived_aggregates, archived_events) =
+            self.count_index_entries(AggregateIndex::Archived)?;
+
+        Ok(StoreCounts {
+            active_aggregates,
+            archived_aggregates,
+            active_events,
+            archived_events,
+        })
+    }
+
+    fn count_index_entries(&self, index: AggregateIndex) -> Result<(usize, u64)> {
+        let start = Instant::now();
+        let metric = match index {
+            AggregateIndex::Active => "rocksdb_iter_meta_count",
+            AggregateIndex::Archived => "rocksdb_iter_meta_archived_count",
+        };
+
+        let result = (|| {
+            let prefix = meta_prefix_for(index);
+            let iter = self
+                .db
+                .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+
+            let mut aggregates = 0usize;
+            let mut events = 0u64;
+
+            for item in iter {
+                let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+                if !key.starts_with(prefix.as_slice()) {
+                    break;
+                }
+                if key.len() > prefix.len() && key[prefix.len()] != SEP {
+                    break;
+                }
+
+                let meta: AggregateMeta = serde_json::from_slice(&value).map_err(|err| {
+                    EventError::Storage(format!("failed to deserialize aggregate metadata: {err}"))
+                })?;
+                aggregates += 1;
+                events += meta.version;
+            }
+
+            Ok((aggregates, events))
+        })();
+
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op(metric, if result.is_ok() { "ok" } else { "err" }, duration);
+        result
     }
 
     fn next_event_id(&self) -> SnowflakeId {

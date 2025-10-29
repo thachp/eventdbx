@@ -89,15 +89,14 @@ See the [Plugin architecture]({{ '/plugins/' | relative_url }}) guide for deeper
 
 ## Replication
 
-- `dbx remote add <name> <ip> --public-key <base64> [--port <u16>] [--replace]`
+- `dbx remote add <name> <ip> --token <jwt> [--port <u16>] [--replace]`
 - `dbx remote rm <name>`
 - `dbx remote ls`
 - `dbx remote show <name>`
-- `dbx remote key [--show-path]`
 - `dbx push <name> [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>…] [--aggregate-id <type:id>…]`
 - `dbx pull <name> [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>…] [--aggregate-id <type:id>…]`
 
-Remotes authenticate through pinned Ed25519 keys and reuse the CLI socket (`tcp://…:6363` by default).
+Remotes authenticate with issued JWT tokens and reuse the CLI socket (`tcp://…:6363` by default).
 
 ## Maintenance
 

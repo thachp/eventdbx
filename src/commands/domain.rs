@@ -1,5 +1,5 @@
 use std::{
-    fs, io,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -16,6 +16,7 @@ use eventdbx::{
     schema::{AggregateSchema, SchemaManager},
     store::{AggregateQueryScope, EventStore},
 };
+use std::io::{self, Write};
 
 #[derive(Args)]
 pub struct DomainCheckoutArgs {
@@ -26,6 +27,23 @@ pub struct DomainCheckoutArgs {
     /// Domain to activate (positional alias for -d/--domain)
     #[arg(value_name = "NAME")]
     pub positional_domain: Option<String>,
+
+    /// Create the domain before switching if it does not exist
+    #[arg(
+        short = 'c',
+        long = "create",
+        default_value_t = false,
+        conflicts_with = "delete"
+    )]
+    pub create: bool,
+
+    /// Delete the specified domain instead of switching
+    #[arg(long, default_value_t = false)]
+    pub delete: bool,
+
+    /// Skip the interactive confirmation when deleting a domain
+    #[arg(long, default_value_t = false, requires = "delete")]
+    pub force: bool,
 }
 
 #[derive(Args)]
@@ -44,8 +62,16 @@ pub struct DomainMergeArgs {
 }
 
 pub fn checkout(config_path: Option<PathBuf>, args: DomainCheckoutArgs) -> Result<()> {
+    if args.delete {
+        return delete_domain(config_path, &args);
+    }
+
     let target = resolve_checkout_domain(&args)?;
     let (mut config, path) = load_or_default(config_path)?;
+
+    if args.create {
+        create_domain(&config, &target)?;
+    }
 
     if config.active_domain() == target {
         println!(
@@ -69,6 +95,89 @@ pub fn checkout(config_path: Option<PathBuf>, args: DomainCheckoutArgs) -> Resul
     );
 
     Ok(())
+}
+
+fn create_domain(config: &Config, domain: &str) -> Result<()> {
+    if domain.eq_ignore_ascii_case(DEFAULT_DOMAIN_NAME) {
+        println!("Domain '{}' already exists.", DEFAULT_DOMAIN_NAME);
+        return Ok(());
+    }
+
+    let mut candidate = config.clone();
+    candidate.domain = domain.to_string();
+    let domain_dir = candidate.domain_data_dir();
+
+    if domain_dir.exists() {
+        println!(
+            "Domain '{}' already exists (data directory: {}).",
+            domain,
+            domain_dir.display()
+        );
+        return Ok(());
+    }
+
+    candidate
+        .ensure_data_dir()
+        .with_context(|| format!("failed to create domain '{domain}'"))?;
+
+    println!(
+        "Created domain '{}' (data directory: {}).",
+        domain,
+        domain_dir.display()
+    );
+    Ok(())
+}
+
+fn delete_domain(config_path: Option<PathBuf>, args: &DomainCheckoutArgs) -> Result<()> {
+    let target = resolve_checkout_domain(args)?;
+    let (config, _) = load_or_default(config_path)?;
+
+    if target.eq_ignore_ascii_case(DEFAULT_DOMAIN_NAME) {
+        bail!("cannot delete the default domain");
+    }
+    if config.active_domain().eq_ignore_ascii_case(&target) {
+        bail!("cannot delete the currently active domain; switch to a different domain first");
+    }
+
+    let mut candidate = config.clone();
+    candidate.domain = target.clone();
+    let domain_dir = candidate.domain_data_dir();
+
+    if !domain_dir.exists() {
+        println!("Domain '{}' does not exist.", target);
+        return Ok(());
+    }
+
+    if !args.force && !confirm_delete(&target)? {
+        println!("Domain deletion cancelled.");
+        return Ok(());
+    }
+
+    ensure_domain_stopped(&candidate)?;
+
+    fs::remove_dir_all(&domain_dir).with_context(|| {
+        format!(
+            "failed to delete domain '{}' at {}",
+            target,
+            domain_dir.display()
+        )
+    })?;
+
+    println!(
+        "Deleted domain '{}' (data directory: {}).",
+        target,
+        domain_dir.display()
+    );
+    Ok(())
+}
+
+fn confirm_delete(domain: &str) -> Result<bool> {
+    print!("Type the domain name '{}' to confirm deletion: ", domain);
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim() == domain)
 }
 
 pub fn merge(config_path: Option<PathBuf>, args: DomainMergeArgs) -> Result<()> {
@@ -414,6 +523,9 @@ mod tests {
         let args = DomainCheckoutArgs {
             flag_domain: Some("Herds".to_string()),
             positional_domain: None,
+            create: false,
+            delete: false,
+            force: false,
         };
         let result = resolve_checkout_domain(&args).expect("flag domain should resolve");
         assert_eq!(result, "herds");
@@ -424,6 +536,9 @@ mod tests {
         let args = DomainCheckoutArgs {
             flag_domain: None,
             positional_domain: Some("Herds_01".to_string()),
+            create: false,
+            delete: false,
+            force: false,
         };
         let result = resolve_checkout_domain(&args).expect("positional domain should resolve");
         assert_eq!(result, "herds_01");
@@ -434,6 +549,9 @@ mod tests {
         let args = DomainCheckoutArgs {
             flag_domain: Some("alpha".to_string()),
             positional_domain: Some("beta".to_string()),
+            create: false,
+            delete: false,
+            force: false,
         };
         assert!(resolve_checkout_domain(&args).is_err());
     }

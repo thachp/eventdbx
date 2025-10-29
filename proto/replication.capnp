@@ -2,7 +2,7 @@
 
 struct ReplicationHello {
   protocolVersion @0 :UInt16;
-  expectedPublicKey @1 :Data;
+  token @1 :Text;
 }
 
 struct ReplicationHelloResponse {

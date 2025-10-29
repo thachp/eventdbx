@@ -1,10 +1,6 @@
 use std::{collections::BTreeMap, io::Cursor};
 
 use anyhow::{Context, Result, anyhow, bail};
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
-};
 use capnp::message::ReaderOptions;
 use capnp::serialize::{OwnedSegments, write_message_to_words};
 use capnp_futures::serialize::read_message as read_async_message;
@@ -32,7 +28,11 @@ pub struct CapnpReplicationClient {
 }
 
 impl CapnpReplicationClient {
-    pub async fn connect(endpoint: &str, expected_key: &[u8]) -> Result<Self> {
+    pub async fn connect(endpoint: &str, token: &str) -> Result<Self> {
+        Self::connect_with_capnp(endpoint, token).await
+    }
+
+    async fn connect_with_capnp(endpoint: &str, token: &str) -> Result<Self> {
         let stream = TcpStream::connect(endpoint)
             .await
             .with_context(|| format!("failed to connect to replication endpoint {endpoint}"))?;
@@ -40,7 +40,7 @@ impl CapnpReplicationClient {
         let mut reader = reader_half.compat();
         let mut writer = writer_half.compat_write();
 
-        let noise = send_handshake(&mut reader, &mut writer, expected_key).await?;
+        let noise = send_handshake(&mut reader, &mut writer, token).await?;
 
         Ok(Self {
             reader,
@@ -270,21 +270,24 @@ impl CapnpReplicationClient {
     }
 }
 
-async fn send_handshake<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-    expected_key: &[u8],
-) -> Result<TransportState>
+async fn send_handshake<R, W>(reader: &mut R, writer: &mut W, token: &str) -> Result<TransportState>
 where
     R: futures::AsyncRead + Unpin,
     W: futures::AsyncWrite + Unpin,
 {
+    if token.is_empty() {
+        bail!("replication token cannot be empty");
+    }
+    if token.split('.').count() != 3 {
+        bail!("replication token must contain three JWT segments");
+    }
+
     let hello_bytes = {
         let mut message = capnp::message::Builder::new_default();
         {
             let mut hello = message.init_root::<replication_hello::Builder>();
             hello.set_protocol_version(REPLICATION_PROTOCOL_VERSION);
-            hello.set_expected_public_key(expected_key);
+            hello.set_token(token);
         }
         write_message_to_words(&message)
     };
@@ -309,7 +312,7 @@ where
         bail!("replication handshake rejected: {reason}");
     }
 
-    perform_client_handshake(reader, writer, expected_key)
+    perform_client_handshake(reader, writer, token.as_bytes())
         .await
         .context("failed to establish encrypted replication channel")
 }
@@ -419,100 +422,5 @@ pub fn normalize_capnp_endpoint(endpoint: &str) -> Result<String> {
         bail!("unsupported replication endpoint scheme: {endpoint}");
     } else {
         Ok(trimmed.to_string())
-    }
-}
-
-pub fn decode_public_key_bytes(raw: &str) -> Result<Vec<u8>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        bail!("public key cannot be empty");
-    }
-
-    fn push_unique(list: &mut Vec<String>, candidate: String) {
-        if !list.iter().any(|existing| existing == &candidate) {
-            list.push(candidate);
-        }
-    }
-
-    fn pad_base64(value: &str) -> String {
-        let mut padded = value.to_string();
-        let remainder = padded.len() % 4;
-        if remainder != 0 {
-            padded.extend(std::iter::repeat('=').take(4 - remainder));
-        }
-        padded
-    }
-
-    fn try_decode(candidate: &str) -> Option<Vec<u8>> {
-        URL_SAFE_NO_PAD
-            .decode(candidate)
-            .ok()
-            .or_else(|| URL_SAFE.decode(candidate).ok())
-            .or_else(|| STANDARD_NO_PAD.decode(candidate).ok())
-            .or_else(|| STANDARD.decode(candidate).ok())
-    }
-
-    let mut candidates = Vec::new();
-    push_unique(&mut candidates, trimmed.to_string());
-    push_unique(&mut candidates, pad_base64(trimmed));
-
-    if trimmed.contains('+') || trimmed.contains('/') {
-        let url_safe = trimmed.replace('+', "-").replace('/', "_");
-        push_unique(&mut candidates, url_safe.clone());
-        push_unique(&mut candidates, pad_base64(&url_safe));
-    }
-
-    if trimmed.contains('-') || trimmed.contains('_') {
-        let standard = trimmed.replace('-', "+").replace('_', "/");
-        push_unique(&mut candidates, standard.clone());
-        push_unique(&mut candidates, pad_base64(&standard));
-    }
-
-    let bytes = candidates
-        .iter()
-        .filter_map(|candidate| try_decode(candidate))
-        .next()
-        .ok_or_else(|| anyhow!("invalid base64 public key"))?;
-
-    if bytes.len() != 32 {
-        bail!("public key must decode to 32 bytes");
-    }
-    Ok(bytes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decode_public_key_accepts_multiple_encodings() {
-        let expected_a =
-            hex::decode("76b9e1fca8f39727ddccc1c2bdf80f3551549206089acdb8a4c34bc7a4fb04fe")
-                .unwrap();
-        let expected_b =
-            hex::decode("e37a9238adf3fb5d08407f40624dc7abdc95961bbc7829eb6c67776812148e8d")
-                .unwrap();
-
-        let variants_a = [
-            "drnh_KjzlyfdzMHCvfgPNVFUkgYIms24pMNLx6T7BP4",
-            "drnh/KjzlyfdzMHCvfgPNVFUkgYIms24pMNLx6T7BP4",
-            "drnh/KjzlyfdzMHCvfgPNVFUkgYIms24pMNLx6T7BP4=",
-        ];
-
-        for variant in variants_a {
-            let decoded = decode_public_key_bytes(variant).expect("variant A should decode");
-            assert_eq!(decoded, expected_a, "variant: {}", variant);
-        }
-
-        let variants_b = [
-            "43qSOK3z-10IQH9AYk3Hq9yVlhu8eCnrbGd3aBIUjo0",
-            "43qSOK3z+10IQH9AYk3Hq9yVlhu8eCnrbGd3aBIUjo0",
-            "43qSOK3z+10IQH9AYk3Hq9yVlhu8eCnrbGd3aBIUjo0=",
-        ];
-
-        for variant in variants_b {
-            let decoded = decode_public_key_bytes(variant).expect("variant B should decode");
-            assert_eq!(decoded, expected_b, "variant: {}", variant);
-        }
     }
 }

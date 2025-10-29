@@ -6,9 +6,7 @@ use tracing::{info, warn};
 use crate::{
     config::{Config, RemoteConfig},
     error::{EventError, Result},
-    replication_capnp_client::{
-        CapnpReplicationClient, decode_public_key_bytes, normalize_capnp_endpoint,
-    },
+    replication_capnp_client::{CapnpReplicationClient, normalize_capnp_endpoint},
     store::EventRecord,
 };
 
@@ -128,9 +126,10 @@ impl RemoteWorker {
     async fn connect(&self) -> Result<CapnpReplicationClient> {
         let endpoint = normalize_capnp_endpoint(&self.config.endpoint)
             .map_err(|err| EventError::Config(err.to_string()))?;
-        let expected_key = decode_public_key_bytes(&self.config.public_key)
-            .map_err(|err| EventError::Config(err.to_string()))?;
-        CapnpReplicationClient::connect(&endpoint, &expected_key)
+        if self.config.token.trim().is_empty() {
+            return Err(EventError::Config("remote token cannot be empty".into()));
+        }
+        CapnpReplicationClient::connect(&endpoint, &self.config.token)
             .await
             .map_err(|err| EventError::Storage(err.to_string()))
     }

@@ -14,6 +14,7 @@ use capnp::serialize::{OwnedSegments, write_message_to_words};
 use capnp_futures::serialize::{read_message, try_read_message};
 use futures::AsyncWriteExt;
 use serde_json::{self, Value};
+use snow::TransportState;
 use tokio::{
     net::{TcpListener, TcpStream},
     process::Command,
@@ -26,7 +27,8 @@ use crate::{
     cli_capnp::{cli_request, cli_response},
     config::Config,
     control_capnp::{
-        AggregateSortField as CapnpAggregateSortField, control_request, control_response,
+        AggregateSortField as CapnpAggregateSortField, control_hello, control_hello_response,
+        control_request, control_response,
     },
     error::EventError,
     filter::{self, FilterExpr},
@@ -166,6 +168,17 @@ enum ControlCommand {
     },
 }
 
+const CONTROL_PROTOCOL_VERSION: u16 = 1;
+
+enum FirstMessage {
+    Cli(capnp::message::Reader<OwnedSegments>),
+    Control {
+        protocol_version: u16,
+        token_result: Result<String, String>,
+    },
+    Other(capnp::message::Reader<OwnedSegments>),
+}
+
 fn control_error_code(err: &EventError) -> &'static str {
     match err {
         EventError::InvalidToken => "invalid_token",
@@ -229,8 +242,29 @@ pub mod test_support {
         let mut server_reader = server_reader_raw.compat();
         let mut server_writer = server_writer_raw.compat_write();
         let task = tokio::spawn(async move {
-            handle_control_session(
-                None,
+            let message = read_message(&mut server_reader, ReaderOptions::new())
+                .await
+                .context("failed to read control hello")?;
+            let (protocol_version, token_result) = {
+                let hello = message
+                    .get_root::<control_hello::Reader>()
+                    .context("failed to decode control hello")?;
+                let protocol_version = hello.get_protocol_version();
+                let token_result = hello
+                    .get_token()
+                    .map_err(|err| format!("failed to read control token: {err}"))
+                    .and_then(|reader| {
+                        reader
+                            .to_str()
+                            .map_err(|err| format!("invalid UTF-8 in control token: {err}"))
+                            .map(|value| value.trim().to_string())
+                    });
+                (protocol_version, token_result)
+            };
+            drop(message);
+            handle_control_handshake(
+                protocol_version,
+                token_result,
                 &mut server_reader,
                 &mut server_writer,
                 core,
@@ -252,8 +286,6 @@ pub async fn start(
     config_path: Arc<PathBuf>,
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
-    local_public_key: Arc<Vec<u8>>,
-    local_private_key: Arc<Vec<u8>>,
 ) -> Result<JoinHandle<()>> {
     let listener = TcpListener::bind(bind_addr)
         .await
@@ -267,17 +299,9 @@ pub async fn start(
     let handle = tokio::spawn({
         let core = core.clone();
         let shared_config = Arc::clone(&shared_config);
+        let config_path = Arc::clone(&config_path);
         async move {
-            if let Err(err) = serve(
-                listener,
-                config_path,
-                core,
-                shared_config,
-                local_public_key,
-                local_private_key,
-            )
-            .await
-            {
+            if let Err(err) = serve(listener, config_path, core, shared_config).await {
                 warn!("CLI proxy server terminated: {err:?}");
             }
         }
@@ -290,8 +314,6 @@ async fn serve(
     config_path: Arc<PathBuf>,
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
-    local_public_key: Arc<Vec<u8>>,
-    local_private_key: Arc<Vec<u8>>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener
@@ -301,19 +323,8 @@ async fn serve(
         let config_path = Arc::clone(&config_path);
         let core = core.clone();
         let shared_config = Arc::clone(&shared_config);
-        let local_public_key = Arc::clone(&local_public_key);
-        let local_private_key = Arc::clone(&local_private_key);
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(
-                stream,
-                config_path,
-                core,
-                shared_config,
-                local_public_key,
-                local_private_key,
-            )
-            .await
-            {
+            if let Err(err) = handle_connection(stream, config_path, core, shared_config).await {
                 warn!(target: "cli_proxy", peer = %peer, "CLI proxy connection error: {err:?}");
             }
         });
@@ -325,8 +336,6 @@ async fn handle_connection(
     config_path: Arc<PathBuf>,
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
-    local_public_key: Arc<Vec<u8>>,
-    local_private_key: Arc<Vec<u8>>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = reader.compat();
@@ -340,50 +349,35 @@ async fn handle_connection(
         }
     };
 
-    let is_cli_request = first_message
-        .get_root::<cli_request::Reader>()
-        .and_then(|request| request.get_args())
-        .is_ok();
-
-    if is_cli_request {
-        handle_cli_loop(
-            Some(first_message),
-            &mut reader,
-            &mut writer,
-            Arc::clone(&config_path),
-        )
-        .await?;
-        return Ok(());
-    }
-
-    if is_control_request(&first_message) {
-        handle_control_session(
-            Some(first_message),
-            &mut reader,
-            &mut writer,
-            core,
-            shared_config,
-        )
-        .await?;
-        return Ok(());
-    }
-
-    handle_replication_session(
-        first_message,
-        &mut reader,
-        &mut writer,
-        core,
-        local_public_key,
-        local_private_key,
-    )
-    .await?;
-    Ok(())
-}
-
-fn is_control_request(message: &capnp::message::Reader<OwnedSegments>) -> bool {
-    match message.get_root::<control_request::Reader>() {
-        Ok(reader) => reader.get_payload().which().is_ok(),
-        Err(_) => false,
+    match classify_first_message(first_message) {
+        FirstMessage::Cli(message) => {
+            handle_cli_loop(
+                Some(message),
+                &mut reader,
+                &mut writer,
+                Arc::clone(&config_path),
+            )
+            .await?;
+            Ok(())
+        }
+        FirstMessage::Control {
+            protocol_version,
+            token_result,
+        } => {
+            handle_control_handshake(
+                protocol_version,
+                token_result,
+                &mut reader,
+                &mut writer,
+                core,
+                shared_config,
+            )
+            .await
+        }
+        FirstMessage::Other(message) => {
+            handle_replication_session(message, &mut reader, &mut writer, core).await?;
+            Ok(())
+        }
     }
 }
 
@@ -445,8 +439,9 @@ where
     Ok(())
 }
 
-async fn handle_control_session<R, W>(
-    mut pending: Option<capnp::message::Reader<OwnedSegments>>,
+async fn handle_control_handshake<R, W>(
+    protocol_version: u16,
+    token_result: Result<String, String>,
     reader: &mut R,
     writer: &mut W,
     core: CoreContext,
@@ -456,18 +451,131 @@ where
     R: futures::AsyncRead + Unpin,
     W: futures::AsyncWrite + Unpin,
 {
-    loop {
-        let message = if let Some(message) = pending.take() {
-            message
-        } else {
-            match try_read_message(&mut *reader, ReaderOptions::new()).await {
-                Ok(Some(message)) => message,
-                Ok(None) => break,
-                Err(err) => {
-                    return Err(anyhow::Error::new(err).context("failed to read control request"));
-                }
+    let handshake_start = Instant::now();
+
+    let tokens = core.tokens();
+    let (accepted, response_text, claims, token) = if protocol_version != CONTROL_PROTOCOL_VERSION {
+        (
+            false,
+            format!("unsupported control protocol version {}", protocol_version),
+            None,
+            None,
+        )
+    } else {
+        match token_result {
+            Err(message) => (false, message, None, None),
+            Ok(token) if token.is_empty() => {
+                (false, "missing control token".to_string(), None, None)
             }
+            Ok(token) => match tokens.verify(&token) {
+                Ok(claims) => (true, "ok".to_string(), Some(claims), Some(token)),
+                Err(err) => {
+                    warn!("control handshake rejected due to invalid token: {}", err);
+                    (false, "invalid control token".to_string(), None, None)
+                }
+            },
+        }
+    };
+
+    let response_bytes = {
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let mut response = message.init_root::<control_hello_response::Builder>();
+            response.set_accepted(accepted);
+            response.set_message(&response_text);
+        }
+        write_message_to_words(&message)
+    };
+
+    writer
+        .write_all(&response_bytes)
+        .await
+        .context("failed to write control hello response")?;
+    writer
+        .flush()
+        .await
+        .context("failed to flush control hello response")?;
+
+    let duration = handshake_start.elapsed().as_secs_f64();
+    observability::record_capnp_control_request(
+        "hello",
+        if accepted { "accepted" } else { "rejected" },
+        duration,
+    );
+
+    if !accepted {
+        println!("control handshake rejected: {}", response_text);
+        return Ok(());
+    }
+
+    if let Some(claims) = &claims {
+        debug!(
+            subject = %claims.sub,
+            token_group = %claims.group,
+            token_user = %claims.user,
+            "control handshake accepted"
+        );
+    }
+
+    let token = token.expect("token must be present when handshake accepted");
+    println!(
+        "control handshake accepted for token subject {}",
+        claims.as_ref().map(|c| c.sub.as_str()).unwrap_or("unknown")
+    );
+    let noise = perform_server_handshake(reader, writer, token.as_bytes())
+        .await
+        .context("failed to establish encrypted control channel")?;
+
+    handle_control_session_encrypted(reader, writer, noise, core, shared_config).await
+}
+
+fn classify_first_message(message: capnp::message::Reader<OwnedSegments>) -> FirstMessage {
+    if message
+        .get_root::<cli_request::Reader>()
+        .and_then(|request| request.get_args())
+        .is_ok()
+    {
+        return FirstMessage::Cli(message);
+    }
+
+    if let Ok(hello) = message.get_root::<control_hello::Reader>() {
+        let token_result = hello
+            .get_token()
+            .map_err(|err| format!("failed to read control token: {err}"))
+            .and_then(|reader| {
+                reader
+                    .to_str()
+                    .map_err(|err| format!("invalid UTF-8 in control token: {err}"))
+                    .map(|value| value.trim().to_string())
+            });
+        return FirstMessage::Control {
+            protocol_version: hello.get_protocol_version(),
+            token_result,
         };
+    }
+
+    FirstMessage::Other(message)
+}
+
+async fn handle_control_session_encrypted<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    mut noise: TransportState,
+    core: CoreContext,
+    shared_config: Arc<RwLock<Config>>,
+) -> Result<()>
+where
+    R: futures::AsyncRead + Unpin,
+    W: futures::AsyncWrite + Unpin,
+{
+    loop {
+        let request_bytes = match read_encrypted_frame(reader, &mut noise).await? {
+            Some(bytes) => bytes,
+            None => break,
+        };
+        let mut cursor = Cursor::new(&request_bytes);
+        let message = capnp::serialize::read_message(&mut cursor, ReaderOptions::new())
+            .context("failed to decode control request")?;
 
         let request = message
             .get_root::<control_request::Reader>()
@@ -577,14 +685,9 @@ where
             write_message_to_words(&response_message)
         };
 
-        writer
-            .write_all(&response_bytes)
+        write_encrypted_frame(writer, &mut noise, &response_bytes)
             .await
-            .context("failed to write control response")?;
-        writer
-            .flush()
-            .await
-            .context("failed to flush control response")?;
+            .context("failed to send control response")?;
     }
 
     Ok(())
@@ -1314,8 +1417,6 @@ async fn handle_replication_session<R, W>(
     reader: &mut R,
     writer: &mut W,
     core: CoreContext,
-    local_public_key: Arc<Vec<u8>>,
-    local_private_key: Arc<Vec<u8>>,
 ) -> Result<()>
 where
     R: futures::AsyncRead + Unpin,
@@ -1325,31 +1426,40 @@ where
         .get_root::<replication_hello::Reader>()
         .context("failed to decode replication hello")?;
     let protocol_version = hello.get_protocol_version();
-    let expected_key = hello
-        .get_expected_public_key()
-        .map_err(|err| anyhow!("failed to read handshake public key: {err}"))?
-        .to_vec();
+    let token_reader = hello
+        .get_token()
+        .map_err(|err| anyhow!("failed to read replication token: {err}"))?;
+    let token = token_reader
+        .to_str()
+        .map_err(|err| anyhow!("invalid UTF-8 in replication token: {err}"))?
+        .trim()
+        .to_string();
 
     let handshake_start = Instant::now();
 
-    let (accepted, response_text) = if protocol_version != REPLICATION_PROTOCOL_VERSION {
+    let tokens = core.tokens();
+    let (accepted, response_text, claims) = if protocol_version != REPLICATION_PROTOCOL_VERSION {
         (
             false,
             format!(
                 "unsupported replication protocol version {}",
                 protocol_version
             ),
+            None,
         )
-    } else if expected_key.is_empty() {
-        (
-            false,
-            "missing expected public key in replication handshake".to_string(),
-        )
-    } else if expected_key != *local_public_key {
-        warn!("replication handshake rejected due to pinned key mismatch");
-        (false, "pinned public key mismatch".to_string())
+    } else if token.is_empty() {
+        (false, "missing replication token".to_string(), None)
     } else {
-        (true, "ok".to_string())
+        match tokens.verify(&token) {
+            Ok(claims) => (true, "ok".to_string(), Some(claims)),
+            Err(err) => {
+                warn!(
+                    "replication handshake rejected due to invalid token: {}",
+                    err
+                );
+                (false, "invalid replication token".to_string(), None)
+            }
+        }
     };
 
     let handshake_bytes = {
@@ -1382,7 +1492,16 @@ where
         return Ok(());
     }
 
-    let mut noise = perform_server_handshake(reader, writer, local_private_key.as_slice())
+    if let Some(claims) = claims {
+        debug!(
+            subject = %claims.sub,
+            token_group = %claims.group,
+            token_user = %claims.user,
+            "replication handshake accepted"
+        );
+    }
+
+    let mut noise = perform_server_handshake(reader, writer, token.as_bytes())
         .await
         .context("failed to establish encrypted replication channel")?;
 

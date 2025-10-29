@@ -126,7 +126,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
        --field status=active
      ```
    - If the server is stopped, the same CLI command writes to the local RocksDB store directly.
-   - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort created_at:desc --take 5` or drill into the payload of a specific event via `dbx event <snowflake_id> --json`.
+   - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort created_at:desc --take 5` or drill into the payload of a specific event via `dbx events <snowflake_id> --json`.
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
 
@@ -223,8 +223,8 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 
 - `dbx events [--aggregate <type>] [--aggregate-id <id>] [--skip <n>] [--take <n>] [--filter <expr>] [--sort <field[:order],...>] [--json] [--include-archived|--archived-only]`  
   Streams events with optional aggregate scoping, SQL-like filters (e.g. `payload.status = "open" AND metadata.note LIKE "retry%"`), and multi-key sorting. Prefix fields with `payload.`, `metadata.`, or `extensions.` to target nested JSON; `created_at`, `event_id`, `version`, and other top-level keys are also available.
-- `dbx event <snowflake_id> [--json]`  
-  Displays a single event by Snowflake identifier, including payload, metadata, and extensions.
+- `dbx events --event <snowflake_id> [--json]`  
+  Displays a single event by Snowflake identifier, including payload, metadata, and extensions. You can also omit `--event` when the first positional argument is a valid Snowflake id.
 - `dbx aggregate export [<type>] [--all] --output <path> [--format csv|json] [--zip] [--pretty]`  
   Writes the current aggregate state (no metadata) as CSV or JSON. Exports default to one file per aggregate type; pass `--zip` to bundle the output into an archive.
 
@@ -278,22 +278,20 @@ Plugins consume jobs from a durable RocksDB-backed queue. EventDBX enqueues a jo
 
 ### Replication
 
-- `dbx remote add <name> <ip> --public-key <base64> [--port <n>]`  
-  Registers a standby and pins its Ed25519 public key. The CLI formats the IP and port into a `tcp://` endpoint (default port `6363`).
+- `dbx remote add <name> <ip> --token <jwt> [--port <n>]`
+  Registers a standby and stores the replication access token issued by the primary. The CLI formats the IP and port into a `tcp://` endpoint (default port `6363`).
 - `dbx remote rm <name>`  
   Removes a configured remote.
 - `dbx remote ls`  
   Lists remotes with their endpoints.
 - `dbx remote show <name>`  
-  Displays the endpoint and pinned key for a remote.
-- `dbx remote key [--show-path]`  
-  Prints this node's replication public key (generated on first run).
+  Displays the endpoint and a shortened token fingerprint for a remote.
 - `dbx push <name> [<domain>] [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
   Streams local events to the remote in fast-forward mode; dry runs report pending changes.
 - `dbx pull <name> [<domain>] [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
   Fast-forwards the local node from the remote, reporting changes in dry-run mode.
 
-Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. Pass an optional `<domain>` argument to operate on a different local domain than the currently active one; omit it to inherit the existing checkout. The Cap'n Proto listener that powers CLI automation and replication defaults to `[socket].bind_addr` (default `0.0.0.0:6363`); point remotes at that address with a `tcp://` endpoint or override the bind address in `config.toml` when you expose the replica on another interface. The `dbx push` and `dbx pull` commands connect over this socket—no gRPC listener is required—and every session is authenticated with the remote's pinned Ed25519 public key. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
+Replication relies on JWT access tokens issued through `dbx token issue` (for example, grant `replication.*` or `*.*` actions). Share that token with trusted peers and store it with the remote configuration; it doubles as the symmetric key for the Noise channel that encrypts replication traffic. Pass an optional `<domain>` argument to operate on a different local domain than the currently active one; omit it to inherit the existing checkout. The Cap'n Proto listener that powers CLI automation and replication defaults to `[socket].bind_addr` (default `0.0.0.0:6363`); point remotes at that address with a `tcp://` endpoint or override the bind address in `config.toml` when you expose the replica on another interface. The `dbx push` and `dbx pull` commands connect over this socket—no gRPC listener is required—and every session is authenticated with the presenting token. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
 
 ### Admin API
 

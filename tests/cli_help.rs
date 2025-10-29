@@ -156,11 +156,11 @@ const HELP_CASES: &[HelpCase] = &[
     },
     HelpCase {
         path: &["events"],
-        expected_snippet: "List events in the store",
+        expected_snippet: "List events in the store or inspect a specific event",
     },
     HelpCase {
-        path: &["event"],
-        expected_snippet: "Inspect a single event by Snowflake identifier",
+        path: &["events"],
+        expected_snippet: "-e, --event <EVENT_ID>",
     },
     HelpCase {
         path: &["aggregate"],
@@ -245,10 +245,6 @@ const HELP_CASES: &[HelpCase] = &[
     HelpCase {
         path: &["remote", "show"],
         expected_snippet: "Show details for a remote",
-    },
-    HelpCase {
-        path: &["remote", "key"],
-        expected_snippet: "Display this node's replication public key",
     },
     HelpCase {
         path: &["backup"],

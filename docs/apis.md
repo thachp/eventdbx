@@ -106,11 +106,11 @@ The service mirrors REST operations: `AppendEvent`, `ListAggregates`, `GetAggreg
 
 ## Replication socket
 
-`dbx push` and `dbx pull` connect over the Cap'n Proto socket defined in `[socket].bind_addr` (default `0.0.0.0:6363`). Remotes authenticate using pinned Ed25519 public keys:
+`dbx push` and `dbx pull` connect over the Cap'n Proto socket defined in `[socket].bind_addr` (default `0.0.0.0:6363`). Remotes authenticate with replication access tokens:
 
 ```bash
 dbx remote add standby1 10.10.0.5 \
-  --public-key $(dbx remote key) \
+  --token "$(cat standby1.token)" \
   --port 6363
 ```
 
@@ -139,7 +139,7 @@ curl -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
 
 curl -X POST -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
   -H "Content-Type: application/json" \
-  -d '{"name":"standby1","endpoint":"tcp://10.10.0.5:6363","public_key":"BASE64"}' \
+  -d '{"name":"standby1","endpoint":"tcp://10.10.0.5:6363","token":"JWT"}' \
   http://127.0.0.1:7070/admin/remotes/standby1
 ```
 
