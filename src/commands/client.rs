@@ -34,7 +34,7 @@ impl ServerClient {
         payload: &Value,
         metadata: Option<&Value>,
         note: Option<&str>,
-    ) -> Result<AggregateState> {
+    ) -> Result<Option<AggregateState>> {
         let connect_addr = self.connect_addr.clone();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
@@ -80,7 +80,7 @@ impl ServerClient {
         payload: Option<&Value>,
         metadata: Option<&Value>,
         note: Option<&str>,
-    ) -> Result<EventRecord> {
+    ) -> Result<Option<EventRecord>> {
         let connect_addr = self.connect_addr.clone();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
@@ -126,7 +126,7 @@ impl ServerClient {
         patch: &Value,
         metadata: Option<&Value>,
         note: Option<&str>,
-    ) -> Result<EventRecord> {
+    ) -> Result<Option<EventRecord>> {
         let connect_addr = self.connect_addr.clone();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
@@ -173,7 +173,7 @@ fn create_aggregate_blocking(
     payload: Value,
     metadata: Option<Value>,
     note: Option<String>,
-) -> Result<AggregateState> {
+) -> Result<Option<AggregateState>> {
     let mut stream = TcpStream::connect(&connect_addr)
         .with_context(|| format!("failed to connect to CLI proxy at {}", connect_addr))?;
     stream
@@ -247,9 +247,13 @@ fn create_aggregate_blocking(
     {
         payload::CreateAggregate(Ok(create)) => {
             let aggregate_json = read_text(create.get_aggregate_json(), "aggregate_json")?;
-            let state: AggregateState = serde_json::from_str(&aggregate_json)
-                .context("failed to parse create response payload")?;
-            Ok(state)
+            if aggregate_json.trim().is_empty() {
+                Ok(None)
+            } else {
+                let state: AggregateState = serde_json::from_str(&aggregate_json)
+                    .context("failed to parse create response payload")?;
+                Ok(Some(state))
+            }
         }
         payload::CreateAggregate(Err(err)) => Err(anyhow!(
             "failed to decode create_aggregate payload from CLI proxy: {}",
@@ -279,7 +283,7 @@ fn append_event_blocking(
     payload: Option<Value>,
     metadata: Option<Value>,
     note: Option<String>,
-) -> Result<EventRecord> {
+) -> Result<Option<EventRecord>> {
     let mut stream = TcpStream::connect(&connect_addr)
         .with_context(|| format!("failed to connect to CLI proxy at {}", connect_addr))?;
     stream
@@ -356,9 +360,13 @@ fn append_event_blocking(
     {
         payload::AppendEvent(Ok(append)) => {
             let event_json = read_text(append.get_event_json(), "event_json")?;
-            let record: EventRecord = serde_json::from_str(&event_json)
-                .context("failed to parse append response payload")?;
-            Ok(record)
+            if event_json.trim().is_empty() {
+                Ok(None)
+            } else {
+                let record: EventRecord = serde_json::from_str(&event_json)
+                    .context("failed to parse append response payload")?;
+                Ok(Some(record))
+            }
         }
         payload::AppendEvent(Err(err)) => Err(anyhow!(
             "failed to decode append_event payload from CLI proxy: {}",
@@ -388,7 +396,7 @@ fn patch_event_blocking(
     patch: Value,
     metadata: Option<Value>,
     note: Option<String>,
-) -> Result<EventRecord> {
+) -> Result<Option<EventRecord>> {
     let mut stream = TcpStream::connect(&connect_addr)
         .with_context(|| format!("failed to connect to CLI proxy at {}", connect_addr))?;
     stream
@@ -462,9 +470,13 @@ fn patch_event_blocking(
     {
         payload::AppendEvent(Ok(append)) => {
             let event_json = read_text(append.get_event_json(), "event_json")?;
-            let record: EventRecord = serde_json::from_str(&event_json)
-                .context("failed to parse patch response payload")?;
-            Ok(record)
+            if event_json.trim().is_empty() {
+                Ok(None)
+            } else {
+                let record: EventRecord = serde_json::from_str(&event_json)
+                    .context("failed to parse patch response payload")?;
+                Ok(Some(record))
+            }
         }
         payload::AppendEvent(Err(err)) => Err(anyhow!(
             "failed to decode append_event payload from CLI proxy: {}",

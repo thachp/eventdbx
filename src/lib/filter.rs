@@ -382,7 +382,6 @@ fn matches_missing(op: &ComparisonOp) -> bool {
     matches!(op, ComparisonOp::NotEquals(FilterValue::Null))
 }
 
-
 impl fmt::Display for FilterValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

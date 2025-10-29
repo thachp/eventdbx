@@ -9,7 +9,7 @@ use crate::{
         ActorClaims, AggregateQueryScope, AggregateSort, AggregateState, AppendEvent, EventRecord,
         EventStore, select_state_field,
     },
-    token::TokenManager,
+    token::{JwtClaims, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
         ensure_payload_size, ensure_snake_case,
@@ -86,28 +86,37 @@ impl CoreContext {
 
     pub fn list_aggregates(
         &self,
+        token: &str,
         skip: usize,
         take: Option<usize>,
         filter: Option<FilterExpr>,
         sort: Option<&[AggregateSort]>,
         scope: AggregateQueryScope,
-    ) -> Vec<AggregateState> {
+    ) -> Result<Vec<AggregateState>> {
         let mut effective_take = take.unwrap_or(self.list_page_size);
         if effective_take == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if effective_take > self.page_limit {
             effective_take = self.page_limit;
         }
 
+        let claims: JwtClaims = self
+            .tokens()
+            .authorize_action(token, "aggregate.read", None)?;
         let filter_ref = filter.as_ref();
-        self.store.aggregates_paginated_with_transform(
+        let aggregates = self.store.aggregates_paginated_with_transform(
             skip,
             Some(effective_take),
             sort,
             scope,
             |aggregate| {
                 if self.is_hidden_aggregate(&aggregate.aggregate_type) {
+                    return None;
+                }
+                let resource =
+                    Self::aggregate_resource(&aggregate.aggregate_type, &aggregate.aggregate_id);
+                if !claims.allows_resource(Some(resource.as_str())) {
                     return None;
                 }
                 let sanitized = self.sanitize_aggregate(aggregate);
@@ -118,14 +127,20 @@ impl CoreContext {
                 }
                 Some(sanitized)
             },
-        )
+        );
+        Ok(aggregates)
     }
 
     pub fn get_aggregate(
         &self,
+        token: &str,
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Option<AggregateState>> {
+        let resource = Self::aggregate_resource(aggregate_type, aggregate_id);
+        self.tokens()
+            .authorize_action(token, "aggregate.read", Some(resource.as_str()))?;
+
         if self.is_hidden_aggregate(aggregate_type) {
             return Ok(None);
         }
@@ -138,10 +153,15 @@ impl CoreContext {
 
     pub fn select_aggregate_fields(
         &self,
+        token: &str,
         aggregate_type: &str,
         aggregate_id: &str,
         fields: &[String],
     ) -> Result<Option<BTreeMap<String, Value>>> {
+        let resource = Self::aggregate_resource(aggregate_type, aggregate_id);
+        self.tokens()
+            .authorize_action(token, "aggregate.read", Some(resource.as_str()))?;
+
         if self.is_hidden_aggregate(aggregate_type) {
             return Ok(None);
         }
@@ -167,11 +187,16 @@ impl CoreContext {
 
     pub fn list_events(
         &self,
+        token: &str,
         aggregate_type: &str,
         aggregate_id: &str,
         skip: usize,
         take: Option<usize>,
     ) -> Result<Vec<EventRecord>> {
+        let resource = Self::aggregate_resource(aggregate_type, aggregate_id);
+        self.tokens()
+            .authorize_action(token, "aggregate.read", Some(resource.as_str()))?;
+
         if self.is_hidden_aggregate(aggregate_type) {
             return Err(EventError::AggregateNotFound);
         }
@@ -402,6 +427,10 @@ impl CoreContext {
             note,
         })?;
         Ok(record)
+    }
+
+    fn aggregate_resource(aggregate_type: &str, aggregate_id: &str) -> String {
+        format!("aggregate:{}:{}", aggregate_type, aggregate_id)
     }
 
     fn filter_state_map(

@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, env, fs, path::{Path, PathBuf}};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use base64::{
     Engine as _,
@@ -120,6 +124,8 @@ pub struct Config {
     pub socket: SocketConfig,
     #[serde(default)]
     pub admin: AdminApiConfig,
+    #[serde(default = "default_verbose_responses")]
+    pub verbose_responses: bool,
     #[serde(default)]
     pub auth: AuthConfig,
     #[serde(default = "default_snowflake_worker_id")]
@@ -147,6 +153,7 @@ impl Default for Config {
             remotes: BTreeMap::new(),
             socket: SocketConfig::default(),
             admin: AdminApiConfig::default(),
+            verbose_responses: default_verbose_responses(),
             auth: AuthConfig::default(),
             snowflake_worker_id: default_snowflake_worker_id(),
         }
@@ -163,6 +170,7 @@ pub struct ConfigUpdate {
     pub restrict: Option<RestrictMode>,
     pub list_page_size: Option<usize>,
     pub page_limit: Option<usize>,
+    pub verbose_responses: Option<bool>,
     pub plugin_max_attempts: Option<u32>,
     pub socket: Option<SocketConfigUpdate>,
     pub admin: Option<AdminApiConfigUpdate>,
@@ -263,6 +271,9 @@ impl Config {
         }
         if let Some(page_limit) = update.page_limit {
             self.page_limit = page_limit;
+        }
+        if let Some(verbose_responses) = update.verbose_responses {
+            self.verbose_responses = verbose_responses;
         }
         if let Some(max_attempts) = update.plugin_max_attempts {
             self.plugin_max_attempts = max_attempts.max(1);
@@ -502,6 +513,10 @@ impl Config {
         self.data_dir.join("eventdbx.pid")
     }
 
+    pub fn verbose_responses(&self) -> bool {
+        self.verbose_responses
+    }
+
     pub fn is_initialized(&self) -> bool {
         self.data_encryption_key
             .as_ref()
@@ -730,6 +745,10 @@ fn default_admin_port() -> Option<u16> {
     Some(7171)
 }
 
+fn default_verbose_responses() -> bool {
+    true
+}
+
 fn deserialize_restrict_mode<'de, D>(deserializer: D) -> std::result::Result<RestrictMode, D::Error>
 where
     D: Deserializer<'de>,
@@ -937,6 +956,18 @@ mod tests {
             ..ConfigUpdate::default()
         });
         assert_eq!(config.snapshot_threshold, None);
+    }
+
+    #[test]
+    fn applies_verbose_response_updates() {
+        let mut config = Config::default();
+        assert!(config.verbose_responses());
+
+        config.apply_update(ConfigUpdate {
+            verbose_responses: Some(false),
+            ..ConfigUpdate::default()
+        });
+        assert!(!config.verbose_responses());
     }
 
     #[derive(Deserialize)]

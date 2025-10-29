@@ -55,6 +55,19 @@ async fn control_capnp_regression_flows() -> Result<()> {
         spawn_control_session(core.clone(), Arc::clone(&shared_config));
 
     let mut next_request_id: u64 = 1;
+    let token_record = tokens.issue(IssueTokenInput {
+        subject: "system:admin".into(),
+        group: "system".into(),
+        user: "admin".into(),
+        root: true,
+        actions: Vec::new(),
+        resources: Vec::new(),
+        ttl_secs: Some(3_600),
+        not_before: None,
+        issued_by: "control-test".into(),
+        limits: JwtLimits::default(),
+    })?;
+    let token_value = token_record.token.clone();
 
     let aggregates: Vec<Value> = send_control_request(
         &mut writer,
@@ -63,6 +76,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
             list.set_skip(0);
             list.set_take(0);
             list.set_has_take(false);
@@ -94,19 +108,6 @@ async fn control_capnp_regression_flows() -> Result<()> {
     .await?;
     assert!(aggregates.is_empty());
     next_request_id += 1;
-
-    let token_record = tokens.issue(IssueTokenInput {
-        subject: "system:admin".into(),
-        group: "system".into(),
-        user: "admin".into(),
-        root: true,
-        actions: Vec::new(),
-        resources: Vec::new(),
-        ttl_secs: Some(3_600),
-        not_before: None,
-        issued_by: "control-test".into(),
-        limits: JwtLimits::default(),
-    })?;
 
     let event_record: Value = send_control_request(
         &mut writer,
@@ -201,6 +202,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
             list.set_skip(0);
             list.set_take(10);
             list.set_has_take(true);
@@ -242,6 +244,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
             list.set_skip(0);
             list.set_take(10);
             list.set_has_take(true);
@@ -284,6 +287,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut get = payload.init_get_aggregate();
+            get.set_token(&token_value);
             get.set_aggregate_type("order");
             get.set_aggregate_id("order-1");
         },
@@ -368,6 +372,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_events();
+            list.set_token(&token_value);
             list.set_aggregate_type("order");
             list.set_aggregate_id("order-1");
             list.set_skip(0);
@@ -442,6 +447,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut get = payload.init_get_aggregate();
+            get.set_token(&token_value);
             get.set_aggregate_type("inventory");
             get.set_aggregate_id("sku-1");
         },
@@ -572,6 +578,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         issued_by: "control-batch-test".into(),
         limits: JwtLimits::default(),
     })?;
+    let token_value = token_record.token.clone();
 
     let missing_patch_error = send_control_request(
         &mut writer,
@@ -783,6 +790,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_events();
+            list.set_token(&token_value);
             list.set_aggregate_type("order");
             list.set_aggregate_id("order-1");
             list.set_skip(0);
@@ -832,6 +840,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut get = payload.init_get_aggregate();
+            get.set_token(&token_value);
             get.set_aggregate_type("order");
             get.set_aggregate_id("order-1");
         },
@@ -890,6 +899,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut select = payload.init_select_aggregate();
+            select.set_token(&token_value);
             select.set_aggregate_type("order");
             select.set_aggregate_id("order-1");
             let mut fields = select.reborrow().init_fields(3);
@@ -981,6 +991,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
             list.set_skip(0);
             list.set_take(10);
             list.set_has_take(true);
@@ -1025,6 +1036,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
             list.set_skip(0);
             list.set_take(10);
             list.set_has_take(true);
@@ -1114,6 +1126,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
             list.set_skip(0);
             list.set_take(10);
             list.set_has_take(true);

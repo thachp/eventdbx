@@ -760,13 +760,17 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 true,
                 args.comment.clone(),
             )?;
-            println!(
-                "aggregate_type={} aggregate_id={} archived={} comment={}",
-                meta.aggregate_type,
-                meta.aggregate_id,
-                meta.archived,
-                args.comment.unwrap_or_default()
-            );
+            if config.verbose_responses() {
+                println!(
+                    "aggregate_type={} aggregate_id={} archived={} comment={}",
+                    meta.aggregate_type,
+                    meta.aggregate_id,
+                    meta.archived,
+                    args.comment.unwrap_or_default()
+                );
+            } else {
+                println!("Ok");
+            }
         }
         AggregateCommands::Restore(args) => {
             let store = EventStore::open(
@@ -780,13 +784,17 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 false,
                 args.comment.clone(),
             )?;
-            println!(
-                "aggregate_type={} aggregate_id={} archived={} comment={}",
-                meta.aggregate_type,
-                meta.aggregate_id,
-                meta.archived,
-                args.comment.unwrap_or_default()
-            );
+            if config.verbose_responses() {
+                println!(
+                    "aggregate_type={} aggregate_id={} archived={} comment={}",
+                    meta.aggregate_type,
+                    meta.aggregate_id,
+                    meta.archived,
+                    args.comment.unwrap_or_default()
+                );
+            } else {
+                println!("Ok");
+            }
         }
         AggregateCommands::Commit => {
             let staging_path = config.staging_path();
@@ -942,6 +950,8 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
         json,
     } = command;
 
+    let verbose = config.verbose_responses();
+
     if let Some(ref note_value) = note {
         if note_value.chars().count() > MAX_EVENT_NOTE_LENGTH {
             bail!("note cannot exceed {} characters", MAX_EVENT_NOTE_LENGTH);
@@ -1017,13 +1027,17 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
             }
 
             let state = store.get_aggregate_state(&aggregate, &aggregate_id)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&state)?);
+            if verbose {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&state)?);
+                } else {
+                    println!(
+                        "aggregate_type={} aggregate_id={} version={} archived={}",
+                        state.aggregate_type, state.aggregate_id, state.version, state.archived
+                    );
+                }
             } else {
-                println!(
-                    "aggregate_type={} aggregate_id={} version={} archived={}",
-                    state.aggregate_type, state.aggregate_id, state.version, state.archived
-                );
+                println!("Ok");
             }
             Ok(())
         }
@@ -1038,13 +1052,21 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
                 metadata.as_ref(),
                 note.as_deref(),
             )?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&state)?);
+            if verbose {
+                if let Some(state) = state {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&state)?);
+                    } else {
+                        println!(
+                            "aggregate_type={} aggregate_id={} version={} archived={}",
+                            state.aggregate_type, state.aggregate_id, state.version, state.archived
+                        );
+                    }
+                } else {
+                    println!("Ok");
+                }
             } else {
-                println!(
-                    "aggregate_type={} aggregate_id={} version={} archived={}",
-                    state.aggregate_type, state.aggregate_id, state.version, state.archived
-                );
+                println!("Ok");
             }
             Ok(())
         }
@@ -1076,6 +1098,8 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
         metadata,
         note,
     } = command;
+
+    let verbose = config.verbose_responses();
 
     if let Some(ref note_value) = note {
         if note_value.chars().count() > MAX_EVENT_NOTE_LENGTH {
@@ -1218,7 +1242,11 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
             })?;
 
             maybe_auto_snapshot(&store, &schema_manager, &record);
-            println!("{}", serde_json::to_string_pretty(&record)?);
+            if verbose {
+                println!("{}", serde_json::to_string_pretty(&record)?);
+            } else {
+                println!("Ok");
+            }
 
             if !plugins.is_empty() {
                 let schema = schema_manager.get(&record.aggregate_type).ok();
@@ -1256,7 +1284,15 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 metadata.as_ref(),
                 note.as_deref(),
             )?;
-            println!("{}", serde_json::to_string_pretty(&record)?);
+            if verbose {
+                if let Some(record) = record {
+                    println!("{}", serde_json::to_string_pretty(&record)?);
+                } else {
+                    println!("Ok");
+                }
+            } else {
+                println!("Ok");
+            }
             Ok(())
         }
         Err(err) => Err(err.into()),
@@ -1273,7 +1309,7 @@ fn proxy_append_via_socket(
     patch: Option<&Value>,
     metadata: Option<&Value>,
     note: Option<&str>,
-) -> Result<EventRecord> {
+) -> Result<Option<EventRecord>> {
     let token = ensure_proxy_token(config, token)?;
     let client = ServerClient::new(config)?;
     let record = if let Some(patch_value) = patch {
@@ -1323,7 +1359,7 @@ fn proxy_create_via_socket(
     payload: &Value,
     metadata: Option<&Value>,
     note: Option<&str>,
-) -> Result<AggregateState> {
+) -> Result<Option<AggregateState>> {
     let token = ensure_proxy_token(config, token)?;
     let client = ServerClient::new(config)?;
     let state = client

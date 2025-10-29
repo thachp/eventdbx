@@ -347,6 +347,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         restrict: Some(args.restrict.into()),
         list_page_size: None,
         page_limit: None,
+        verbose_responses: None,
         plugin_max_attempts: None,
         socket: None,
         admin: None,

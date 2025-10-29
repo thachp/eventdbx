@@ -40,6 +40,7 @@ struct ListAggregatesRequest {
   hasSort @6 :Bool;
   includeArchived @7 :Bool;
   archivedOnly @8 :Bool;
+  token @9 :Text;
 }
 
 struct ListAggregatesResponse {
@@ -49,6 +50,7 @@ struct ListAggregatesResponse {
 struct GetAggregateRequest {
   aggregateType @0 :Text;
   aggregateId @1 :Text;
+  token @2 :Text;
 }
 
 struct GetAggregateResponse {
@@ -64,6 +66,7 @@ struct ListEventsRequest {
   hasTake @4 :Bool;
   filter @5 :Text;
   hasFilter @6 :Bool;
+  token @7 :Text;
 }
 
 struct ListEventsResponse {
@@ -111,6 +114,7 @@ struct SelectAggregateRequest {
   aggregateType @0 :Text;
   aggregateId @1 :Text;
   fields @2 :List(Text);
+  token @3 :Text;
 }
 
 struct SelectAggregateResponse {
