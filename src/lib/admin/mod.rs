@@ -102,8 +102,6 @@ struct IssueTokenRequest {
     #[serde(default)]
     subject: Option<String>,
     #[serde(default)]
-    root: bool,
-    #[serde(default)]
     actions: Vec<String>,
     #[serde(default)]
     resources: Vec<String>,
@@ -126,7 +124,6 @@ async fn issue_token(
         group,
         user,
         subject,
-        root,
         actions,
         mut resources,
         ttl_secs,
@@ -135,9 +132,9 @@ async fn issue_token(
         keep_alive,
     } = request;
 
-    if !root && actions.is_empty() {
+    if actions.is_empty() {
         return Err(EventError::Config(
-            "actions must be provided for non-root tokens".to_string(),
+            "actions must be provided when issuing a token".to_string(),
         ));
     }
 
@@ -149,7 +146,6 @@ async fn issue_token(
         subject: subject.unwrap_or_else(|| format!("{}:{}", group, user)),
         group,
         user,
-        root,
         actions,
         resources,
         ttl_secs,

@@ -33,9 +33,6 @@ pub struct TokenGenerateArgs {
     #[arg(long)]
     pub subject: Option<String>,
 
-    #[arg(long)]
-    pub root: bool,
-
     #[arg(long = "action", value_name = "ACTION")]
     pub actions: Vec<String>,
 
@@ -106,8 +103,8 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
     match command {
         TokenCommands::Generate(args) => {
             ensure_secrets_configured(&config)?;
-            if !args.root && args.actions.is_empty() {
-                bail!("at least one --action must be provided for non-root tokens");
+            if args.actions.is_empty() {
+                bail!("at least one --action must be provided");
             }
             let subject = args
                 .subject
@@ -123,7 +120,6 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
                 subject,
                 group: args.group,
                 user: args.user,
-                root: args.root,
                 actions: args.actions.clone(),
                 resources,
                 ttl_secs: args.ttl,
@@ -201,13 +197,12 @@ fn print_record(record: &TokenRecord) {
         record.resources.join(",")
     };
     println!(
-        "token={}\n  jti={}\n  subject={}\n  group={}\n  user={}\n  root={}\n  status={:?}\n  issued_by={}\n  issued_at={}\n  expires_at={}\n  actions=[{}]\n  resources=[{}]",
+        "token={}\n  jti={}\n  subject={}\n  group={}\n  user={}\n  status={:?}\n  issued_by={}\n  issued_at={}\n  expires_at={}\n  actions=[{}]\n  resources=[{}]",
         record.token,
         record.jti,
         record.subject,
         record.group,
         record.user,
-        record.root,
         record.status,
         record.issued_by,
         record.issued_at.to_rfc3339(),

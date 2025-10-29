@@ -292,7 +292,7 @@ dbx config \
   --admin-port 7171
 ```
 
-Authorization uses the same JWTs as the CLI. The first server start writes a root token to `~/.eventdbx/cli.token`; reuse it (or mint a dedicated token with `dbx token generate --root`) and attach it as a bearer credential:
+Authorization uses the same JWTs as the CLI. The first server start writes a token with full privileges to `~/.eventdbx/cli.token`; reuse it (or mint a dedicated token with `dbx token generate --group ops --user admin --action '*.*' --resource '*'`) and attach it as a bearer credential:
 
 ```bash
 curl -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \

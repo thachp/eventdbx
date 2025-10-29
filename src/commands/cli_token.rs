@@ -35,9 +35,8 @@ pub fn ensure_bootstrap_token(config: &Config) -> Result<String> {
         subject: BOOTSTRAP_SUBJECT.to_string(),
         group: BOOTSTRAP_GROUP.to_string(),
         user: BOOTSTRAP_USER.to_string(),
-        root: true,
-        actions: Vec::new(),
-        resources: Vec::new(),
+        actions: vec![ROOT_ACTION.to_string()],
+        resources: vec![ROOT_RESOURCE.to_string()],
         ttl_secs: Some(0),
         not_before: None,
         issued_by: BOOTSTRAP_ISSUER.to_string(),
@@ -85,7 +84,7 @@ fn load_existing_token(config: &Config, manager: &TokenManager) -> Result<Option
     let record = manager
         .list()?
         .into_iter()
-        .find(|record| record.token == trimmed && record.root);
+        .find(|record| record.token == trimmed);
     let Some(record) = record else {
         return Ok(None);
     };

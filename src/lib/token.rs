@@ -102,7 +102,6 @@ pub struct IssueTokenInput {
     pub subject: String,
     pub group: String,
     pub user: String,
-    pub root: bool,
     pub actions: Vec<String>,
     pub resources: Vec<String>,
     pub ttl_secs: Option<u64>,
@@ -116,13 +115,8 @@ impl IssueTokenInput {
         if self.subject.trim().is_empty() {
             self.subject = format!("{}:{}", self.group, self.user);
         }
-        if self.root {
-            if self.actions.is_empty() {
-                self.actions = vec![ROOT_ACTION.to_string()];
-            }
-            if self.resources.is_empty() {
-                self.resources = vec![ROOT_RESOURCE.to_string()];
-            }
+        if self.resources.is_empty() {
+            self.resources = vec![ROOT_RESOURCE.to_string()];
         }
         self
     }
@@ -135,7 +129,6 @@ pub struct TokenRecord {
     pub subject: String,
     pub group: String,
     pub user: String,
-    pub root: bool,
     pub actions: Vec<String>,
     pub resources: Vec<String>,
     pub issued_at: DateTime<Utc>,
@@ -287,6 +280,12 @@ impl TokenManager {
             })
             .unwrap_or(self.default_ttl);
         let expires_at = if ttl.is_zero() { None } else { Some(now + ttl) };
+        if payload.actions.is_empty() {
+            return Err(EventError::Config(
+                "token actions must contain at least one entry".to_string(),
+            ));
+        }
+
         let claims = JwtClaims {
             iss: self.issuer.clone(),
             aud: self.audience.clone(),
@@ -297,16 +296,8 @@ impl TokenManager {
             nbf: payload.not_before.map(|ts| ts.timestamp()),
             group: payload.group.clone(),
             user: payload.user.clone(),
-            actions: if payload.root {
-                vec![ROOT_ACTION.to_string()]
-            } else {
-                payload.actions.clone()
-            },
-            resources: if payload.root {
-                vec![ROOT_RESOURCE.to_string()]
-            } else {
-                payload.resources.clone()
-            },
+            actions: payload.actions.clone(),
+            resources: payload.resources.clone(),
             issued_by: payload.issued_by.clone(),
             limits: payload.limits.clone(),
         };
@@ -320,7 +311,6 @@ impl TokenManager {
             subject: payload.subject,
             group: payload.group,
             user: payload.user,
-            root: payload.root,
             actions: claims.actions.clone(),
             resources: claims.resources.clone(),
             issued_at: now,
@@ -383,12 +373,12 @@ impl TokenManager {
             return Err(EventError::InvalidToken);
         }
 
-        let actions = if record.root && record.actions.is_empty() {
+        let actions = if record.actions.is_empty() {
             vec![ROOT_ACTION.to_string()]
         } else {
             record.actions.clone()
         };
-        let resources = if record.root && record.resources.is_empty() {
+        let resources = if record.resources.is_empty() {
             vec![ROOT_RESOURCE.to_string()]
         } else {
             record.resources.clone()
@@ -500,9 +490,16 @@ impl TokenManager {
             subject: record.subject.clone(),
             group: record.group.clone(),
             user: record.user.clone(),
-            root: record.root,
-            actions: record.actions.clone(),
-            resources: record.resources.clone(),
+            actions: if record.actions.is_empty() {
+                vec![ROOT_ACTION.to_string()]
+            } else {
+                record.actions.clone()
+            },
+            resources: if record.resources.is_empty() {
+                vec![ROOT_RESOURCE.to_string()]
+            } else {
+                record.resources.clone()
+            },
             ttl_secs,
             not_before: None,
             issued_by,

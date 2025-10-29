@@ -43,7 +43,7 @@ dbx config \
   --admin-port 7070
 ```
 
-Requests to `/admin/...` must include an `Authorization: Bearer <token>` header with a root token (see `~/.eventdbx/cli.token` or mint one via `dbx token generate --root`). Rotate credentials regularly by issuing a replacement token and revoking the old one.
+Requests to `/admin/...` must include an `Authorization: Bearer <token>` header with a token that has wildcard access (see `~/.eventdbx/cli.token` or mint one via `dbx token generate --group ops --user admin --action '*.*' --resource '*'`). Rotate credentials regularly by issuing a replacement token and revoking the old one.
 
 4. **Append your first event**
 

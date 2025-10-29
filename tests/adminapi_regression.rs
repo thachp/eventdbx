@@ -6,7 +6,7 @@ use eventdbx::{
     restrict::RestrictMode,
     schema::{CreateSchemaInput, SchemaManager},
     server,
-    token::{IssueTokenInput, JwtLimits, TokenManager},
+    token::{IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, TokenManager},
 };
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
@@ -66,9 +66,8 @@ async fn adminapi_regression() -> TestResult<()> {
             subject: "ops:admin".to_string(),
             group: "ops".to_string(),
             user: "admin".to_string(),
-            root: true,
-            actions: Vec::new(),
-            resources: Vec::new(),
+            actions: vec![ROOT_ACTION.to_string()],
+            resources: vec![ROOT_RESOURCE.to_string()],
             ttl_secs: Some(3600),
             not_before: None,
             issued_by: "adminapi-regression".to_string(),
