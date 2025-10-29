@@ -130,7 +130,7 @@ pub fn merge(config_path: Option<PathBuf>, args: DomainMergeArgs) -> Result<()> 
     Ok(())
 }
 
-fn normalize_domain_name(raw: &str) -> Result<String> {
+pub(crate) fn normalize_domain_name(raw: &str) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         bail!("domain name cannot be empty");
