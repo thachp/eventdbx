@@ -1,59 +1,38 @@
 use std::io;
 
 use anyhow::{Context, Result, anyhow, bail};
-use curve25519_dalek::{edwards::CompressedEdwardsY, montgomery::MontgomeryPoint};
-use ed25519_dalek::SigningKey;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use sha2::{Digest, Sha256};
 use snow::{TransportState, params::NoiseParams};
 
-const NOISE_PROTOCOL_NAME: &str = "Noise_NK_25519_ChaChaPoly_SHA256";
+const NOISE_PROTOCOL_NAME: &str = "Noise_NNpsk0_25519_ChaChaPoly_SHA256";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const AEAD_TAG_LEN: usize = 16;
 const HANDSHAKE_MESSAGE_MAX: usize = 1024;
 
-pub fn ed25519_public_to_x25519(public_key: &[u8]) -> Result<[u8; 32]> {
-    if public_key.len() != 32 {
-        bail!("ed25519 public key must be 32 bytes");
-    }
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(public_key);
-    let compressed = CompressedEdwardsY(bytes);
-    let point = compressed
-        .decompress()
-        .ok_or_else(|| anyhow!("failed to decompress ed25519 public key"))?;
-    let montgomery: MontgomeryPoint = point.to_montgomery();
-    Ok(montgomery.to_bytes())
-}
-
-pub fn ed25519_secret_to_x25519(secret_key: &[u8]) -> Result<[u8; 32]> {
-    if secret_key.len() != 32 {
-        bail!("ed25519 secret key must be 32 bytes");
-    }
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(secret_key);
-    let signing = SigningKey::from_bytes(&seed);
-    let mut scalar_bytes = signing.to_scalar_bytes();
-    // Clamp per RFC 7748.
-    scalar_bytes[0] &= 248;
-    scalar_bytes[31] &= 127;
-    scalar_bytes[31] |= 64;
-    Ok(scalar_bytes)
+fn derive_psk(token: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(token);
+    let digest = hasher.finalize();
+    let mut psk = [0u8; 32];
+    psk.copy_from_slice(&digest);
+    psk
 }
 
 pub async fn perform_client_handshake<R, W>(
     reader: &mut R,
     writer: &mut W,
-    remote_ed25519: &[u8],
+    token: &[u8],
 ) -> Result<TransportState>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let remote_static = ed25519_public_to_x25519(remote_ed25519)?;
     let params: NoiseParams = NOISE_PROTOCOL_NAME
         .parse()
         .context("failed to parse Noise protocol definition")?;
-    let builder = snow::Builder::new(params).remote_public_key(&remote_static);
+    let psk = derive_psk(token);
+    let builder = snow::Builder::new(params).psk(0, &psk);
     let mut state = builder
         .build_initiator()
         .context("failed to build Noise initiator")?;
@@ -81,17 +60,17 @@ where
 pub async fn perform_server_handshake<R, W>(
     reader: &mut R,
     writer: &mut W,
-    local_ed25519_secret: &[u8],
+    token: &[u8],
 ) -> Result<TransportState>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let local_static = ed25519_secret_to_x25519(local_ed25519_secret)?;
     let params: NoiseParams = NOISE_PROTOCOL_NAME
         .parse()
         .context("failed to parse Noise protocol definition")?;
-    let builder = snow::Builder::new(params).local_private_key(&local_static);
+    let psk = derive_psk(token);
+    let builder = snow::Builder::new(params).psk(0, &psk);
     let mut state = builder
         .build_responder()
         .context("failed to build Noise responder")?;

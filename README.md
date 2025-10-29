@@ -278,22 +278,20 @@ Plugins consume jobs from a durable RocksDB-backed queue. EventDBX enqueues a jo
 
 ### Replication
 
-- `dbx remote add <name> <ip> --public-key <base64> [--port <n>]`  
-  Registers a standby and pins its Ed25519 public key. The CLI formats the IP and port into a `tcp://` endpoint (default port `6363`).
+- `dbx remote add <name> <ip> --token <jwt> [--port <n>]`
+  Registers a standby and stores the replication access token issued by the primary. The CLI formats the IP and port into a `tcp://` endpoint (default port `6363`).
 - `dbx remote rm <name>`  
   Removes a configured remote.
 - `dbx remote ls`  
   Lists remotes with their endpoints.
 - `dbx remote show <name>`  
-  Displays the endpoint and pinned key for a remote.
-- `dbx remote key [--show-path]`  
-  Prints this node's replication public key (generated on first run).
+  Displays the endpoint and a shortened token fingerprint for a remote.
 - `dbx push <name> [<domain>] [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
   Streams local events to the remote in fast-forward mode; dry runs report pending changes.
 - `dbx pull <name> [<domain>] [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
   Fast-forwards the local node from the remote, reporting changes in dry-run mode.
 
-Replication keys live alongside the data directory (`replication.key` / `replication.pub`) and are created automatically the first time the CLI loads configuration. Pass an optional `<domain>` argument to operate on a different local domain than the currently active one; omit it to inherit the existing checkout. The Cap'n Proto listener that powers CLI automation and replication defaults to `[socket].bind_addr` (default `0.0.0.0:6363`); point remotes at that address with a `tcp://` endpoint or override the bind address in `config.toml` when you expose the replica on another interface. The `dbx push` and `dbx pull` commands connect over this socket—no gRPC listener is required—and every session is authenticated with the remote's pinned Ed25519 public key. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
+Replication relies on JWT access tokens issued through `dbx token issue` (for example, grant `replication.*` or `*.*` actions). Share that token with trusted peers and store it with the remote configuration; it doubles as the symmetric key for the Noise channel that encrypts replication traffic. Pass an optional `<domain>` argument to operate on a different local domain than the currently active one; omit it to inherit the existing checkout. The Cap'n Proto listener that powers CLI automation and replication defaults to `[socket].bind_addr` (default `0.0.0.0:6363`); point remotes at that address with a `tcp://` endpoint or override the bind address in `config.toml` when you expose the replica on another interface. The `dbx push` and `dbx pull` commands connect over this socket—no gRPC listener is required—and every session is authenticated with the presenting token. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
 
 ### Admin API
 

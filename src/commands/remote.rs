@@ -1,29 +1,26 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fmt,
     path::PathBuf,
+    process::Command,
     sync::Arc,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
-};
 use chrono::Utc;
 use clap::{Args, Subcommand};
 
 use eventdbx::{
     config::{Config, RemoteConfig, load_or_default},
     error::EventError,
-    replication_capnp_client::{
-        CapnpReplicationClient, decode_public_key_bytes, decode_schemas, normalize_capnp_endpoint,
-    },
+    replication_capnp_client::{CapnpReplicationClient, decode_schemas, normalize_capnp_endpoint},
     schema::{AggregateSchema, SchemaManager},
     store::{AggregatePositionEntry, EventStore},
 };
+use serde::Deserialize;
 use serde_json;
 
-use crate::commands::domain::normalize_domain_name;
+use crate::commands::{cli_token, domain::normalize_domain_name};
 
 #[derive(Subcommand)]
 pub enum RemoteCommands {
@@ -37,20 +34,18 @@ pub enum RemoteCommands {
     List(RemoteListArgs),
     /// Show details for a remote
     Show(RemoteShowArgs),
-    /// Display this node's replication public key
-    Key(RemoteKeyArgs),
 }
 
 #[derive(Args)]
 pub struct RemoteAddArgs {
     /// Remote alias (e.g. standby1)
     pub name: String,
-    /// Remote replication IP address (e.g. 10.0.0.1)
-    #[arg(value_name = "IP")]
-    pub ip: String,
-    /// Base64-encoded Ed25519 public key for the remote
-    #[arg(long = "public-key")]
-    pub public_key: String,
+    /// Remote replication target (IP or locator such as dbx@host:owner/domain.dbx)
+    #[arg(value_name = "TARGET")]
+    pub target: String,
+    /// Access token granting replication privileges on the remote (required for direct targets)
+    #[arg(long = "token")]
+    pub token: Option<String>,
     /// Remote replication port
     #[arg(long, default_value_t = 6363)]
     pub port: u16,
@@ -69,13 +64,6 @@ pub struct RemoteRemoveArgs {
 pub struct RemoteShowArgs {
     /// Remote alias to display
     pub name: String,
-}
-
-#[derive(Args, Default)]
-pub struct RemoteKeyArgs {
-    /// Also print the path to the public key file
-    #[arg(long, default_value_t = false)]
-    pub show_path: bool,
 }
 
 #[derive(Args)]
@@ -138,7 +126,6 @@ pub async fn execute(config_path: Option<PathBuf>, command: RemoteCommands) -> R
         RemoteCommands::Remove(args) => remove_remote(config_path, args),
         RemoteCommands::List(args) => list_remotes(config_path, args.json),
         RemoteCommands::Show(args) => show_remote(config_path, args),
-        RemoteCommands::Key(args) => show_local_key(config_path, args),
     }
 }
 
@@ -150,20 +137,6 @@ fn add_remote(config_path: Option<PathBuf>, args: RemoteAddArgs) -> Result<()> {
         bail!("remote name cannot be empty");
     }
 
-    let ip = args.ip.trim();
-    if ip.is_empty() {
-        bail!("remote IP address cannot be empty");
-    }
-    if ip.contains("://") {
-        bail!("remote IP address must not include a protocol scheme");
-    }
-
-    if args.port == 0 {
-        bail!("remote port must be greater than zero");
-    }
-
-    let public_key = normalize_public_key(&args.public_key)?;
-
     if config.remotes.contains_key(name) && !args.replace {
         bail!(
             "remote '{}' already exists (use --replace to overwrite)",
@@ -171,24 +144,238 @@ fn add_remote(config_path: Option<PathBuf>, args: RemoteAddArgs) -> Result<()> {
         );
     }
 
-    let endpoint = format!("tcp://{}:{}", ip, args.port);
+    let target = args.target.trim();
+    if target.is_empty() {
+        bail!("remote target cannot be empty");
+    }
+
+    let (endpoint, token, locator, remote_domain, summary_target) =
+        if let Some(locator) = RemoteLocator::parse(target) {
+            if args.token.is_some() {
+                bail!("--token cannot be supplied when using a locator target");
+            }
+            let resolved = resolve_remote_locator(&locator)?;
+            let normalized_token = normalize_token(&resolved.token)?;
+            let endpoint = resolved.endpoint.trim().to_string();
+            if endpoint.is_empty() {
+                bail!(
+                    "remote locator '{}' returned an empty endpoint",
+                    locator.display()
+                );
+            }
+            (
+                endpoint,
+                normalized_token,
+                Some(locator.to_string()),
+                resolved.remote_domain.clone(),
+                locator.to_string(),
+            )
+        } else {
+            if target.contains("://") {
+                bail!("direct remote targets must not include a protocol scheme");
+            }
+            if args.port == 0 {
+                bail!("remote port must be greater than zero");
+            }
+            let token_input = args
+                .token
+                .as_deref()
+                .ok_or_else(|| anyhow!("--token is required when adding a direct remote"))?;
+            let normalized_token = normalize_token(token_input)?;
+            let endpoint = format!("tcp://{}:{}", target, args.port);
+            (endpoint, normalized_token, None, None, target.to_string())
+        };
 
     config.remotes.insert(
         name.to_string(),
         RemoteConfig {
             endpoint: endpoint.clone(),
-            public_key: public_key.clone(),
+            token: token.clone(),
+            locator,
+            remote_domain: remote_domain.clone(),
         },
     );
     config.updated_at = Utc::now();
     config.save(&path)?;
 
-    println!(
-        "Remote '{}' set to endpoint {} with pinned key {}",
-        name, endpoint, public_key
-    );
+    let token_summary = summarize_token(&token);
+    match remote_domain {
+        Some(domain) => println!(
+            "Remote '{}' resolved '{}' to endpoint {} (domain {}) with token {}",
+            name, summary_target, endpoint, domain, token_summary
+        ),
+        None => println!(
+            "Remote '{}' resolved '{}' to endpoint {} with token {}",
+            name, summary_target, endpoint, token_summary
+        ),
+    }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct RemoteLocator {
+    original: String,
+    user: Option<String>,
+    host: String,
+    path: String,
+}
+
+impl RemoteLocator {
+    fn parse(input: &str) -> Option<Self> {
+        let trimmed = input.trim();
+        if trimmed.is_empty()
+            || trimmed.contains("://")
+            || !trimmed.contains(':')
+            || !trimmed.contains('/')
+        {
+            return None;
+        }
+
+        let (user_host, path) = trimmed.split_once(':')?;
+        if path.trim().is_empty() {
+            return None;
+        }
+
+        let (user, host) = if let Some((user, host)) = user_host.split_once('@') {
+            let host = host.trim();
+            if host.is_empty() {
+                return None;
+            }
+            let user = user.trim();
+            let user = if user.is_empty() {
+                None
+            } else {
+                Some(user.to_string())
+            };
+            (user, host.to_string())
+        } else {
+            let host = user_host.trim();
+            if host.is_empty() {
+                return None;
+            }
+            (None, host.to_string())
+        };
+
+        Some(Self {
+            original: trimmed.to_string(),
+            user,
+            host,
+            path: path.trim().to_string(),
+        })
+    }
+
+    fn destination(&self) -> String {
+        match &self.user {
+            Some(user) => format!("{}@{}", user, self.host),
+            None => self.host.clone(),
+        }
+    }
+
+    fn display(&self) -> &str {
+        &self.original
+    }
+}
+
+impl fmt::Display for RemoteLocator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.original)
+    }
+}
+
+#[derive(Debug)]
+struct RemoteLocatorResolution {
+    endpoint: String,
+    token: String,
+    remote_domain: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteLocatorAdvertisement {
+    endpoint: String,
+    token: String,
+    #[serde(default)]
+    remote_domain: Option<String>,
+}
+
+fn resolve_remote_locator(locator: &RemoteLocator) -> Result<RemoteLocatorResolution> {
+    let destination = locator.destination();
+    let output = Command::new("ssh")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg(&destination)
+        .arg("dbx")
+        .arg("remote")
+        .arg("advertise")
+        .arg("--format")
+        .arg("json")
+        .arg(&locator.path)
+        .output()
+        .with_context(|| format!("failed to invoke ssh to {}", destination))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let status = output
+            .status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".to_string());
+        bail!(
+            "locator '{}' rejected advertise request (ssh exit {}): {}",
+            locator.display(),
+            status,
+            stderr.trim()
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout).map_err(|err| {
+        anyhow!(
+            "locator '{}' returned invalid UTF-8 payload: {}",
+            locator.display(),
+            err
+        )
+    })?;
+    let payload = stdout.trim();
+    if payload.is_empty() {
+        bail!(
+            "locator '{}' returned an empty advertise payload",
+            locator.display()
+        );
+    }
+
+    let advertisement: RemoteLocatorAdvertisement =
+        serde_json::from_str(payload).with_context(|| {
+            format!(
+                "locator '{}' returned invalid JSON advertise payload",
+                locator.display()
+            )
+        })?;
+
+    let endpoint = advertisement.endpoint.trim().to_string();
+    if endpoint.is_empty() {
+        bail!(
+            "locator '{}' advertise payload omitted endpoint",
+            locator.display()
+        );
+    }
+    let token = advertisement.token.trim().to_string();
+    if token.is_empty() {
+        bail!(
+            "locator '{}' advertise payload omitted token",
+            locator.display()
+        );
+    }
+
+    let remote_domain = advertisement
+        .remote_domain
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    Ok(RemoteLocatorResolution {
+        endpoint,
+        token,
+        remote_domain,
+    })
 }
 
 fn remove_remote(config_path: Option<PathBuf>, args: RemoteRemoveArgs) -> Result<()> {
@@ -224,7 +411,14 @@ fn list_remotes(config_path: Option<PathBuf>, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&config.remotes)?);
     } else {
         for (name, remote) in &config.remotes {
-            println!("{} {}", name, remote.endpoint);
+            let mut line = format!("{} {}", name, remote.endpoint);
+            if let Some(locator) = &remote.locator {
+                line.push_str(&format!(" [{}]", locator));
+            }
+            if let Some(domain) = &remote.remote_domain {
+                line.push_str(&format!(" (domain {})", domain));
+            }
+            println!("{}", line);
         }
     }
     Ok(())
@@ -244,18 +438,12 @@ fn show_remote(config_path: Option<PathBuf>, args: RemoteShowArgs) -> Result<()>
 
     println!("name: {}", name);
     println!("endpoint: {}", remote.endpoint);
-    println!("public_key: {}", remote.public_key);
-    Ok(())
-}
-
-fn show_local_key(config_path: Option<PathBuf>, args: RemoteKeyArgs) -> Result<()> {
-    let (config, _) = load_or_default(config_path)?;
-    let key = config
-        .load_public_key()
-        .context("failed to load local replication public key")?;
-    println!("{}", key);
-    if args.show_path {
-        println!("path: {}", config.public_key_path().display());
+    println!("token: {}", summarize_token(&remote.token));
+    if let Some(locator) = &remote.locator {
+        println!("locator: {}", locator);
+    }
+    if let Some(domain) = &remote.remote_domain {
+        println!("remote_domain: {}", domain);
     }
     Ok(())
 }
@@ -415,24 +603,29 @@ pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Res
     Ok(())
 }
 
-fn normalize_public_key(raw: &str) -> Result<String> {
+fn normalize_token(raw: &str) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        bail!("public key cannot be empty");
+        bail!("token cannot be empty");
     }
-
-    let decoded = decode_public_key(trimmed)?;
-    if decoded.len() != 32 {
-        bail!("public key must decode to 32 bytes");
+    if trimmed.split('.').count() != 3 {
+        bail!(
+            "token must be a JWT with three segments (received '{}')",
+            trimmed
+        );
     }
     Ok(trimmed.to_string())
 }
 
-fn decode_public_key(input: &str) -> Result<Vec<u8>> {
-    STANDARD_NO_PAD
-        .decode(input)
-        .or_else(|_| STANDARD.decode(input))
-        .map_err(|err| anyhow!("invalid base64 public key: {}", err))
+fn summarize_token(token: &str) -> String {
+    if token.len() <= 8 {
+        return token.to_string();
+    }
+    let prefix_len = 4.min(token.len());
+    let suffix_len = 4.min(token.len().saturating_sub(prefix_len));
+    let prefix = &token[..prefix_len];
+    let suffix = &token[token.len() - suffix_len..];
+    format!("{}…{}", prefix, suffix)
 }
 
 fn normalize_filter(
@@ -864,21 +1057,22 @@ async fn push_remote_schemas(
 
 async fn connect_local_replication_client(config: &Config) -> Result<CapnpReplicationClient> {
     let endpoint = normalize_capnp_endpoint(&config.socket.bind_addr)?;
-    let public_key = config
-        .load_public_key()
-        .context("failed to load local replication public key")?;
-    let expected_key = decode_public_key_bytes(&public_key)?;
-    CapnpReplicationClient::connect(&endpoint, &expected_key)
+    let token = cli_token::ensure_bootstrap_token(config)?;
+    CapnpReplicationClient::connect(&endpoint, &token)
         .await
         .map_err(|err| anyhow!("failed to connect to local replication endpoint: {}", err))
 }
 
 async fn connect_client(remote: &RemoteConfig) -> Result<CapnpReplicationClient> {
     let endpoint = normalize_capnp_endpoint(&remote.endpoint)?;
+    if remote.token.trim().is_empty() {
+        bail!(
+            "remote '{}' does not have a replication token configured",
+            remote.endpoint
+        );
+    }
 
-    let expected_key = decode_public_key_bytes(&remote.public_key)?;
-
-    CapnpReplicationClient::connect(&endpoint, &expected_key)
+    CapnpReplicationClient::connect(&endpoint, &remote.token)
         .await
         .map_err(|err| anyhow!("failed to connect to remote {}: {}", remote.endpoint, err))
 }

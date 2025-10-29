@@ -302,7 +302,7 @@ async fn list_remotes(
 #[derive(Debug, Deserialize)]
 struct RemoteUpsertRequest {
     endpoint: String,
-    public_key: String,
+    token: String,
 }
 
 async fn upsert_remote(
@@ -318,11 +318,9 @@ async fn upsert_remote(
     if endpoint.is_empty() {
         return Err(EventError::Config("remote endpoint cannot be empty".into()));
     }
-    let public_key = request.public_key.trim();
-    if public_key.is_empty() {
-        return Err(EventError::Config(
-            "remote public key cannot be empty".into(),
-        ));
+    let token = request.token.trim();
+    if token.is_empty() {
+        return Err(EventError::Config("remote token cannot be empty".into()));
     }
 
     let (ip, port) = parse_remote_endpoint(endpoint)?;
@@ -340,8 +338,8 @@ async fn upsert_remote(
         "add".to_string(),
         normalized_name.to_string(),
         ip,
-        "--public-key".to_string(),
-        public_key.to_string(),
+        "--token".to_string(),
+        token.to_string(),
     ];
     if let Some(port) = port {
         args.push("--port".to_string());

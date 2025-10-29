@@ -252,8 +252,6 @@ pub async fn start(
     config_path: Arc<PathBuf>,
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
-    local_public_key: Arc<Vec<u8>>,
-    local_private_key: Arc<Vec<u8>>,
 ) -> Result<JoinHandle<()>> {
     let listener = TcpListener::bind(bind_addr)
         .await
@@ -267,17 +265,9 @@ pub async fn start(
     let handle = tokio::spawn({
         let core = core.clone();
         let shared_config = Arc::clone(&shared_config);
+        let config_path = Arc::clone(&config_path);
         async move {
-            if let Err(err) = serve(
-                listener,
-                config_path,
-                core,
-                shared_config,
-                local_public_key,
-                local_private_key,
-            )
-            .await
-            {
+            if let Err(err) = serve(listener, config_path, core, shared_config).await {
                 warn!("CLI proxy server terminated: {err:?}");
             }
         }
@@ -290,8 +280,6 @@ async fn serve(
     config_path: Arc<PathBuf>,
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
-    local_public_key: Arc<Vec<u8>>,
-    local_private_key: Arc<Vec<u8>>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener
@@ -301,19 +289,8 @@ async fn serve(
         let config_path = Arc::clone(&config_path);
         let core = core.clone();
         let shared_config = Arc::clone(&shared_config);
-        let local_public_key = Arc::clone(&local_public_key);
-        let local_private_key = Arc::clone(&local_private_key);
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(
-                stream,
-                config_path,
-                core,
-                shared_config,
-                local_public_key,
-                local_private_key,
-            )
-            .await
-            {
+            if let Err(err) = handle_connection(stream, config_path, core, shared_config).await {
                 warn!(target: "cli_proxy", peer = %peer, "CLI proxy connection error: {err:?}");
             }
         });
@@ -325,8 +302,6 @@ async fn handle_connection(
     config_path: Arc<PathBuf>,
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
-    local_public_key: Arc<Vec<u8>>,
-    local_private_key: Arc<Vec<u8>>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = reader.compat();
@@ -368,15 +343,7 @@ async fn handle_connection(
         return Ok(());
     }
 
-    handle_replication_session(
-        first_message,
-        &mut reader,
-        &mut writer,
-        core,
-        local_public_key,
-        local_private_key,
-    )
-    .await?;
+    handle_replication_session(first_message, &mut reader, &mut writer, core).await?;
     Ok(())
 }
 
@@ -1314,8 +1281,6 @@ async fn handle_replication_session<R, W>(
     reader: &mut R,
     writer: &mut W,
     core: CoreContext,
-    local_public_key: Arc<Vec<u8>>,
-    local_private_key: Arc<Vec<u8>>,
 ) -> Result<()>
 where
     R: futures::AsyncRead + Unpin,
@@ -1325,31 +1290,40 @@ where
         .get_root::<replication_hello::Reader>()
         .context("failed to decode replication hello")?;
     let protocol_version = hello.get_protocol_version();
-    let expected_key = hello
-        .get_expected_public_key()
-        .map_err(|err| anyhow!("failed to read handshake public key: {err}"))?
-        .to_vec();
+    let token_reader = hello
+        .get_token()
+        .map_err(|err| anyhow!("failed to read replication token: {err}"))?;
+    let token = token_reader
+        .to_str()
+        .map_err(|err| anyhow!("invalid UTF-8 in replication token: {err}"))?
+        .trim()
+        .to_string();
 
     let handshake_start = Instant::now();
 
-    let (accepted, response_text) = if protocol_version != REPLICATION_PROTOCOL_VERSION {
+    let tokens = core.tokens();
+    let (accepted, response_text, claims) = if protocol_version != REPLICATION_PROTOCOL_VERSION {
         (
             false,
             format!(
                 "unsupported replication protocol version {}",
                 protocol_version
             ),
+            None,
         )
-    } else if expected_key.is_empty() {
-        (
-            false,
-            "missing expected public key in replication handshake".to_string(),
-        )
-    } else if expected_key != *local_public_key {
-        warn!("replication handshake rejected due to pinned key mismatch");
-        (false, "pinned public key mismatch".to_string())
+    } else if token.is_empty() {
+        (false, "missing replication token".to_string(), None)
     } else {
-        (true, "ok".to_string())
+        match tokens.verify(&token) {
+            Ok(claims) => (true, "ok".to_string(), Some(claims)),
+            Err(err) => {
+                warn!(
+                    "replication handshake rejected due to invalid token: {}",
+                    err
+                );
+                (false, "invalid replication token".to_string(), None)
+            }
+        }
     };
 
     let handshake_bytes = {
@@ -1382,7 +1356,16 @@ where
         return Ok(());
     }
 
-    let mut noise = perform_server_handshake(reader, writer, local_private_key.as_slice())
+    if let Some(claims) = claims {
+        debug!(
+            subject = %claims.sub,
+            token_group = %claims.group,
+            token_user = %claims.user,
+            "replication handshake accepted"
+        );
+    }
+
+    let mut noise = perform_server_handshake(reader, writer, token.as_bytes())
         .await
         .context("failed to establish encrypted replication channel")?;
 

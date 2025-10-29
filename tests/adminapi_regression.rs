@@ -1,6 +1,7 @@
 use std::{io, net::TcpListener, path::PathBuf, time::Duration};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+
 use eventdbx::{
     config::Config,
     restrict::RestrictMode,
@@ -356,10 +357,10 @@ async fn adminapi_regression() -> TestResult<()> {
     );
 
     // Configure a remote endpoint.
-    let remote_public_key = STANDARD.encode([3u8; 32]);
+    let remote_token = "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJyb2JvdCJ9.dummysignature";
     let remote_payload = json!({
         "endpoint": "tcp://0.0.0.0:6363",
-        "public_key": remote_public_key
+        "token": remote_token
     });
     let remote_response = client
         .put(format!("{admin_base}/remotes/primary"))

@@ -1,5 +1,4 @@
 use std::{
-    convert::TryInto,
     io::{self, Cursor},
     net::SocketAddr,
 };
@@ -11,7 +10,6 @@ use capnp::{
 };
 use capnp_futures::serialize::read_message;
 use chrono::{TimeZone, Utc};
-use ed25519_dalek::SigningKey;
 use eventdbx::{
     replication_capnp::{
         replication_hello, replication_hello_response, replication_request, replication_response,
@@ -22,7 +20,6 @@ use eventdbx::{
     store::{AggregatePositionEntry, EventMetadata, EventRecord},
 };
 use futures::AsyncWriteExt;
-use rand_core::OsRng;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -48,10 +45,7 @@ async fn capnp_regression_list_positions_and_pull_events() -> Result<()> {
         .local_addr()
         .context("failed to read mock server address")?;
 
-    let mut rng = OsRng;
-    let signing_key = SigningKey::generate(&mut rng);
-    let identity_secret = signing_key.as_bytes().to_vec();
-    let expected_key = signing_key.verifying_key().as_bytes().to_vec();
+    let token = "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ0ZXN0In0.signature".to_string();
 
     let positions = vec![
         AggregatePositionEntry {
@@ -90,13 +84,13 @@ async fn capnp_regression_list_positions_and_pull_events() -> Result<()> {
 
     let server_handle = tokio::spawn(run_mock_replication_server(
         listener,
-        identity_secret.clone(),
+        token.clone(),
         ListPositionsFixture::Positions(positions.clone()),
         vec![sample_event.clone()],
     ));
 
     let endpoint = addr.to_string();
-    let mut client = CapnpReplicationClient::connect(&endpoint, &expected_key)
+    let mut client = CapnpReplicationClient::connect(&endpoint, &token)
         .await
         .context("client failed to connect to mock server")?;
 
@@ -155,19 +149,16 @@ async fn capnp_regression_list_positions_ok_response() -> Result<()> {
         .local_addr()
         .context("failed to read mock server address")?;
 
-    let mut rng = OsRng;
-    let signing_key = SigningKey::generate(&mut rng);
-    let identity_secret = signing_key.as_bytes().to_vec();
-    let expected_key = signing_key.verifying_key().as_bytes().to_vec();
+    let token = "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ0ZXN0In0.signature".to_string();
     let server_handle = tokio::spawn(run_mock_replication_server(
         listener,
-        identity_secret.clone(),
+        token.clone(),
         ListPositionsFixture::EmptyOk,
         Vec::new(),
     ));
 
     let endpoint = addr.to_string();
-    let mut client = CapnpReplicationClient::connect(&endpoint, &expected_key)
+    let mut client = CapnpReplicationClient::connect(&endpoint, &token)
         .await
         .context("client failed to connect to mock server")?;
 
@@ -195,7 +186,7 @@ async fn capnp_regression_list_positions_ok_response() -> Result<()> {
 
 async fn run_mock_replication_server(
     listener: TcpListener,
-    identity_secret: Vec<u8>,
+    mut expected_token: String,
     list_positions_reply: ListPositionsFixture,
     events: Vec<EventRecord>,
 ) -> Result<()> {
@@ -207,13 +198,7 @@ async fn run_mock_replication_server(
     let (read_half, write_half) = stream.into_split();
     let mut reader = read_half.compat();
     let mut writer = write_half.compat_write();
-
-    let secret_bytes: [u8; 32] = identity_secret
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("invalid replication identity secret length"))?;
-    let signing_key = SigningKey::from_bytes(&secret_bytes);
-    let local_public_bytes = signing_key.verifying_key().as_bytes().to_vec();
+    expected_token = expected_token.trim().to_string();
 
     let hello_message = read_message(&mut reader, Default::default())
         .await
@@ -228,11 +213,15 @@ async fn run_mock_replication_server(
                 hello.get_protocol_version()
             ));
         }
-        let received_key = hello
-            .get_expected_public_key()
-            .context("failed to read expected key")?;
-        if received_key != local_public_bytes.as_slice() {
-            return Err(anyhow!("handshake carried unexpected key"));
+        let received_token = hello
+            .get_token()
+            .context("failed to read expected token")?
+            .to_str()
+            .context("invalid UTF-8 in handshake token")?
+            .trim()
+            .to_string();
+        if received_token != expected_token {
+            return Err(anyhow!("handshake carried unexpected token"));
         }
     }
 
@@ -249,7 +238,7 @@ async fn run_mock_replication_server(
         .context("failed to send handshake response")?;
     writer.flush().await.context("failed to flush handshake")?;
 
-    let mut noise = perform_server_handshake(&mut reader, &mut writer, identity_secret.as_slice())
+    let mut noise = perform_server_handshake(&mut reader, &mut writer, expected_token.as_bytes())
         .await
         .context("failed to complete Noise handshake")?;
 
