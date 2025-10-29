@@ -1,6 +1,5 @@
 use std::{fmt, num::NonZeroUsize};
 
-use capnp::Result as CapnpResult;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -8,11 +7,7 @@ use lru::LruCache;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
-use crate::{
-    control_capnp::{comparison_expression, filter_expression, logical_expression},
-    error::EventError,
-    store::{AggregateState, EventMetadata, EventRecord, select_state_field},
-};
+use crate::store::{AggregateState, EventMetadata, EventRecord, select_state_field};
 
 #[derive(Debug, Clone)]
 pub enum FilterExpr {
@@ -47,19 +42,6 @@ pub enum FilterParseError {
 }
 
 impl FilterExpr {
-    pub fn from_capnp(reader: filter_expression::Reader<'_>) -> Result<Self, EventError> {
-        match reader.which().map_err(not_in_schema)? {
-            filter_expression::Which::Logical(expr) => {
-                let expr = expr.map_err(capnp_error)?;
-                parse_logical(expr)
-            }
-            filter_expression::Which::Comparison(expr) => {
-                let expr = expr.map_err(capnp_error)?;
-                parse_comparison(expr)
-            }
-        }
-    }
-
     pub fn matches_aggregate(&self, aggregate: &AggregateState) -> bool {
         match self {
             FilterExpr::And(children) => children
@@ -97,128 +79,9 @@ impl FilterExpr {
             FilterExpr::Comparison { field, .. } => field.eq_ignore_ascii_case(target),
         }
     }
-
-    pub fn write_to_capnp(
-        &self,
-        builder: filter_expression::Builder<'_>,
-    ) -> Result<(), EventError> {
-        match self {
-            FilterExpr::And(children) => {
-                let mut logical = builder.init_logical();
-                let mut and_list = logical.reborrow().init_and(children.len() as u32);
-                for (idx, child) in children.iter().enumerate() {
-                    child.write_to_capnp(and_list.reborrow().get(idx as u32))?;
-                }
-            }
-            FilterExpr::Or(children) => {
-                let mut logical = builder.init_logical();
-                let mut or_list = logical.reborrow().init_or(children.len() as u32);
-                for (idx, child) in children.iter().enumerate() {
-                    child.write_to_capnp(or_list.reborrow().get(idx as u32))?;
-                }
-            }
-            FilterExpr::Not(expr) => {
-                let mut logical = builder.init_logical();
-                expr.write_to_capnp(logical.reborrow().init_not())?;
-            }
-            FilterExpr::Comparison { field, op } => {
-                let comparison = builder.init_comparison();
-                write_comparison(field, op, comparison)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-fn parse_logical(expr: logical_expression::Reader<'_>) -> Result<FilterExpr, EventError> {
-    match expr.which().map_err(not_in_schema)? {
-        logical_expression::Which::And(list) => {
-            let list = list.map_err(capnp_error)?;
-            let mut nodes = Vec::with_capacity(list.len() as usize);
-            for item in list.iter() {
-                let expr = item;
-                nodes.push(FilterExpr::from_capnp(expr)?);
-            }
-            Ok(FilterExpr::And(nodes))
-        }
-        logical_expression::Which::Or(list) => {
-            let list = list.map_err(capnp_error)?;
-            let mut nodes = Vec::with_capacity(list.len() as usize);
-            for item in list.iter() {
-                let expr = item;
-                nodes.push(FilterExpr::from_capnp(expr)?);
-            }
-            Ok(FilterExpr::Or(nodes))
-        }
-        logical_expression::Which::Not(expr) => {
-            let expr = expr.map_err(capnp_error)?;
-            Ok(FilterExpr::Not(Box::new(FilterExpr::from_capnp(expr)?)))
-        }
-    }
-}
-
-fn parse_comparison(expr: comparison_expression::Reader<'_>) -> Result<FilterExpr, EventError> {
-    match expr.which().map_err(not_in_schema)? {
-        comparison_expression::Which::Equals(reader) => {
-            let reader = reader.map_err(capnp_error)?;
-            Ok(FilterExpr::Comparison {
-                field: read_text(reader.get_field(), "field")?,
-                op: ComparisonOp::Equals(FilterValue::from_capnp(reader.get_value())?),
-            })
-        }
-        comparison_expression::Which::NotEquals(reader) => {
-            let reader = reader.map_err(capnp_error)?;
-            Ok(FilterExpr::Comparison {
-                field: read_text(reader.get_field(), "field")?,
-                op: ComparisonOp::NotEquals(FilterValue::from_capnp(reader.get_value())?),
-            })
-        }
-        comparison_expression::Which::GreaterThan(reader) => {
-            let reader = reader.map_err(capnp_error)?;
-            Ok(FilterExpr::Comparison {
-                field: read_text(reader.get_field(), "field")?,
-                op: ComparisonOp::GreaterThan(FilterValue::from_capnp(reader.get_value())?),
-            })
-        }
-        comparison_expression::Which::LessThan(reader) => {
-            let reader = reader.map_err(capnp_error)?;
-            Ok(FilterExpr::Comparison {
-                field: read_text(reader.get_field(), "field")?,
-                op: ComparisonOp::LessThan(FilterValue::from_capnp(reader.get_value())?),
-            })
-        }
-        comparison_expression::Which::InSet(reader) => {
-            let reader = reader.map_err(capnp_error)?;
-            let field = read_text(reader.get_field(), "field")?;
-            let values = reader.get_values().map_err(capnp_error)?;
-            let mut list = Vec::with_capacity(values.len() as usize);
-            for value in values.iter() {
-                list.push(FilterValue::from_capnp(value)?);
-            }
-            Ok(FilterExpr::Comparison {
-                field,
-                op: ComparisonOp::In(list),
-            })
-        }
-        comparison_expression::Which::Like(reader) => {
-            let reader = reader.map_err(capnp_error)?;
-            Ok(FilterExpr::Comparison {
-                field: read_text(reader.get_field(), "field")?,
-                op: ComparisonOp::Like(FilterValue::from_capnp(reader.get_value())?),
-            })
-        }
-    }
 }
 
 impl FilterValue {
-    fn from_capnp(reader: CapnpResult<capnp::text::Reader<'_>>) -> Result<Self, EventError> {
-        let text = reader
-            .map_err(capnp_error)?
-            .to_str()
-            .map_err(|err| EventError::Serialization(err.to_string()))?;
-        Ok(FilterValue::parse_literal(text))
-    }
-
     fn matches_value(&self, value: &ComparableValue) -> bool {
         match (self, value) {
             (FilterValue::Null, ComparableValue::Null) => true,
@@ -231,7 +94,7 @@ impl FilterValue {
         }
     }
 
-    fn parse_literal(input: &str) -> Self {
+    pub fn parse_literal(input: &str) -> Self {
         let trimmed = input.trim();
         if trimmed.eq_ignore_ascii_case("null") {
             FilterValue::Null
@@ -243,15 +106,6 @@ impl FilterValue {
             FilterValue::Number(number)
         } else {
             FilterValue::String(trimmed.to_string())
-        }
-    }
-
-    fn to_capnp_text(&self) -> String {
-        match self {
-            FilterValue::String(value) => value.clone(),
-            FilterValue::Number(value) => value.to_string(),
-            FilterValue::Bool(value) => value.to_string(),
-            FilterValue::Null => "null".to_string(),
         }
     }
 }
@@ -526,69 +380,6 @@ fn build_like_regex(pattern: &str) -> String {
 
 fn matches_missing(op: &ComparisonOp) -> bool {
     matches!(op, ComparisonOp::NotEquals(FilterValue::Null))
-}
-
-fn write_comparison(
-    field: &str,
-    op: &ComparisonOp,
-    mut builder: comparison_expression::Builder<'_>,
-) -> Result<(), EventError> {
-    match op {
-        ComparisonOp::Equals(value) => {
-            let mut eq = builder.reborrow().init_equals();
-            eq.set_field(field);
-            eq.set_value(&value.to_capnp_text());
-        }
-        ComparisonOp::NotEquals(value) => {
-            let mut ne = builder.reborrow().init_not_equals();
-            ne.set_field(field);
-            ne.set_value(&value.to_capnp_text());
-        }
-        ComparisonOp::GreaterThan(value) => {
-            let mut gt = builder.reborrow().init_greater_than();
-            gt.set_field(field);
-            gt.set_value(&value.to_capnp_text());
-        }
-        ComparisonOp::LessThan(value) => {
-            let mut lt = builder.reborrow().init_less_than();
-            lt.set_field(field);
-            lt.set_value(&value.to_capnp_text());
-        }
-        ComparisonOp::In(values) => {
-            let mut set = builder.reborrow().init_in_set();
-            set.set_field(field);
-            let mut list = set.reborrow().init_values(values.len() as u32);
-            for (idx, value) in values.iter().enumerate() {
-                list.set(idx as u32, &value.to_capnp_text());
-            }
-        }
-        ComparisonOp::Like(value) => {
-            let mut like = builder.reborrow().init_like();
-            like.set_field(field);
-            like.set_value(&value.to_capnp_text());
-        }
-    }
-    Ok(())
-}
-
-fn read_text(
-    reader: CapnpResult<capnp::text::Reader<'_>>,
-    label: &str,
-) -> Result<String, EventError> {
-    let text = reader
-        .map_err(capnp_error)?
-        .to_str()
-        .map_err(|err| EventError::Serialization(format!("invalid utf-8 in {label}: {err}")))?
-        .to_string();
-    Ok(text)
-}
-
-fn capnp_error(err: capnp::Error) -> EventError {
-    EventError::Serialization(err.to_string())
-}
-
-fn not_in_schema(err: capnp::NotInSchema) -> EventError {
-    EventError::Serialization(err.to_string())
 }
 
 impl fmt::Display for FilterValue {

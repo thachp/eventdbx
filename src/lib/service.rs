@@ -9,7 +9,7 @@ use crate::{
         ActorClaims, AggregateQueryScope, AggregateSort, AggregateState, AppendEvent, EventRecord,
         EventStore, select_state_field,
     },
-    token::TokenManager,
+    token::{JwtClaims, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
         ensure_payload_size, ensure_snake_case,
@@ -86,28 +86,37 @@ impl CoreContext {
 
     pub fn list_aggregates(
         &self,
+        token: &str,
         skip: usize,
         take: Option<usize>,
         filter: Option<FilterExpr>,
         sort: Option<&[AggregateSort]>,
         scope: AggregateQueryScope,
-    ) -> Vec<AggregateState> {
+    ) -> Result<Vec<AggregateState>> {
         let mut effective_take = take.unwrap_or(self.list_page_size);
         if effective_take == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if effective_take > self.page_limit {
             effective_take = self.page_limit;
         }
 
+        let claims: JwtClaims = self
+            .tokens()
+            .authorize_action(token, "aggregate.read", None)?;
         let filter_ref = filter.as_ref();
-        self.store.aggregates_paginated_with_transform(
+        let aggregates = self.store.aggregates_paginated_with_transform(
             skip,
             Some(effective_take),
             sort,
             scope,
             |aggregate| {
                 if self.is_hidden_aggregate(&aggregate.aggregate_type) {
+                    return None;
+                }
+                let resource =
+                    Self::aggregate_resource(&aggregate.aggregate_type, &aggregate.aggregate_id);
+                if !claims.allows_resource(Some(resource.as_str())) {
                     return None;
                 }
                 let sanitized = self.sanitize_aggregate(aggregate);
@@ -118,14 +127,20 @@ impl CoreContext {
                 }
                 Some(sanitized)
             },
-        )
+        );
+        Ok(aggregates)
     }
 
     pub fn get_aggregate(
         &self,
+        token: &str,
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Option<AggregateState>> {
+        let resource = Self::aggregate_resource(aggregate_type, aggregate_id);
+        self.tokens()
+            .authorize_action(token, "aggregate.read", Some(resource.as_str()))?;
+
         if self.is_hidden_aggregate(aggregate_type) {
             return Ok(None);
         }
@@ -138,10 +153,15 @@ impl CoreContext {
 
     pub fn select_aggregate_fields(
         &self,
+        token: &str,
         aggregate_type: &str,
         aggregate_id: &str,
         fields: &[String],
     ) -> Result<Option<BTreeMap<String, Value>>> {
+        let resource = Self::aggregate_resource(aggregate_type, aggregate_id);
+        self.tokens()
+            .authorize_action(token, "aggregate.read", Some(resource.as_str()))?;
+
         if self.is_hidden_aggregate(aggregate_type) {
             return Ok(None);
         }
@@ -167,11 +187,16 @@ impl CoreContext {
 
     pub fn list_events(
         &self,
+        token: &str,
         aggregate_type: &str,
         aggregate_id: &str,
         skip: usize,
         take: Option<usize>,
     ) -> Result<Vec<EventRecord>> {
+        let resource = Self::aggregate_resource(aggregate_type, aggregate_id);
+        self.tokens()
+            .authorize_action(token, "aggregate.read", Some(resource.as_str()))?;
+
         if self.is_hidden_aggregate(aggregate_type) {
             return Err(EventError::AggregateNotFound);
         }
@@ -239,7 +264,7 @@ impl CoreContext {
             return Err(EventError::Unauthorized);
         }
 
-        let _record = self.append_event(AppendEventInput {
+        let append_input = AppendEventInput {
             token,
             aggregate_type: aggregate_type.clone(),
             aggregate_id: aggregate_id.clone(),
@@ -248,8 +273,8 @@ impl CoreContext {
             patch: None,
             metadata,
             note,
-            require_existing: false,
-        })?;
+        };
+        let _record = self.append_event_internal(append_input, true)?;
 
         let aggregate = store.get_aggregate_state(&aggregate_type, &aggregate_id)?;
         Ok(self.sanitize_aggregate(aggregate))
@@ -284,6 +309,15 @@ impl CoreContext {
     }
 
     pub fn append_event(&self, input: AppendEventInput) -> Result<EventRecord> {
+        let allow_new = input.payload.is_some();
+        self.append_event_internal(input, allow_new)
+    }
+
+    fn append_event_internal(
+        &self,
+        input: AppendEventInput,
+        allow_new_aggregate: bool,
+    ) -> Result<EventRecord> {
         let AppendEventInput {
             token,
             aggregate_type,
@@ -293,7 +327,6 @@ impl CoreContext {
             patch,
             metadata,
             note,
-            require_existing,
         } = input;
 
         enum EventBody {
@@ -331,7 +364,7 @@ impl CoreContext {
             Some(_) | None => true,
         };
         let is_patch_event = matches!(&event_body, EventBody::Patch(_));
-        if (require_existing || is_patch_event) && is_new_aggregate {
+        if (!allow_new_aggregate || is_patch_event) && is_new_aggregate {
             return Err(EventError::AggregateNotFound);
         }
         ensure_first_event_rule(is_new_aggregate, &event_type)?;
@@ -396,6 +429,10 @@ impl CoreContext {
         Ok(record)
     }
 
+    fn aggregate_resource(aggregate_type: &str, aggregate_id: &str) -> String {
+        format!("aggregate:{}:{}", aggregate_type, aggregate_id)
+    }
+
     fn filter_state_map(
         &self,
         aggregate_type: &str,
@@ -420,7 +457,6 @@ pub struct AppendEventInput {
     pub patch: Option<Value>,
     pub metadata: Option<Value>,
     pub note: Option<String>,
-    pub require_existing: bool,
 }
 
 #[derive(Debug, Clone)]

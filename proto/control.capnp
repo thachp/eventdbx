@@ -34,12 +34,13 @@ struct ListAggregatesRequest {
   skip @0 :UInt64;
   take @1 :UInt64;
   hasTake @2 :Bool;
-  filter @3 :FilterExpression;
+  filter @3 :Text;
   hasFilter @4 :Bool;
   sort @5 :List(AggregateSort);
   hasSort @6 :Bool;
   includeArchived @7 :Bool;
   archivedOnly @8 :Bool;
+  token @9 :Text;
 }
 
 struct ListAggregatesResponse {
@@ -49,6 +50,7 @@ struct ListAggregatesResponse {
 struct GetAggregateRequest {
   aggregateType @0 :Text;
   aggregateId @1 :Text;
+  token @2 :Text;
 }
 
 struct GetAggregateResponse {
@@ -62,8 +64,9 @@ struct ListEventsRequest {
   skip @2 :UInt64;
   take @3 :UInt64;
   hasTake @4 :Bool;
-  filter @5 :FilterExpression;
+  filter @5 :Text;
   hasFilter @6 :Bool;
+  token @7 :Text;
 }
 
 struct ListEventsResponse {
@@ -80,7 +83,6 @@ struct AppendEventRequest {
   hasNote @6 :Bool;
   metadataJson @7 :Text;
   hasMetadata @8 :Bool;
-  requireExisting @9 :Bool;
 }
 
 struct AppendEventResponse {
@@ -112,6 +114,7 @@ struct SelectAggregateRequest {
   aggregateType @0 :Text;
   aggregateId @1 :Text;
   fields @2 :List(Text);
+  token @3 :Text;
 }
 
 struct SelectAggregateResponse {
@@ -159,42 +162,6 @@ enum AggregateSortField {
   version @2;
   merkleRoot @3;
   archived @4;
-}
-
-struct FilterExpression {
-  union {
-    logical @0 :LogicalExpression;
-    comparison @1 :ComparisonExpression;
-  }
-}
-
-struct LogicalExpression {
-  union {
-    and @0 :List(FilterExpression);
-    or @1 :List(FilterExpression);
-    not @2 :FilterExpression;
-  }
-}
-
-struct ComparisonExpression {
-  union {
-    equals @0 :Comparison;
-    notEquals @1 :Comparison;
-    greaterThan @2 :Comparison;
-    lessThan @3 :Comparison;
-    inSet @4 :SetComparison;
-    like @5 :Comparison;
-  }
-}
-
-struct Comparison {
-  field @0 :Text;
-  value @1 :Text;
-}
-
-struct SetComparison {
-  field @0 :Text;
-  values @1 :List(Text);
 }
 
 struct ControlError {

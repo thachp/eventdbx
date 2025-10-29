@@ -6,7 +6,7 @@ use eventdbx::{
     restrict::RestrictMode,
     schema::{CreateSchemaInput, SchemaManager},
     server,
-    token::{IssueTokenInput, JwtLimits, TokenManager},
+    token::{IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, TokenManager},
 };
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
@@ -66,15 +66,15 @@ async fn adminapi_regression() -> TestResult<()> {
             subject: "ops:admin".to_string(),
             group: "ops".to_string(),
             user: "admin".to_string(),
-            root: true,
-            actions: Vec::new(),
-            resources: Vec::new(),
+            actions: vec![ROOT_ACTION.to_string()],
+            resources: vec![ROOT_RESOURCE.to_string()],
             ttl_secs: Some(3600),
             not_before: None,
             issued_by: "adminapi-regression".to_string(),
             limits: JwtLimits::default(),
         })?
-        .token;
+        .token
+        .expect("admin token should include value");
     drop(token_manager);
 
     // Pre-seed a schema so the in-memory schema manager contains an aggregate
@@ -149,6 +149,10 @@ async fn adminapi_regression() -> TestResult<()> {
         .as_str()
         .expect("issued token response should include token value")
         .to_string();
+    let token_jti = issued_token["jti"]
+        .as_str()
+        .expect("issued token response should include jti")
+        .to_string();
 
     // List tokens should include the newly issued token.
     let tokens_list: Value = client
@@ -164,8 +168,12 @@ async fn adminapi_regression() -> TestResult<()> {
         .expect("token list should be an array");
     let issued_entry = tokens
         .iter()
-        .find(|item| item["token"] == token_str)
+        .find(|item| item["jti"] == token_jti)
         .expect("issued token must be in list");
+    assert!(
+        issued_entry.get("token").is_none(),
+        "token list should not expose raw token values"
+    );
     assert_eq!(
         issued_entry["status"], "active",
         "token list entry should reflect active status"
@@ -196,6 +204,10 @@ async fn adminapi_regression() -> TestResult<()> {
         refreshed_token_str, token_str,
         "refresh should issue a replacement token"
     );
+    let refreshed_jti = refreshed_token["jti"]
+        .as_str()
+        .expect("refresh response should include jti")
+        .to_string();
     assert_eq!(
         refreshed_token["status"], "active",
         "refreshed token should remain active"
@@ -230,8 +242,12 @@ async fn adminapi_regression() -> TestResult<()> {
         .expect("token list should be an array");
     let revoked_entry = tokens_after
         .iter()
-        .find(|item| item["token"] == token_str)
+        .find(|item| item["jti"] == refreshed_jti)
         .expect("revoked token should still appear in listing");
+    assert!(
+        revoked_entry.get("token").is_none(),
+        "revoked token listing should not expose raw token"
+    );
     assert_eq!(
         revoked_entry["status"], "revoked",
         "revoked token must display revoked status"

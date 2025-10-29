@@ -51,7 +51,7 @@ dbx config \
   --admin-port 7171
 ```
 
-All Admin API calls must send a bearer token with full privileges. The CLI writes one to `~/.eventdbx/cli.token` on first start—share it with automation or issue a dedicated root token with `dbx token generate --root` and revoke it when you rotate credentials.
+All Admin API calls must send a bearer token with full privileges. The CLI writes one to `~/.eventdbx/cli.token` on first start—share it with automation or issue a dedicated wildcard token with `dbx token generate --group ops --user admin --action '*.*' --resource '*'` and revoke it when you rotate credentials.
 
 ## 3. Start the server
 

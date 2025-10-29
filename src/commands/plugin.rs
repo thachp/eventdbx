@@ -965,7 +965,8 @@ fn start_process_worker(
     }
 
     let identifier = resolve_process_identifier(plugin, settings);
-    let worker_pid_path = process_worker_pid_path(&config.data_dir, &identifier);
+    let domain_dir = config.domain_data_dir();
+    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
 
     if let Some(existing_pid) = read_pid_file(&worker_pid_path)? {
         if is_pid_running(existing_pid) {
@@ -1041,8 +1042,9 @@ fn stop_process_worker(
         .ok_or_else(|| anyhow!("no process plugin named '{}' is configured", name))?;
 
     let identifier = resolve_process_identifier(plugin, settings);
-    let worker_pid_path = process_worker_pid_path(&config.data_dir, &identifier);
-    let runtime_pid_path = status_file_path(&config.data_dir, &identifier);
+    let domain_dir = config.domain_data_dir();
+    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
+    let runtime_pid_path = status_file_path(domain_dir.as_path(), &identifier);
 
     if let Some(pid) = read_pid_file(&worker_pid_path)? {
         if is_pid_running(pid) {
@@ -1137,10 +1139,11 @@ fn print_process_status(
     settings: &ProcessPluginConfig,
 ) -> Result<()> {
     let identifier = resolve_process_identifier(definition, settings);
-    let status_path = status_file_path(&config.data_dir, &identifier);
-    let worker_pid_path = process_worker_pid_path(&config.data_dir, &identifier);
+    let domain_dir = config.domain_data_dir();
+    let status_path = status_file_path(domain_dir.as_path(), &identifier);
+    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
 
-    let status = read_process_runtime_state(&config.data_dir, &identifier);
+    let status = read_process_runtime_state(domain_dir.as_path(), &identifier);
     let label = match status {
         ProcessRuntimeState::Running { pid } => format!("running (pid {})", pid),
         ProcessRuntimeState::Stopped => "stopped".to_string(),
@@ -1431,7 +1434,8 @@ pub async fn run_plugin_worker(config_path: Option<PathBuf>, args: PluginWorkerA
         _ => plugin_kind_name(PluginKind::Process).to_string(),
     };
 
-    let worker_pid_path = process_worker_pid_path(&config.data_dir, &identifier);
+    let domain_dir = config.domain_data_dir();
+    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
     write_pid_file(&worker_pid_path, std::process::id() as u32)?;
     let _guard = WorkerPidGuard {
         path: worker_pid_path.clone(),
@@ -2356,12 +2360,13 @@ fn list_plugins(config: &Config, plugins: &[PluginDefinition], json: bool) -> Re
         }
     };
 
+    let domain_dir = config.domain_data_dir();
     let configured_with_runtime: Vec<ConfiguredPluginInfo> = plugins
         .iter()
         .cloned()
         .map(|definition| {
             let runtime = process_instance_identifier(&definition)
-                .map(|identifier| read_process_runtime_state(&config.data_dir, &identifier));
+                .map(|identifier| read_process_runtime_state(domain_dir.as_path(), &identifier));
             ConfiguredPluginInfo {
                 definition,
                 runtime,

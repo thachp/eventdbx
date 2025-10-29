@@ -10,6 +10,7 @@ use eventdbx::observability;
 use crate::commands::{
     aggregate::AggregateCommands,
     config::ConfigArgs,
+    domain::{DomainCheckoutArgs, DomainMergeArgs},
     plugin::{PluginCommands, PluginWorkerArgs},
     queue::QueueArgs,
     remote::RemoteCommands,
@@ -43,6 +44,10 @@ enum Commands {
     Restart(StartArgs),
     /// Destroy all EventDBX data and configuration
     Destroy(DestroyArgs),
+    /// Switch the active domain context
+    Checkout(DomainCheckoutArgs),
+    /// Merge data from one domain into another
+    Merge(DomainMergeArgs),
     /// Update system configuration
     Config(ConfigArgs),
     /// Manage access tokens
@@ -114,6 +119,8 @@ async fn main() -> Result<()> {
         Commands::Status => commands::start::status(config)?,
         Commands::Restart(args) => restart(config, args).await?,
         Commands::Destroy(args) => commands::start::destroy(config, args)?,
+        Commands::Checkout(args) => commands::domain::checkout(config, args)?,
+        Commands::Merge(args) => commands::domain::merge(config, args)?,
         Commands::Config(args) => commands::config::execute(config, args)?,
         Commands::Token { command } => commands::token::execute(config, command)?,
         Commands::Schema { command } => commands::schema::execute(config, command)?,

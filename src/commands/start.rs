@@ -175,6 +175,7 @@ pub fn stop(config_path: Option<PathBuf>) -> Result<()> {
 pub fn status(config_path: Option<PathBuf>) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let pid_path = config.pid_file_path();
+    let domain = config.active_domain().to_string();
 
     match read_pid_record(&pid_path)? {
         Some(record) => {
@@ -184,25 +185,30 @@ pub fn status(config_path: Option<PathBuf>) -> Result<()> {
                     resolve_socket_port(&config.socket.bind_addr).unwrap_or(config.port);
                 if let Some(started_at) = record.started_at {
                     println!(
-                        "EventDBX server is running on port {} (pid {}) — restrict={} — up for {} (since {})",
+                        "EventDBX server is running on port {} (pid {}) — restrict={} — domain={} — up for {} (since {})",
                         socket_port,
                         pid,
                         config.restrict,
+                        domain,
                         describe_uptime(started_at),
                         started_at.to_rfc3339()
                     );
                 } else {
                     println!(
-                        "EventDBX server is running on port {} (pid {}) — restrict={}",
-                        socket_port, pid, config.restrict
+                        "EventDBX server is running on port {} (pid {}) — restrict={} — domain={}",
+                        socket_port, pid, config.restrict, domain
                     );
                 }
             } else {
                 let _ = fs::remove_file(&pid_path);
                 println!("EventDBX server is not running (removed stale pid file).");
+                println!("Active domain: {}", domain);
             }
         }
-        None => println!("EventDBX server is not running."),
+        None => {
+            println!("EventDBX server is not running.");
+            println!("Active domain: {}", domain);
+        }
     }
 
     Ok(())
@@ -347,9 +353,8 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         restrict: Some(args.restrict.into()),
         list_page_size: None,
         page_limit: None,
+        verbose_responses: None,
         plugin_max_attempts: None,
-        api: None,
-        grpc: None,
         socket: None,
         admin: None,
         snowflake_worker_id: None,

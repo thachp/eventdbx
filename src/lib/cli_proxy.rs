@@ -29,7 +29,7 @@ use crate::{
         AggregateSortField as CapnpAggregateSortField, control_request, control_response,
     },
     error::EventError,
-    filter::FilterExpr,
+    filter::{self, FilterExpr},
     observability,
     plugin::PluginManager,
     replication_capnp::{
@@ -82,18 +82,25 @@ enum ControlReply {
         aggregate_json: Option<String>,
     },
     ListEvents(String),
-    AppendEvent(String),
+    AppendEvent {
+        event_json: Option<String>,
+    },
     VerifyAggregate(String),
     SelectAggregate {
         found: bool,
         selection_json: Option<String>,
     },
-    CreateAggregate(String),
-    SetAggregateArchive(String),
+    CreateAggregate {
+        aggregate_json: Option<String>,
+    },
+    SetAggregateArchive {
+        aggregate_json: Option<String>,
+    },
 }
 
 enum ControlCommand {
     ListAggregates {
+        token: String,
         skip: usize,
         take: Option<usize>,
         filter: Option<FilterExpr>,
@@ -102,10 +109,12 @@ enum ControlCommand {
         archived_only: bool,
     },
     GetAggregate {
+        token: String,
         aggregate_type: String,
         aggregate_id: String,
     },
     ListEvents {
+        token: String,
         aggregate_type: String,
         aggregate_id: String,
         skip: usize,
@@ -116,7 +125,6 @@ enum ControlCommand {
         aggregate_type: String,
         aggregate_id: String,
         event_type: String,
-        require_existing: bool,
         payload: Option<Value>,
         metadata: Option<Value>,
         note: Option<String>,
@@ -135,6 +143,7 @@ enum ControlCommand {
         aggregate_id: String,
     },
     SelectAggregate {
+        token: String,
         aggregate_type: String,
         aggregate_id: String,
         fields: Vec<String>,
@@ -515,9 +524,13 @@ where
                                 let mut builder = payload.init_list_events();
                                 builder.set_events_json(&json);
                             }
-                            ControlReply::AppendEvent(json) => {
+                            ControlReply::AppendEvent { event_json } => {
                                 let mut builder = payload.init_append_event();
-                                builder.set_event_json(&json);
+                                if let Some(json) = event_json {
+                                    builder.set_event_json(&json);
+                                } else {
+                                    builder.set_event_json("");
+                                }
                             }
                             ControlReply::VerifyAggregate(merkle_root) => {
                                 let mut builder = payload.init_verify_aggregate();
@@ -535,13 +548,21 @@ where
                                     builder.set_selection_json("");
                                 }
                             }
-                            ControlReply::CreateAggregate(json) => {
+                            ControlReply::CreateAggregate { aggregate_json } => {
                                 let mut builder = payload.init_create_aggregate();
-                                builder.set_aggregate_json(&json);
+                                if let Some(json) = aggregate_json {
+                                    builder.set_aggregate_json(&json);
+                                } else {
+                                    builder.set_aggregate_json("");
+                                }
                             }
-                            ControlReply::SetAggregateArchive(json) => {
+                            ControlReply::SetAggregateArchive { aggregate_json } => {
                                 let mut builder = payload.init_set_aggregate_archive();
-                                builder.set_aggregate_json(&json);
+                                if let Some(json) = aggregate_json {
+                                    builder.set_aggregate_json(&json);
+                                } else {
+                                    builder.set_aggregate_json("");
+                                }
                             }
                         }
                     }
@@ -592,10 +613,15 @@ fn parse_control_command(
             };
 
             let filter = if req.get_has_filter() {
-                let reader = req
-                    .get_filter()
-                    .map_err(|err| EventError::Serialization(err.to_string()))?;
-                Some(FilterExpr::from_capnp(reader)?)
+                let raw = read_control_text(req.get_filter(), "filter")?;
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(filter::parse_shorthand(trimmed).map_err(|err| {
+                        EventError::InvalidSchema(format!("invalid filter expression: {err}"))
+                    })?)
+                }
             } else {
                 None
             };
@@ -633,8 +659,12 @@ fn parse_control_command(
 
             let include_archived = req.get_include_archived();
             let archived_only = req.get_archived_only();
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
 
             Ok(ControlCommand::ListAggregates {
+                token,
                 skip,
                 take,
                 filter,
@@ -647,8 +677,12 @@ fn parse_control_command(
             let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
             let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
             let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
 
             Ok(ControlCommand::GetAggregate {
+                token,
                 aggregate_type,
                 aggregate_id,
             })
@@ -668,6 +702,9 @@ fn parse_control_command(
             };
 
             Ok(ControlCommand::ListEvents {
+                token: read_control_text(req.get_token(), "token")?
+                    .trim()
+                    .to_string(),
                 aggregate_type,
                 aggregate_id,
                 skip,
@@ -716,14 +753,12 @@ fn parse_control_command(
             } else {
                 None
             };
-            let require_existing = req.get_require_existing();
 
             Ok(ControlCommand::AppendEvent {
                 token,
                 aggregate_type,
                 aggregate_id,
                 event_type,
-                require_existing,
                 payload,
                 metadata,
                 note,
@@ -860,8 +895,12 @@ fn parse_control_command(
                 })?;
                 fields.push(field_str.to_string());
             }
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
 
             Ok(ControlCommand::SelectAggregate {
+                token,
                 aggregate_type,
                 aggregate_id,
                 fields,
@@ -900,6 +939,7 @@ async fn execute_control_command(
 ) -> std::result::Result<ControlReply, EventError> {
     match command {
         ControlCommand::ListAggregates {
+            token,
             skip,
             take,
             filter,
@@ -926,17 +966,20 @@ async fn execute_control_command(
                 let core = core.clone();
                 let filter = filter;
                 let sort = sort;
+                let token = token.clone();
                 move || {
                     let sort_ref = sort.as_ref().map(|keys| keys.as_slice());
-                    core.list_aggregates(skip, take, filter, sort_ref, scope)
+                    core.list_aggregates(&token, skip, take, filter, sort_ref, scope)
                 }
             })
             .await
             .map_err(|err| EventError::Storage(format!("list aggregates task failed: {err}")))?;
+            let aggregates = aggregates?;
             let json = serde_json::to_string(&aggregates)?;
             Ok(ControlReply::ListAggregates(json))
         }
         ControlCommand::GetAggregate {
+            token,
             aggregate_type,
             aggregate_id,
         } => {
@@ -944,7 +987,8 @@ async fn execute_control_command(
                 let core = core.clone();
                 let aggregate_type = aggregate_type.clone();
                 let aggregate_id = aggregate_id.clone();
-                move || core.get_aggregate(&aggregate_type, &aggregate_id)
+                let token = token.clone();
+                move || core.get_aggregate(&token, &aggregate_type, &aggregate_id)
             })
             .await
             .map_err(|err| EventError::Storage(format!("get aggregate task failed: {err}")))??;
@@ -960,6 +1004,7 @@ async fn execute_control_command(
             })
         }
         ControlCommand::ListEvents {
+            token,
             aggregate_type,
             aggregate_id,
             skip,
@@ -969,7 +1014,8 @@ async fn execute_control_command(
                 let core = core.clone();
                 let aggregate_type = aggregate_type.clone();
                 let aggregate_id = aggregate_id.clone();
-                move || core.list_events(&aggregate_type, &aggregate_id, skip, take)
+                let token = token.clone();
+                move || core.list_events(&token, &aggregate_type, &aggregate_id, skip, take)
             })
             .await
             .map_err(|err| EventError::Storage(format!("list events task failed: {err}")))??;
@@ -982,7 +1028,6 @@ async fn execute_control_command(
             aggregate_type,
             aggregate_id,
             event_type,
-            require_existing,
             payload,
             metadata,
             note,
@@ -996,13 +1041,14 @@ async fn execute_control_command(
                 patch: None,
                 metadata,
                 note,
-                require_existing,
             };
+            let verbose = config_verbose(&shared_config)?;
             handle_append_event_command(
                 core.clone(),
                 Arc::clone(&shared_config),
                 input,
                 "append event",
+                verbose,
             )
             .await
         }
@@ -1024,13 +1070,14 @@ async fn execute_control_command(
                 patch: Some(patch),
                 metadata,
                 note,
-                require_existing: true,
             };
+            let verbose = config_verbose(&shared_config)?;
             handle_append_event_command(
                 core.clone(),
                 Arc::clone(&shared_config),
                 input,
                 "append patch event",
+                verbose,
             )
             .await
         }
@@ -1050,6 +1097,7 @@ async fn execute_control_command(
             Ok(ControlReply::VerifyAggregate(merkle))
         }
         ControlCommand::SelectAggregate {
+            token,
             aggregate_type,
             aggregate_id,
             fields,
@@ -1059,7 +1107,10 @@ async fn execute_control_command(
                 let aggregate_type = aggregate_type.clone();
                 let aggregate_id = aggregate_id.clone();
                 let fields = fields.clone();
-                move || core.select_aggregate_fields(&aggregate_type, &aggregate_id, &fields)
+                let token = token.clone();
+                move || {
+                    core.select_aggregate_fields(&token, &aggregate_type, &aggregate_id, &fields)
+                }
             })
             .await
             .map_err(|err| EventError::Storage(format!("select aggregate task failed: {err}")))??;
@@ -1087,6 +1138,7 @@ async fn execute_control_command(
             metadata,
             note,
         } => {
+            let verbose = config_verbose(&shared_config)?;
             let aggregate = spawn_blocking({
                 let core = core.clone();
                 let aggregate_type = aggregate_type.clone();
@@ -1111,8 +1163,14 @@ async fn execute_control_command(
             .await
             .map_err(|err| EventError::Storage(format!("create aggregate task failed: {err}")))??;
 
-            let json = serde_json::to_string(&aggregate)?;
-            Ok(ControlReply::CreateAggregate(json))
+            let json = if verbose {
+                Some(serde_json::to_string(&aggregate)?)
+            } else {
+                None
+            };
+            Ok(ControlReply::CreateAggregate {
+                aggregate_json: json,
+            })
         }
         ControlCommand::SetAggregateArchive {
             token,
@@ -1121,6 +1179,7 @@ async fn execute_control_command(
             archived,
             comment,
         } => {
+            let verbose = config_verbose(&shared_config)?;
             let aggregate = spawn_blocking({
                 let core = core.clone();
                 let aggregate_type = aggregate_type.clone();
@@ -1142,8 +1201,14 @@ async fn execute_control_command(
                 EventError::Storage(format!("set aggregate archive task failed: {err}"))
             })??;
 
-            let json = serde_json::to_string(&aggregate)?;
-            Ok(ControlReply::SetAggregateArchive(json))
+            let json = if verbose {
+                Some(serde_json::to_string(&aggregate)?)
+            } else {
+                None
+            };
+            Ok(ControlReply::SetAggregateArchive {
+                aggregate_json: json,
+            })
         }
     }
 }
@@ -1153,6 +1218,7 @@ async fn handle_append_event_command(
     shared_config: Arc<RwLock<Config>>,
     input: AppendEventInput,
     task_label: &'static str,
+    verbose: bool,
 ) -> std::result::Result<ControlReply, EventError> {
     let record = spawn_blocking({
         let core = core.clone();
@@ -1161,7 +1227,11 @@ async fn handle_append_event_command(
     .await
     .map_err(|err| EventError::Storage(format!("{task_label} task failed: {err}")))??;
 
-    let record_json = serde_json::to_string(&record)?;
+    let record_json = if verbose {
+        Some(serde_json::to_string(&record)?)
+    } else {
+        None
+    };
 
     let schemas = core.schemas();
     if schemas.should_snapshot(&record.aggregate_type, record.version) {
@@ -1227,7 +1297,16 @@ async fn handle_append_event_command(
         }
     }
 
-    Ok(ControlReply::AppendEvent(record_json))
+    Ok(ControlReply::AppendEvent {
+        event_json: record_json,
+    })
+}
+
+fn config_verbose(shared_config: &Arc<RwLock<Config>>) -> std::result::Result<bool, EventError> {
+    let guard = shared_config
+        .read()
+        .map_err(|_| EventError::Storage("failed to acquire config lock".into()))?;
+    Ok(guard.verbose_responses())
 }
 
 async fn handle_replication_session<R, W>(

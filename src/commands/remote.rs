@@ -23,6 +23,8 @@ use eventdbx::{
 };
 use serde_json;
 
+use crate::commands::domain::normalize_domain_name;
+
 #[derive(Subcommand)]
 pub enum RemoteCommands {
     /// Add a replication remote
@@ -80,6 +82,9 @@ pub struct RemoteKeyArgs {
 pub struct RemotePushArgs {
     /// Remote alias to push to
     pub name: String,
+    /// Domain to push from (defaults to the active domain)
+    #[arg(value_name = "DOMAIN")]
+    pub domain: Option<String>,
     /// Perform a dry run without sending data
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
@@ -87,10 +92,10 @@ pub struct RemotePushArgs {
     #[arg(long, default_value_t = 500)]
     pub batch_size: usize,
     /// Limit the push to specific aggregate types
-    #[arg(long = "aggregate", value_name = "TYPE")]
+    #[arg(short = 'a', long = "aggregate", value_name = "TYPE")]
     pub aggregates: Vec<String>,
     /// Limit the push to specific aggregate identifiers (TYPE:ID)
-    #[arg(long = "aggregate-id", value_name = "TYPE:ID")]
+    #[arg(short = 'i', long = "aggregate-id", value_name = "TYPE:ID")]
     pub aggregate_ids: Vec<String>,
     /// Synchronize schemas on the remote before pushing events
     #[arg(long, default_value_t = false)]
@@ -104,6 +109,9 @@ pub struct RemotePushArgs {
 pub struct RemotePullArgs {
     /// Remote alias to pull from
     pub name: String,
+    /// Domain to pull into (defaults to the active domain)
+    #[arg(value_name = "DOMAIN")]
+    pub domain: Option<String>,
     /// Perform a dry run without writing data
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
@@ -111,10 +119,10 @@ pub struct RemotePullArgs {
     #[arg(long, default_value_t = 500)]
     pub batch_size: usize,
     /// Limit the pull to specific aggregate types
-    #[arg(long = "aggregate", value_name = "TYPE")]
+    #[arg(short = 'a', long = "aggregate", value_name = "TYPE")]
     pub aggregates: Vec<String>,
     /// Limit the pull to specific aggregate identifiers (TYPE:ID)
-    #[arg(long = "aggregate-id", value_name = "TYPE:ID")]
+    #[arg(short = 'i', long = "aggregate-id", value_name = "TYPE:ID")]
     pub aggregate_ids: Vec<String>,
     /// Synchronize schemas from the remote
     #[arg(long, default_value_t = false)]
@@ -261,7 +269,12 @@ pub async fn push(config_path: Option<PathBuf>, mut args: RemotePushArgs) -> Res
         bail!("--schema-only cannot be combined with aggregate filters");
     }
 
-    let (config, _) = load_or_default(config_path)?;
+    let (mut config, _) = load_or_default(config_path)?;
+    if let Some(domain) = args.domain.take() {
+        let normalized = normalize_domain_name(&domain)?;
+        config.domain = normalized;
+    }
+    config.ensure_data_dir()?;
     let remote = config
         .remotes
         .get(&args.name)
@@ -307,7 +320,17 @@ pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Res
         bail!("--schema-only cannot be combined with aggregate filters");
     }
 
-    let (config, _) = load_or_default(config_path)?;
+    let (mut config, _) = load_or_default(config_path)?;
+    let original_domain = config.active_domain().to_string();
+    let domain_overridden = if let Some(domain) = args.domain.take() {
+        let normalized = normalize_domain_name(&domain)?;
+        let overridden = normalized != original_domain;
+        config.domain = normalized;
+        overridden
+    } else {
+        false
+    };
+    config.ensure_data_dir()?;
     let remote = config
         .remotes
         .get(&args.name)
@@ -358,6 +381,12 @@ pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Res
                     .await?;
                 }
                 Err(EventError::Storage(message)) if is_lock_error(&message) => {
+                    if domain_overridden {
+                        bail!(
+                            "cannot proxy pull via running server when operating on domain '{}'; stop the daemon for that domain and retry",
+                            config.active_domain()
+                        );
+                    }
                     pull_remote_via_daemon(
                         &config,
                         remote.clone(),
@@ -846,7 +875,9 @@ async fn connect_local_replication_client(config: &Config) -> Result<CapnpReplic
 
 async fn connect_client(remote: &RemoteConfig) -> Result<CapnpReplicationClient> {
     let endpoint = normalize_capnp_endpoint(&remote.endpoint)?;
+
     let expected_key = decode_public_key_bytes(&remote.public_key)?;
+
     CapnpReplicationClient::connect(&endpoint, &expected_key)
         .await
         .map_err(|err| anyhow!("failed to connect to remote {}: {}", remote.endpoint, err))

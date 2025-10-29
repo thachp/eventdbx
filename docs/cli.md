@@ -33,7 +33,7 @@ Key flags:
 
 - `dbx config [--port <u16>] [--data-dir <path>] [--cache-threshold <usize>] [--dek <base64>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>] [--snapshot-threshold <u64>] [--clear-snapshot-threshold] [--admin-enabled <true|false>] [--admin-bind <addr>] [--admin-port <u16>]`
 
-Run without flags to print the current configuration. The first invocation must supply `--dek` (32 bytes of base64). Admin endpoints reuse JWT bearer tokens; enable them with `--admin-enabled true` and call them with a root token from `~/.eventdbx/cli.token` or `dbx token generate --root`.
+Run without flags to print the current configuration. The first invocation must supply `--dek` (32 bytes of base64). Admin endpoints reuse JWT bearer tokens; enable them with `--admin-enabled true` and call them with a token that carries wildcard privileges (for example, the bootstrap token at `~/.eventdbx/cli.token` or a dedicated token minted via `dbx token generate --group ops --user admin --action '*.*' --resource '*'`).
 
 ## Tokens
 

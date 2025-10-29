@@ -207,13 +207,21 @@ fn token_list_empty_prints_hint() -> Result<()> {
 fn token_generate_and_list_json_round_trip() -> Result<()> {
     let cli = CliTest::new()?;
     let stdout = cli.run(&[
-        "token", "generate", "--group", "ops", "--user", "alice", "--root", "--json",
+        "token",
+        "generate",
+        "--group",
+        "ops",
+        "--user",
+        "alice",
+        "--action",
+        "aggregate.read",
+        "--json",
     ])?;
     let record: Value =
         serde_json::from_str(stdout.trim()).context("failed to parse token generate output")?;
     assert_eq!(record["group"], "ops");
     assert_eq!(record["user"], "alice");
-    assert_eq!(record["root"], json!(true));
+    assert_eq!(record["actions"], json!(["aggregate.read"]));
 
     let stdout = cli.run(&["token", "list", "--json"])?;
     let records: Value =
@@ -240,7 +248,7 @@ fn token_generate_requires_action_for_non_root() -> Result<()> {
     assert!(
         failure
             .stderr
-            .contains("at least one --action must be provided for non-root tokens"),
+            .contains("at least one --action must be provided"),
         "unexpected validation message:\n{}",
         failure.stderr
     );
@@ -251,11 +259,23 @@ fn token_generate_requires_action_for_non_root() -> Result<()> {
 fn token_refresh_replaces_token() -> Result<()> {
     let cli = CliTest::new()?;
     let original = cli.run_json(&[
-        "token", "generate", "--group", "ops", "--user", "alice", "--root", "--json",
+        "token",
+        "generate",
+        "--group",
+        "ops",
+        "--user",
+        "alice",
+        "--action",
+        "aggregate.read",
+        "--json",
     ])?;
     let original_token = original["token"]
         .as_str()
         .context("missing token field from token generate")?
+        .to_string();
+    let original_jti = original["jti"]
+        .as_str()
+        .context("missing jti from token generate output")?
         .to_string();
 
     let refreshed = cli.run_json(&["token", "refresh", "--token", &original_token, "--json"])?;
@@ -266,6 +286,10 @@ fn token_refresh_replaces_token() -> Result<()> {
         new_token, original_token,
         "refresh should issue a replacement token"
     );
+    let refreshed_jti = refreshed["jti"]
+        .as_str()
+        .context("missing jti from refresh response")?
+        .to_string();
 
     let list = cli.run_json(&["token", "list", "--json"])?;
     let array = list
@@ -279,14 +303,28 @@ fn token_refresh_replaces_token() -> Result<()> {
     let mut active_found = false;
     let mut revoked_found = false;
     for record in array {
-        match record["status"].as_str() {
+        match record["jti"].as_str() {
+            Some(jti) if jti == refreshed_jti => {
+                active_found = true;
+                assert_eq!(
+                    record["status"],
+                    json!("active"),
+                    "refreshed token should remain active"
+                );
+            }
+            Some(jti) if jti == original_jti => {
+                revoked_found = true;
+                assert_eq!(
+                    record["status"],
+                    json!("revoked"),
+                    "original token should be marked revoked"
+                );
+            }
             Some("active") => {
                 active_found = true;
-                assert_eq!(record["token"], json!(new_token));
             }
             Some("revoked") => {
                 revoked_found = true;
-                assert_eq!(record["token"], json!(original_token));
             }
             _ => {}
         }
@@ -978,7 +1016,15 @@ fn config_updates_port_writes_file() -> Result<()> {
 fn token_revoke_updates_status() -> Result<()> {
     let cli = CliTest::new()?;
     let record = cli.run_json(&[
-        "token", "generate", "--group", "ops", "--user", "alice", "--root", "--json",
+        "token",
+        "generate",
+        "--group",
+        "ops",
+        "--user",
+        "alice",
+        "--action",
+        "aggregate.read",
+        "--json",
     ])?;
     let token = record["token"]
         .as_str()

@@ -25,6 +25,9 @@ pub struct ConfigArgs {
     #[arg(long = "page-limit")]
     pub page_limit: Option<usize>,
 
+    #[arg(long = "verbose-responses")]
+    pub verbose_responses: Option<bool>,
+
     #[arg(long = "plugin-max-attempts")]
     pub plugin_max_attempts: Option<u32>,
 
@@ -62,6 +65,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         data_encryption_key,
         list_page_size,
         page_limit,
+        verbose_responses,
         plugin_max_attempts,
         snapshot_threshold,
         clear_snapshot_threshold,
@@ -99,9 +103,8 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         restrict: None,
         list_page_size,
         page_limit,
+        verbose_responses,
         plugin_max_attempts,
-        api: None,
-        grpc: None,
         socket: None,
         admin: admin_update,
         snowflake_worker_id,
@@ -152,6 +155,7 @@ fn has_updates(args: &ConfigArgs) -> bool {
             .unwrap_or(false)
         || args.list_page_size.is_some()
         || args.page_limit.is_some()
+        || args.verbose_responses.is_some()
         || args.plugin_max_attempts.is_some()
         || args.snapshot_threshold.is_some()
         || args.clear_snapshot_threshold

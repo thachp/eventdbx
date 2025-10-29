@@ -55,6 +55,26 @@ async fn control_capnp_regression_flows() -> Result<()> {
         spawn_control_session(core.clone(), Arc::clone(&shared_config));
 
     let mut next_request_id: u64 = 1;
+    let token_record = tokens.issue(IssueTokenInput {
+        subject: "system:admin".into(),
+        group: "system".into(),
+        user: "admin".into(),
+        actions: vec![
+            "aggregate.create".into(),
+            "aggregate.append".into(),
+            "aggregate.archive".into(),
+            "aggregate.read".into(),
+        ],
+        resources: vec!["*".to_string()],
+        ttl_secs: Some(3_600),
+        not_before: None,
+        issued_by: "control-test".into(),
+        limits: JwtLimits::default(),
+    })?;
+    let token_value = token_record
+        .token
+        .clone()
+        .expect("issued token missing value");
 
     let aggregates: Vec<Value> = send_control_request(
         &mut writer,
@@ -63,6 +83,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
             list.set_skip(0);
             list.set_take(0);
             list.set_has_take(false);
@@ -95,19 +116,6 @@ async fn control_capnp_regression_flows() -> Result<()> {
     assert!(aggregates.is_empty());
     next_request_id += 1;
 
-    let token_record = tokens.issue(IssueTokenInput {
-        subject: "system:admin".into(),
-        group: "system".into(),
-        user: "admin".into(),
-        root: true,
-        actions: Vec::new(),
-        resources: Vec::new(),
-        ttl_secs: Some(3_600),
-        not_before: None,
-        issued_by: "control-test".into(),
-        limits: JwtLimits::default(),
-    })?;
-
     let event_record: Value = send_control_request(
         &mut writer,
         &mut reader,
@@ -115,7 +123,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut append = payload.init_append_event();
-            append.set_token(&token_record.token);
+            append.set_token(&token_value);
             append.set_aggregate_type("order");
             append.set_aggregate_id("order-1");
             append.set_event_type("order_created");
@@ -201,6 +209,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
             list.set_skip(0);
             list.set_take(10);
             list.set_has_take(true);
@@ -235,6 +244,49 @@ async fn control_capnp_regression_flows() -> Result<()> {
     assert_eq!(aggregates_after[0]["version"], 1);
     next_request_id += 1;
 
+    let filtered_aggregates: Vec<Value> = send_control_request(
+        &mut writer,
+        &mut reader,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
+            list.set_skip(0);
+            list.set_take(10);
+            list.set_has_take(true);
+            list.set_has_sort(false);
+            list.set_include_archived(false);
+            list.set_archived_only(false);
+            list.set_has_filter(true);
+            list.set_filter(r#"aggregate_id = "order-1""#);
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::ListAggregates(Ok(list)) => {
+                let json = list
+                    .get_aggregates_json()
+                    .context("missing aggregates_json")?
+                    .to_str()
+                    .context("aggregates_json utf-8 error")?;
+                let parsed: Vec<Value> =
+                    serde_json::from_str(json).context("failed to parse aggregates_json")?;
+                Ok(parsed)
+            }
+            control_response::payload::ListAggregates(Err(err)) => {
+                Err(anyhow!("failed to decode list_aggregates response: {err}"))
+            }
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert_eq!(filtered_aggregates.len(), 1);
+    assert_eq!(filtered_aggregates[0]["aggregate_id"], "order-1");
+    next_request_id += 1;
+
     let aggregate_detail = send_control_request(
         &mut writer,
         &mut reader,
@@ -242,6 +294,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut get = payload.init_get_aggregate();
+            get.set_token(&token_value);
             get.set_aggregate_type("order");
             get.set_aggregate_id("order-1");
         },
@@ -326,6 +379,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_events();
+            list.set_token(&token_value);
             list.set_aggregate_type("order");
             list.set_aggregate_id("order-1");
             list.set_skip(0);
@@ -400,6 +454,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut get = payload.init_get_aggregate();
+            get.set_token(&token_value);
             get.set_aggregate_type("inventory");
             get.set_aggregate_id("sku-1");
         },
@@ -522,14 +577,22 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         subject: "system:admin".into(),
         group: "system".into(),
         user: "admin".into(),
-        root: true,
-        actions: Vec::new(),
-        resources: Vec::new(),
+        actions: vec![
+            "aggregate.create".into(),
+            "aggregate.append".into(),
+            "aggregate.archive".into(),
+            "aggregate.read".into(),
+        ],
+        resources: vec!["*".to_string()],
         ttl_secs: Some(3_600),
         not_before: None,
         issued_by: "control-batch-test".into(),
         limits: JwtLimits::default(),
     })?;
+    let token_value = token_record
+        .token
+        .clone()
+        .expect("issued token missing value");
 
     let missing_patch_error = send_control_request(
         &mut writer,
@@ -538,7 +601,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut patch = payload.init_patch_event();
-            patch.set_token(&token_record.token);
+            patch.set_token(&token_value);
             patch.set_aggregate_type("order");
             patch.set_aggregate_id("order-unknown");
             patch.set_event_type("order_status_updated");
@@ -591,7 +654,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut append = payload.init_append_event();
-            append.set_token(&token_record.token);
+            append.set_token(&token_value);
             append.set_aggregate_type("order");
             append.set_aggregate_id("order-1");
             append.set_event_type("order_created");
@@ -643,7 +706,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut patch = payload.init_patch_event();
-            patch.set_token(&token_record.token);
+            patch.set_token(&token_value);
             patch.set_aggregate_type("order");
             patch.set_aggregate_id("order-1");
             patch.set_event_type("order_status_updated");
@@ -741,6 +804,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_events();
+            list.set_token(&token_value);
             list.set_aggregate_type("order");
             list.set_aggregate_id("order-1");
             list.set_skip(0);
@@ -790,6 +854,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut get = payload.init_get_aggregate();
+            get.set_token(&token_value);
             get.set_aggregate_type("order");
             get.set_aggregate_id("order-1");
         },
@@ -848,6 +913,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut select = payload.init_select_aggregate();
+            select.set_token(&token_value);
             select.set_aggregate_type("order");
             select.set_aggregate_id("order-1");
             let mut fields = select.reborrow().init_fields(3);
@@ -898,7 +964,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut archive = payload.init_set_aggregate_archive();
-            archive.set_token(&token_record.token);
+            archive.set_token(&token_value);
             archive.set_aggregate_type("order");
             archive.set_aggregate_id("order-1");
             archive.set_archived(true);
@@ -939,6 +1005,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
             list.set_skip(0);
             list.set_take(10);
             list.set_has_take(true);
@@ -983,6 +1050,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
             list.set_skip(0);
             list.set_take(10);
             list.set_has_take(true);
@@ -1025,7 +1093,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut archive = payload.init_set_aggregate_archive();
-            archive.set_token(&token_record.token);
+            archive.set_token(&token_value);
             archive.set_aggregate_type("order");
             archive.set_aggregate_id("order-1");
             archive.set_archived(false);
@@ -1072,6 +1140,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
+            list.set_token(&token_value);
             list.set_skip(0);
             list.set_take(10);
             list.set_has_take(true);

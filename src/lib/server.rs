@@ -148,13 +148,6 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         _config_path: Arc::clone(&config_path),
     };
 
-    let api = config_snapshot.api.clone();
-    if api.rest_enabled() || api.graphql_enabled() || api.grpc_enabled() {
-        warn!(
-            "Built-in REST/GraphQL/gRPC surfaces are deprecated; deploy plugin surfaces instead."
-        );
-    }
-
     let cli_bind_addr = config_snapshot.socket.bind_addr.clone();
     let addr_store =
         Arc::clone(CLI_PROXY_ADDR.get_or_init(|| Arc::new(AsyncRwLock::new(String::new()))));
