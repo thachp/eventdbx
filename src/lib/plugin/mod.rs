@@ -700,7 +700,8 @@ pub fn instantiate_plugin(definition: &PluginDefinition, config: &Config) -> Box
                 .name
                 .clone()
                 .unwrap_or_else(|| settings.name.clone());
-            match ProcessPlugin::new(identifier.clone(), settings.clone(), &config.data_dir) {
+            let data_root = config.domain_data_dir();
+            match ProcessPlugin::new(identifier.clone(), settings.clone(), data_root.as_path()) {
                 Ok(plugin) => Box::new(plugin),
                 Err(err) => {
                     tracing::error!(

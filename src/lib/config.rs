@@ -29,6 +29,7 @@ use super::{
 pub const DEFAULT_PORT: u16 = 7070;
 pub const DEFAULT_SOCKET_PORT: u16 = 6363;
 pub const DEFAULT_CACHE_THRESHOLD: usize = 10_000;
+pub const DEFAULT_DOMAIN_NAME: &str = "default";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
@@ -94,6 +95,8 @@ impl Default for PluginQueuePruneConfig {
 pub struct Config {
     pub port: u16,
     pub data_dir: PathBuf,
+    #[serde(default = "default_domain")]
+    pub domain: String,
     #[serde(default = "default_cache_threshold", alias = "memory_threshold")]
     pub cache_threshold: usize,
     #[serde(default)]
@@ -138,6 +141,7 @@ impl Default for Config {
         Self {
             port: DEFAULT_PORT,
             data_dir: default_data_dir(),
+            domain: default_domain(),
             cache_threshold: default_cache_threshold(),
             snapshot_threshold: None,
             data_encryption_key: Some(generate_data_encryption_key()),
@@ -305,7 +309,28 @@ impl Config {
 
     pub fn ensure_data_dir(&self) -> Result<()> {
         fs::create_dir_all(&self.data_dir)?;
+        fs::create_dir_all(self.domain_data_dir().as_path())?;
         Ok(())
+    }
+
+    pub fn active_domain(&self) -> &str {
+        &self.domain
+    }
+
+    pub fn is_default_domain(&self) -> bool {
+        self.domain == DEFAULT_DOMAIN_NAME
+    }
+
+    pub fn domains_root(&self) -> PathBuf {
+        self.data_dir.join("domains")
+    }
+
+    pub fn domain_data_dir(&self) -> PathBuf {
+        if self.is_default_domain() {
+            self.data_dir.clone()
+        } else {
+            self.domains_root().join(&self.domain)
+        }
     }
 
     pub fn ensure_encryption_key(&mut self) -> bool {
@@ -425,19 +450,19 @@ impl Config {
     }
 
     pub fn event_store_path(&self) -> PathBuf {
-        self.data_dir.join("event_store")
+        self.domain_data_dir().join("event_store")
     }
 
     pub fn tokens_path(&self) -> PathBuf {
-        self.data_dir.join("tokens.json")
+        self.domain_data_dir().join("tokens.json")
     }
 
     pub fn cli_token_path(&self) -> PathBuf {
-        self.data_dir.join("cli.token")
+        self.domain_data_dir().join("cli.token")
     }
 
     pub fn jwt_revocations_path(&self) -> PathBuf {
-        self.data_dir.join("jwt_revocations.json")
+        self.domain_data_dir().join("jwt_revocations.json")
     }
 
     pub fn jwt_manager_config(&self) -> Result<JwtManagerConfig> {
@@ -490,27 +515,27 @@ impl Config {
     }
 
     pub fn schema_store_path(&self) -> PathBuf {
-        self.data_dir.join("schemas.json")
+        self.domain_data_dir().join("schemas.json")
     }
 
     pub fn staging_path(&self) -> PathBuf {
-        self.data_dir.join("staged_events.json")
+        self.domain_data_dir().join("staged_events.json")
     }
 
     pub fn plugins_path(&self) -> PathBuf {
-        self.data_dir.join("plugins.json")
+        self.domain_data_dir().join("plugins.json")
     }
 
     pub fn plugin_queue_path(&self) -> PathBuf {
-        self.data_dir.join("plugin_queue.json")
+        self.domain_data_dir().join("plugin_queue.json")
     }
 
     pub fn plugin_queue_db_path(&self) -> PathBuf {
-        self.data_dir.join("plugin_queue.db")
+        self.domain_data_dir().join("plugin_queue.db")
     }
 
     pub fn pid_file_path(&self) -> PathBuf {
-        self.data_dir.join("eventdbx.pid")
+        self.domain_data_dir().join("eventdbx.pid")
     }
 
     pub fn verbose_responses(&self) -> bool {
@@ -679,6 +704,10 @@ fn generate_jwt_keypair() -> Result<(String, String)> {
 
 fn default_data_dir() -> PathBuf {
     default_config_root().unwrap_or_else(|_| PathBuf::from(".eventdbx"))
+}
+
+fn default_domain() -> String {
+    DEFAULT_DOMAIN_NAME.to_string()
 }
 
 fn default_restrict() -> RestrictMode {

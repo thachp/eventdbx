@@ -50,7 +50,17 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
   dbx plugin start rest
   ```
 
-3. **Define a schema (recommended when running in restricted mode)**
+3. **Switch domains (optional)**
+
+   ```bash
+   dbx checkout -d herds
+   ```
+
+   - New installs default to the `default` domain, which stores data directly under the configured `data_dir`.
+   - `dbx checkout -d <domain>` (or `dbx checkout <domain>`) changes the active domain and creates isolated storage in `<data_dir>/domains/<domain>` so you can group aggregates and plugins per bounded context.
+   - Domain names are case-insensitive, must begin with a letter or number, and may include dashes or underscores. Re-running the command for the current domain is a no-op.
+
+4. **Define a schema (recommended when running in restricted mode)**
 
    ```bash
    dbx schema create patient \
@@ -159,6 +169,8 @@ EventDBX ships a single `dbx` binary. Every command accepts an optional `--confi
   Stops the existing daemon (if any) and restarts it with the provided options.
 - `dbx destroy [--yes]`  
   Removes the PID file, data directory, and configuration file after confirmation (or immediately with `--yes`).
+- `dbx checkout -d <domain>`  
+  Switches the active domain context for the CLI. Uses the `default` domain by default and creates per-domain data roots under `<data_dir>/domains/<domain>`.
 
 ### Configuration
 
