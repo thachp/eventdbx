@@ -171,6 +171,8 @@ EventDBX ships a single `dbx` binary. Every command accepts an optional `--confi
   Removes the PID file, data directory, and configuration file after confirmation (or immediately with `--yes`).
 - `dbx checkout -d <domain>`  
   Switches the active domain context for the CLI. Uses the `default` domain by default and creates per-domain data roots under `<data_dir>/domains/<domain>`.
+- `dbx merge --from <domain> [--into <domain>] [--overwrite-schemas]`  
+  Copies events (and their derived state) plus schema definitions from the source domain into the target domain (defaults to the active domain). Conflicting schemas require `--overwrite-schemas`; existing aggregates in the target abort the merge to prevent data loss.
 
 ### Configuration
 
