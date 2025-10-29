@@ -182,6 +182,7 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
 }
 
 fn print_record(record: &TokenRecord) {
+    let token_display = record.token.as_deref().unwrap_or("<hidden>");
     let expires_at = record
         .expires_at
         .map(|ts| ts.to_rfc3339())
@@ -198,7 +199,7 @@ fn print_record(record: &TokenRecord) {
     };
     println!(
         "token={}\n  jti={}\n  subject={}\n  group={}\n  user={}\n  status={:?}\n  issued_by={}\n  issued_at={}\n  expires_at={}\n  actions=[{}]\n  resources=[{}]",
-        record.token,
+        token_display,
         record.jti,
         record.subject,
         record.group,

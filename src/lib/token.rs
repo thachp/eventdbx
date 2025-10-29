@@ -124,7 +124,8 @@ impl IssueTokenInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenRecord {
-    pub token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
     pub jti: String,
     pub subject: String,
     pub group: String,
@@ -153,6 +154,12 @@ impl TokenRecord {
             }
         }
         true
+    }
+
+    pub fn without_token(&self) -> Self {
+        let mut clone = self.clone();
+        clone.token = None;
+        clone
     }
 }
 
@@ -306,7 +313,7 @@ impl TokenManager {
             .map_err(|err| EventError::Storage(format!("failed to encode jwt: {err}")))?;
 
         let record = TokenRecord {
-            token,
+            token: Some(token.clone()),
             jti: claims.jti.clone(),
             subject: payload.subject,
             group: payload.group,
@@ -321,22 +328,19 @@ impl TokenManager {
             limits: payload.limits,
         };
 
+        let stored = record.without_token();
         self.persist_with(|records| {
-            records.push(record.clone());
+            records.push(stored.clone());
         })?;
 
         Ok(record)
     }
 
     pub fn authorize(&self, token: &str, request: AccessRequest<'_>) -> Result<JwtClaims> {
-        match self.decode(token) {
-            Ok(claims) => {
-                self.ensure_active(&claims)?;
-                self.check_permissions(&claims, request)?;
-                Ok(claims)
-            }
-            Err(_) => self.authorize_legacy(token, request),
-        }
+        let claims = self.decode(token)?;
+        self.ensure_active(&claims)?;
+        self.check_permissions(&claims, request)?;
+        Ok(claims)
     }
 
     pub fn authorize_action(
@@ -351,56 +355,6 @@ impl TokenManager {
     pub fn verify(&self, token: &str) -> Result<JwtClaims> {
         let claims = self.decode(token)?;
         self.ensure_active(&claims)?;
-        Ok(claims)
-    }
-
-    fn authorize_legacy(&self, token: &str, request: AccessRequest<'_>) -> Result<JwtClaims> {
-        self.reload_from_disk()?;
-        let now = Utc::now();
-        let record = {
-            let records = self.records.read();
-            records.iter().find(|record| record.token == token).cloned()
-        };
-        let Some(record) = record else {
-            return Err(EventError::InvalidToken);
-        };
-
-        if !record.is_active(now) {
-            return Err(EventError::InvalidToken);
-        }
-
-        if self.revocations.is_revoked(&record.jti)? {
-            return Err(EventError::InvalidToken);
-        }
-
-        let actions = if record.actions.is_empty() {
-            vec![ROOT_ACTION.to_string()]
-        } else {
-            record.actions.clone()
-        };
-        let resources = if record.resources.is_empty() {
-            vec![ROOT_RESOURCE.to_string()]
-        } else {
-            record.resources.clone()
-        };
-
-        let claims = JwtClaims {
-            iss: self.issuer.clone(),
-            aud: self.audience.clone(),
-            sub: record.subject.clone(),
-            jti: record.jti.clone(),
-            iat: record.issued_at.timestamp(),
-            exp: record.expires_at.map(|ts| ts.timestamp()),
-            nbf: record.not_before.map(|ts| ts.timestamp()),
-            group: record.group.clone(),
-            user: record.user.clone(),
-            actions,
-            resources,
-            issued_by: record.issued_by.clone(),
-            limits: record.limits.clone(),
-        };
-
-        self.check_permissions(&claims, request)?;
         Ok(claims)
     }
 
@@ -428,38 +382,64 @@ impl TokenManager {
 
     pub fn revoke(&self, input: RevokeTokenInput) -> Result<RevokedTokenRecord> {
         let now = Utc::now();
-        let (jti, expires_at) = {
-            let mut target = None;
-            self.persist_with(|records| {
-                for record in records.iter_mut() {
-                    if record.token == input.token_or_id || record.jti == input.token_or_id {
-                        record.status = TokenStatus::Revoked;
-                        target = Some((record.jti.clone(), record.expires_at));
-                        break;
-                    }
-                }
-            })?;
-
-            target.ok_or(EventError::InvalidToken)?
+        let (jti, mut expires_at_hint) = if looks_like_jwt(&input.token_or_id) {
+            let claims = self.decode(&input.token_or_id)?;
+            (claims.jti.clone(), claims.expires_at())
+        } else {
+            (input.token_or_id.clone(), None)
         };
+
+        let mut updated = false;
+        let jti_ref = jti.clone();
+        self.persist_with(|records| {
+            for record in records.iter_mut() {
+                if record.jti == jti_ref {
+                    record.status = TokenStatus::Revoked;
+                    if expires_at_hint.is_none() {
+                        expires_at_hint = record.expires_at;
+                    }
+                    updated = true;
+                    break;
+                }
+            }
+        })?;
+
+        if !updated {
+            return Err(EventError::InvalidToken);
+        }
 
         let revoked = RevokedTokenRecord {
             jti,
             revoked_at: now,
             reason: input.reason,
-            expires_at,
+            expires_at: expires_at_hint,
         };
         self.revocations.insert(revoked.clone())?;
         Ok(revoked)
     }
 
     pub fn refresh(&self, token_or_id: &str, ttl_secs: Option<u64>) -> Result<TokenRecord> {
+        let claims = if looks_like_jwt(token_or_id) {
+            Some(self.decode(token_or_id)?)
+        } else {
+            None
+        };
+
+        if let Some(ref claims) = claims {
+            self.ensure_active(claims)?;
+        }
+
         self.reload_from_disk()?;
+        let target_jti = claims
+            .as_ref()
+            .map(|c| c.jti.clone())
+            .unwrap_or_else(|| token_or_id.to_string());
+
         let existing = {
             let records = self.records.read();
             records
                 .iter()
-                .find(|record| record.token == token_or_id || record.jti == token_or_id)
+                .find(|record| record.jti == target_jti)
                 .cloned()
         };
         let Some(record) = existing else {
@@ -473,11 +453,14 @@ impl TokenManager {
             expires_at: record.expires_at,
         })?;
 
+        let revoked_jti = record.jti.clone();
         self.persist_with(|records| {
-            records
-                .iter_mut()
-                .filter(|entry| entry.jti == record.jti)
-                .for_each(|entry| entry.status = TokenStatus::Revoked);
+            for entry in records.iter_mut() {
+                if entry.jti == revoked_jti {
+                    entry.status = TokenStatus::Revoked;
+                    break;
+                }
+            }
         })?;
 
         let issued_by = if record.issued_by.is_empty() {
@@ -519,6 +502,7 @@ impl TokenManager {
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.validate_exp = false;
         validation.validate_nbf = false;
+        validation.validate_aud = false;
         validation.required_spec_claims = HashSet::new();
 
         let decoded = decode::<JwtClaims>(token, &self.decoding_key, &validation)
@@ -667,6 +651,20 @@ fn wildcard_matches(pattern: &str, candidate: &str) -> bool {
     p_idx == pattern_chars.len()
 }
 
+fn looks_like_jwt(token: &str) -> bool {
+    token.split('.').count() == 3
+}
+
+fn strip_tokens(records: &mut [TokenRecord]) -> bool {
+    let mut changed = false;
+    for record in records.iter_mut() {
+        if record.token.take().is_some() {
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn read_token_records(path: &Path, encryptor: Option<&Encryptor>) -> Result<Vec<TokenRecord>> {
     let contents = match fs::read_to_string(path) {
         Ok(data) => data,
@@ -685,11 +683,16 @@ fn read_token_records(path: &Path, encryptor: Option<&Encryptor>) -> Result<Vec<
             if bytes.is_empty() {
                 return Ok(Vec::new());
             }
-            let records: Vec<TokenRecord> = serde_json::from_slice(&bytes)?;
+            let mut records: Vec<TokenRecord> = serde_json::from_slice(&bytes)?;
+            if strip_tokens(&mut records) {
+                write_token_records(path, &records, Some(enc))?;
+            }
             Ok(records)
         } else {
-            let records: Vec<TokenRecord> = serde_json::from_str(trimmed)?;
-            write_token_records(path, &records, Some(enc))?;
+            let mut records: Vec<TokenRecord> = serde_json::from_str(trimmed)?;
+            if strip_tokens(&mut records) {
+                write_token_records(path, &records, Some(enc))?;
+            }
             Ok(records)
         }
     } else {
@@ -698,7 +701,10 @@ fn read_token_records(path: &Path, encryptor: Option<&Encryptor>) -> Result<Vec<
                 "data encryption key must be configured to read encrypted tokens".to_string(),
             ));
         }
-        let records: Vec<TokenRecord> = serde_json::from_str(trimmed)?;
+        let mut records: Vec<TokenRecord> = serde_json::from_str(trimmed)?;
+        if strip_tokens(&mut records) {
+            write_token_records(path, &records, None)?;
+        }
         Ok(records)
     }
 }

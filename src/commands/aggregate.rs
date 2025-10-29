@@ -1425,7 +1425,9 @@ fn issue_ephemeral_token(config: &Config) -> Result<String> {
             keep_alive: false,
         },
     })?;
-    Ok(record.token)
+    record
+        .token
+        .ok_or_else(|| anyhow!("ephemeral token missing value"))
 }
 
 fn proxy_user_identity() -> String {

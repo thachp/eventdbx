@@ -273,6 +273,10 @@ fn token_refresh_replaces_token() -> Result<()> {
         .as_str()
         .context("missing token field from token generate")?
         .to_string();
+    let original_jti = original["jti"]
+        .as_str()
+        .context("missing jti from token generate output")?
+        .to_string();
 
     let refreshed = cli.run_json(&["token", "refresh", "--token", &original_token, "--json"])?;
     let new_token = refreshed["token"]
@@ -282,6 +286,10 @@ fn token_refresh_replaces_token() -> Result<()> {
         new_token, original_token,
         "refresh should issue a replacement token"
     );
+    let refreshed_jti = refreshed["jti"]
+        .as_str()
+        .context("missing jti from refresh response")?
+        .to_string();
 
     let list = cli.run_json(&["token", "list", "--json"])?;
     let array = list
@@ -295,14 +303,28 @@ fn token_refresh_replaces_token() -> Result<()> {
     let mut active_found = false;
     let mut revoked_found = false;
     for record in array {
-        match record["status"].as_str() {
+        match record["jti"].as_str() {
+            Some(jti) if jti == refreshed_jti => {
+                active_found = true;
+                assert_eq!(
+                    record["status"],
+                    json!("active"),
+                    "refreshed token should remain active"
+                );
+            }
+            Some(jti) if jti == original_jti => {
+                revoked_found = true;
+                assert_eq!(
+                    record["status"],
+                    json!("revoked"),
+                    "original token should be marked revoked"
+                );
+            }
             Some("active") => {
                 active_found = true;
-                assert_eq!(record["token"], json!(new_token));
             }
             Some("revoked") => {
                 revoked_found = true;
-                assert_eq!(record["token"], json!(original_token));
             }
             _ => {}
         }

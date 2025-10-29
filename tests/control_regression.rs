@@ -71,7 +71,10 @@ async fn control_capnp_regression_flows() -> Result<()> {
         issued_by: "control-test".into(),
         limits: JwtLimits::default(),
     })?;
-    let token_value = token_record.token.clone();
+    let token_value = token_record
+        .token
+        .clone()
+        .expect("issued token missing value");
 
     let aggregates: Vec<Value> = send_control_request(
         &mut writer,
@@ -120,7 +123,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut append = payload.init_append_event();
-            append.set_token(&token_record.token);
+            append.set_token(&token_value);
             append.set_aggregate_type("order");
             append.set_aggregate_id("order-1");
             append.set_event_type("order_created");
@@ -586,7 +589,10 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         issued_by: "control-batch-test".into(),
         limits: JwtLimits::default(),
     })?;
-    let token_value = token_record.token.clone();
+    let token_value = token_record
+        .token
+        .clone()
+        .expect("issued token missing value");
 
     let missing_patch_error = send_control_request(
         &mut writer,
@@ -595,7 +601,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut patch = payload.init_patch_event();
-            patch.set_token(&token_record.token);
+            patch.set_token(&token_value);
             patch.set_aggregate_type("order");
             patch.set_aggregate_id("order-unknown");
             patch.set_event_type("order_status_updated");
@@ -648,7 +654,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut append = payload.init_append_event();
-            append.set_token(&token_record.token);
+            append.set_token(&token_value);
             append.set_aggregate_type("order");
             append.set_aggregate_id("order-1");
             append.set_event_type("order_created");
@@ -700,7 +706,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut patch = payload.init_patch_event();
-            patch.set_token(&token_record.token);
+            patch.set_token(&token_value);
             patch.set_aggregate_type("order");
             patch.set_aggregate_id("order-1");
             patch.set_event_type("order_status_updated");
@@ -958,7 +964,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut archive = payload.init_set_aggregate_archive();
-            archive.set_token(&token_record.token);
+            archive.set_token(&token_value);
             archive.set_aggregate_type("order");
             archive.set_aggregate_id("order-1");
             archive.set_archived(true);
@@ -1087,7 +1093,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         |request| {
             let payload = request.reborrow().init_payload();
             let mut archive = payload.init_set_aggregate_archive();
-            archive.set_token(&token_record.token);
+            archive.set_token(&token_value);
             archive.set_aggregate_type("order");
             archive.set_aggregate_id("order-1");
             archive.set_archived(false);
