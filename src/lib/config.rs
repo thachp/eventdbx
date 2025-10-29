@@ -1,9 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    convert::TryInto,
-    env, fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, env, fs, path::{Path, PathBuf}};
 
 use base64::{
     Engine as _,
@@ -16,7 +11,7 @@ use ring::{
     rand::SystemRandom,
     signature::{ED25519_PUBLIC_KEY_LEN, Ed25519KeyPair, KeyPair},
 };
-use serde::de::{Deserializer, Error as DeError};
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -30,96 +25,6 @@ use super::{
 pub const DEFAULT_PORT: u16 = 7070;
 pub const DEFAULT_SOCKET_PORT: u16 = 6363;
 pub const DEFAULT_CACHE_THRESHOLD: usize = 10_000;
-
-fn default_bool_false() -> bool {
-    false
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ApiConfig {
-    pub rest: bool,
-    pub graphql: bool,
-    pub grpc: bool,
-}
-
-impl ApiConfig {
-    pub fn rest_enabled(&self) -> bool {
-        self.rest
-    }
-
-    pub fn graphql_enabled(&self) -> bool {
-        self.graphql
-    }
-
-    pub fn grpc_enabled(&self) -> bool {
-        self.grpc
-    }
-
-    pub fn any_enabled(&self) -> bool {
-        self.rest || self.graphql || self.grpc
-    }
-
-    pub fn from_flags(rest: bool, graphql: bool, grpc: bool) -> Self {
-        Self {
-            rest,
-            graphql,
-            grpc,
-        }
-    }
-
-    fn from_legacy(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "rest" => Some(Self::from_flags(true, false, false)),
-            "graphql" => Some(Self::from_flags(false, true, false)),
-            "grpc" => Some(Self::from_flags(false, false, true)),
-            "all" => Some(Self::default()),
-            _ => None,
-        }
-    }
-}
-
-impl Default for ApiConfig {
-    fn default() -> Self {
-        Self {
-            rest: false,
-            graphql: false,
-            grpc: false,
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ApiConfig {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Legacy(String),
-            Map {
-                #[serde(default = "default_bool_false")]
-                rest: bool,
-                #[serde(default = "default_bool_false")]
-                graphql: bool,
-                #[serde(default = "default_bool_false")]
-                grpc: bool,
-            },
-        }
-
-        let repr = Repr::deserialize(deserializer)?;
-        let config = match repr {
-            Repr::Legacy(value) => ApiConfig::from_legacy(&value)
-                .ok_or_else(|| DeError::custom(format!("invalid api value '{value}'")))?,
-            Repr::Map {
-                rest,
-                graphql,
-                grpc,
-            } => ApiConfig::from_flags(rest, graphql, grpc),
-        };
-        Ok(config)
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
@@ -212,11 +117,7 @@ pub struct Config {
     #[serde(default)]
     pub remotes: BTreeMap<String, RemoteConfig>,
     #[serde(default)]
-    pub grpc: GrpcApiConfig,
-    #[serde(default)]
     pub socket: SocketConfig,
-    #[serde(default = "default_api_config", alias = "api_mode")]
-    pub api: ApiConfig,
     #[serde(default)]
     pub admin: AdminApiConfig,
     #[serde(default)]
@@ -244,9 +145,7 @@ impl Default for Config {
             plugin_queue: PluginQueueConfig::default(),
             replication: ReplicationConfig::default(),
             remotes: BTreeMap::new(),
-            grpc: GrpcApiConfig::default(),
             socket: SocketConfig::default(),
-            api: default_api_config(),
             admin: AdminApiConfig::default(),
             auth: AuthConfig::default(),
             snowflake_worker_id: default_snowflake_worker_id(),
@@ -265,24 +164,9 @@ pub struct ConfigUpdate {
     pub list_page_size: Option<usize>,
     pub page_limit: Option<usize>,
     pub plugin_max_attempts: Option<u32>,
-    pub api: Option<ApiConfigUpdate>,
-    pub grpc: Option<GrpcApiConfigUpdate>,
     pub socket: Option<SocketConfigUpdate>,
     pub admin: Option<AdminApiConfigUpdate>,
     pub snowflake_worker_id: Option<u16>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ApiConfigUpdate {
-    pub rest: Option<bool>,
-    pub graphql: Option<bool>,
-    pub grpc: Option<bool>,
-}
-
-impl ApiConfigUpdate {
-    pub fn is_empty(&self) -> bool {
-        self.rest.is_none() && self.graphql.is_none() && self.grpc.is_none()
-    }
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -304,10 +188,6 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
     if config_path.exists() {
         let contents = fs::read_to_string(&config_path)?;
         let mut cfg: Config = toml::from_str(&contents)?;
-        if cfg.grpc.legacy_enabled.unwrap_or(false) && !cfg.api.grpc_enabled() {
-            cfg.api.grpc = true;
-        }
-        cfg.grpc.legacy_enabled = None;
 
         let updated = cfg.ensure_encryption_key();
         let auth_updated = cfg.ensure_auth_keys()?;
@@ -389,22 +269,6 @@ impl Config {
         }
         if let Some(worker_id) = update.snowflake_worker_id {
             self.snowflake_worker_id = worker_id;
-        }
-        if let Some(api) = update.api {
-            if let Some(rest) = api.rest {
-                self.api.rest = rest;
-            }
-            if let Some(graphql) = api.graphql {
-                self.api.graphql = graphql;
-            }
-            if let Some(grpc) = api.grpc {
-                self.api.grpc = grpc;
-            }
-        }
-        if let Some(grpc) = update.grpc {
-            if let Some(bind_addr) = grpc.bind_addr {
-                self.grpc.bind_addr = bind_addr;
-            }
         }
         if let Some(socket) = update.socket {
             if let Some(bind_addr) = socket.bind_addr {
@@ -700,13 +564,6 @@ impl Default for ReplicationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct GrpcApiConfig {
-    #[serde(default, skip_serializing)]
-    pub legacy_enabled: Option<bool>,
-    pub bind_addr: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SocketConfig {
     #[serde(default = "default_socket_bind_addr")]
@@ -719,41 +576,6 @@ impl Default for SocketConfig {
             bind_addr: default_socket_bind_addr(),
         }
     }
-}
-
-impl Default for GrpcApiConfig {
-    fn default() -> Self {
-        Self {
-            legacy_enabled: None,
-            bind_addr: default_grpc_bind_addr(),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for GrpcApiConfig {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Raw {
-            #[serde(default)]
-            enabled: Option<bool>,
-            #[serde(default = "default_grpc_bind_addr")]
-            bind_addr: String,
-        }
-
-        let raw = Raw::deserialize(deserializer)?;
-        Ok(Self {
-            legacy_enabled: raw.enabled,
-            bind_addr: raw.bind_addr,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct GrpcApiConfigUpdate {
-    pub bind_addr: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -868,20 +690,12 @@ fn default_snowflake_worker_id() -> u16 {
     0
 }
 
-fn default_grpc_bind_addr() -> String {
-    format!("0.0.0.0:{}", DEFAULT_PORT)
-}
-
 fn default_socket_bind_addr() -> String {
     format!("0.0.0.0:{}", DEFAULT_SOCKET_PORT)
 }
 
 fn default_cache_threshold() -> usize {
     DEFAULT_CACHE_THRESHOLD
-}
-
-fn default_api_config() -> ApiConfig {
-    ApiConfig::default()
 }
 
 fn default_plugin_queue_prune() -> PluginQueuePruneConfig {
@@ -1123,30 +937,6 @@ mod tests {
             ..ConfigUpdate::default()
         });
         assert_eq!(config.snapshot_threshold, None);
-    }
-
-    #[test]
-    fn api_config_deserializes_from_legacy_string() {
-        let value = toml::Value::String("grpc".into());
-        let api: ApiConfig = value.try_into().expect("legacy string should parse");
-        assert!(!api.rest_enabled());
-        assert!(!api.graphql_enabled());
-        assert!(api.grpc_enabled());
-    }
-
-    #[test]
-    fn api_config_deserializes_from_table() {
-        let api: ApiConfig = toml::from_str(
-            r#"
-rest = true
-graphql = false
-grpc = true
-"#,
-        )
-        .expect("table should parse");
-        assert!(api.rest_enabled());
-        assert!(!api.graphql_enabled());
-        assert!(api.grpc_enabled());
     }
 
     #[derive(Deserialize)]

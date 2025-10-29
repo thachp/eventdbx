@@ -87,10 +87,10 @@ pub struct RemotePushArgs {
     #[arg(long, default_value_t = 500)]
     pub batch_size: usize,
     /// Limit the push to specific aggregate types
-    #[arg(long = "aggregate", value_name = "TYPE")]
+    #[arg(short = 'a', long = "aggregate", value_name = "TYPE")]
     pub aggregates: Vec<String>,
     /// Limit the push to specific aggregate identifiers (TYPE:ID)
-    #[arg(long = "aggregate-id", value_name = "TYPE:ID")]
+    #[arg(short = 'i', long = "aggregate-id", value_name = "TYPE:ID")]
     pub aggregate_ids: Vec<String>,
     /// Synchronize schemas on the remote before pushing events
     #[arg(long, default_value_t = false)]
@@ -111,10 +111,10 @@ pub struct RemotePullArgs {
     #[arg(long, default_value_t = 500)]
     pub batch_size: usize,
     /// Limit the pull to specific aggregate types
-    #[arg(long = "aggregate", value_name = "TYPE")]
+    #[arg(short = 'a', long = "aggregate", value_name = "TYPE")]
     pub aggregates: Vec<String>,
     /// Limit the pull to specific aggregate identifiers (TYPE:ID)
-    #[arg(long = "aggregate-id", value_name = "TYPE:ID")]
+    #[arg(short = 'i', long = "aggregate-id", value_name = "TYPE:ID")]
     pub aggregate_ids: Vec<String>,
     /// Synchronize schemas from the remote
     #[arg(long, default_value_t = false)]
@@ -846,7 +846,9 @@ async fn connect_local_replication_client(config: &Config) -> Result<CapnpReplic
 
 async fn connect_client(remote: &RemoteConfig) -> Result<CapnpReplicationClient> {
     let endpoint = normalize_capnp_endpoint(&remote.endpoint)?;
+
     let expected_key = decode_public_key_bytes(&remote.public_key)?;
+
     CapnpReplicationClient::connect(&endpoint, &expected_key)
         .await
         .map_err(|err| anyhow!("failed to connect to remote {}: {}", remote.endpoint, err))

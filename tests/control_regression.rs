@@ -235,6 +235,48 @@ async fn control_capnp_regression_flows() -> Result<()> {
     assert_eq!(aggregates_after[0]["version"], 1);
     next_request_id += 1;
 
+    let filtered_aggregates: Vec<Value> = send_control_request(
+        &mut writer,
+        &mut reader,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut list = payload.init_list_aggregates();
+            list.set_skip(0);
+            list.set_take(10);
+            list.set_has_take(true);
+            list.set_has_sort(false);
+            list.set_include_archived(false);
+            list.set_archived_only(false);
+            list.set_has_filter(true);
+            list.set_filter(r#"aggregate_id = "order-1""#);
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::ListAggregates(Ok(list)) => {
+                let json = list
+                    .get_aggregates_json()
+                    .context("missing aggregates_json")?
+                    .to_str()
+                    .context("aggregates_json utf-8 error")?;
+                let parsed: Vec<Value> =
+                    serde_json::from_str(json).context("failed to parse aggregates_json")?;
+                Ok(parsed)
+            }
+            control_response::payload::ListAggregates(Err(err)) => {
+                Err(anyhow!("failed to decode list_aggregates response: {err}"))
+            }
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert_eq!(filtered_aggregates.len(), 1);
+    assert_eq!(filtered_aggregates[0]["aggregate_id"], "order-1");
+    next_request_id += 1;
+
     let aggregate_detail = send_control_request(
         &mut writer,
         &mut reader,

@@ -633,7 +633,6 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 patch: None,
                 metadata: metadata_value,
                 note,
-                require_existing: true,
             };
 
             execute_append_command(&config, command)?;
@@ -670,7 +669,6 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 patch: Some(patch_value),
                 metadata: metadata_value,
                 note,
-                require_existing: true,
             };
 
             execute_append_command(&config, command)?;
@@ -1064,7 +1062,6 @@ struct AppendCommand {
     patch: Option<Value>,
     metadata: Option<Value>,
     note: Option<String>,
-    require_existing: bool,
 }
 
 fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()> {
@@ -1078,7 +1075,6 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
         patch,
         metadata,
         note,
-        require_existing,
     } = command;
 
     if let Some(ref note_value) = note {
@@ -1140,7 +1136,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                     Some(version) => (true, version == 0),
                     None => (false, true),
                 };
-                if require_existing && !exists {
+                if !exists {
                     bail!("aggregate {}::{} does not exist", aggregate, aggregate_id);
                 }
                 ensure_first_event_rule(is_new, &event)?;
@@ -1207,7 +1203,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 _ => true,
             };
             let exists = version_opt.is_some();
-            if require_existing && !exists {
+            if !exists {
                 bail!("aggregate {}::{} does not exist", aggregate, aggregate_id);
             }
             ensure_first_event_rule(is_new, &event)?;
@@ -1251,7 +1247,6 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 &aggregate,
                 &aggregate_id,
                 &event,
-                require_existing,
                 if patch.is_some() {
                     None
                 } else {
@@ -1274,7 +1269,6 @@ fn proxy_append_via_socket(
     aggregate: &str,
     aggregate_id: &str,
     event: &str,
-    require_existing: bool,
     payload: Option<&Value>,
     patch: Option<&Value>,
     metadata: Option<&Value>,
@@ -1306,7 +1300,6 @@ fn proxy_append_via_socket(
                 aggregate,
                 aggregate_id,
                 event,
-                require_existing,
                 payload,
                 metadata,
                 note,

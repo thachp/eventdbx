@@ -29,7 +29,7 @@ use crate::{
         AggregateSortField as CapnpAggregateSortField, control_request, control_response,
     },
     error::EventError,
-    filter::FilterExpr,
+    filter::{self, FilterExpr},
     observability,
     plugin::PluginManager,
     replication_capnp::{
@@ -116,7 +116,6 @@ enum ControlCommand {
         aggregate_type: String,
         aggregate_id: String,
         event_type: String,
-        require_existing: bool,
         payload: Option<Value>,
         metadata: Option<Value>,
         note: Option<String>,
@@ -592,10 +591,19 @@ fn parse_control_command(
             };
 
             let filter = if req.get_has_filter() {
-                let reader = req
-                    .get_filter()
-                    .map_err(|err| EventError::Serialization(err.to_string()))?;
-                Some(FilterExpr::from_capnp(reader)?)
+                let raw = read_control_text(req.get_filter(), "filter")?;
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        filter::parse_shorthand(trimmed).map_err(|err| {
+                            EventError::InvalidSchema(format!(
+                                "invalid filter expression: {err}"
+                            ))
+                        })?,
+                    )
+                }
             } else {
                 None
             };
@@ -716,14 +724,12 @@ fn parse_control_command(
             } else {
                 None
             };
-            let require_existing = req.get_require_existing();
 
             Ok(ControlCommand::AppendEvent {
                 token,
                 aggregate_type,
                 aggregate_id,
                 event_type,
-                require_existing,
                 payload,
                 metadata,
                 note,
@@ -982,7 +988,6 @@ async fn execute_control_command(
             aggregate_type,
             aggregate_id,
             event_type,
-            require_existing,
             payload,
             metadata,
             note,
@@ -996,7 +1001,6 @@ async fn execute_control_command(
                 patch: None,
                 metadata,
                 note,
-                require_existing,
             };
             handle_append_event_command(
                 core.clone(),
@@ -1024,7 +1028,6 @@ async fn execute_control_command(
                 patch: Some(patch),
                 metadata,
                 note,
-                require_existing: true,
             };
             handle_append_event_command(
                 core.clone(),

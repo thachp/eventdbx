@@ -77,7 +77,6 @@ impl ServerClient {
         aggregate_type: &str,
         aggregate_id: &str,
         event_type: &str,
-        require_existing: bool,
         payload: Option<&Value>,
         metadata: Option<&Value>,
         note: Option<&str>,
@@ -99,7 +98,6 @@ impl ServerClient {
                     aggregate_type,
                     aggregate_id,
                     event_type,
-                    require_existing,
                     payload,
                     metadata.clone(),
                     note.clone(),
@@ -113,7 +111,6 @@ impl ServerClient {
             aggregate_type,
             aggregate_id,
             event_type,
-            require_existing,
             payload,
             metadata,
             note,
@@ -279,7 +276,6 @@ fn append_event_blocking(
     aggregate_type: String,
     aggregate_id: String,
     event_type: String,
-    require_existing: bool,
     payload: Option<Value>,
     metadata: Option<Value>,
     note: Option<String>,
@@ -328,7 +324,6 @@ fn append_event_blocking(
         append.set_has_metadata(has_metadata);
         append.set_note(&note_text);
         append.set_has_note(has_note);
-        append.set_require_existing(require_existing);
     }
 
     serialize::write_message(&mut stream, &message)

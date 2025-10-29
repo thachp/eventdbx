@@ -239,7 +239,7 @@ impl CoreContext {
             return Err(EventError::Unauthorized);
         }
 
-        let _record = self.append_event(AppendEventInput {
+        let append_input = AppendEventInput {
             token,
             aggregate_type: aggregate_type.clone(),
             aggregate_id: aggregate_id.clone(),
@@ -248,8 +248,8 @@ impl CoreContext {
             patch: None,
             metadata,
             note,
-            require_existing: false,
-        })?;
+        };
+        let _record = self.append_event_internal(append_input, true)?;
 
         let aggregate = store.get_aggregate_state(&aggregate_type, &aggregate_id)?;
         Ok(self.sanitize_aggregate(aggregate))
@@ -284,6 +284,15 @@ impl CoreContext {
     }
 
     pub fn append_event(&self, input: AppendEventInput) -> Result<EventRecord> {
+        let allow_new = input.payload.is_some();
+        self.append_event_internal(input, allow_new)
+    }
+
+    fn append_event_internal(
+        &self,
+        input: AppendEventInput,
+        allow_new_aggregate: bool,
+    ) -> Result<EventRecord> {
         let AppendEventInput {
             token,
             aggregate_type,
@@ -293,7 +302,6 @@ impl CoreContext {
             patch,
             metadata,
             note,
-            require_existing,
         } = input;
 
         enum EventBody {
@@ -331,7 +339,7 @@ impl CoreContext {
             Some(_) | None => true,
         };
         let is_patch_event = matches!(&event_body, EventBody::Patch(_));
-        if (require_existing || is_patch_event) && is_new_aggregate {
+        if (!allow_new_aggregate || is_patch_event) && is_new_aggregate {
             return Err(EventError::AggregateNotFound);
         }
         ensure_first_event_rule(is_new_aggregate, &event_type)?;
@@ -420,7 +428,6 @@ pub struct AppendEventInput {
     pub patch: Option<Value>,
     pub metadata: Option<Value>,
     pub note: Option<String>,
-    pub require_existing: bool,
 }
 
 #[derive(Debug, Clone)]

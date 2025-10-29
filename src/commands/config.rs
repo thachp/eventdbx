@@ -100,8 +100,6 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         list_page_size,
         page_limit,
         plugin_max_attempts,
-        api: None,
-        grpc: None,
         socket: None,
         admin: admin_update,
         snowflake_worker_id,

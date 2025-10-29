@@ -24,10 +24,10 @@ pub enum TokenCommands {
 
 #[derive(Args)]
 pub struct TokenGenerateArgs {
-    #[arg(long)]
+    #[arg(short, long)]
     pub group: String,
 
-    #[arg(long)]
+    #[arg(short, long)]
     pub user: String,
 
     #[arg(long)]

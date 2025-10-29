@@ -348,8 +348,6 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         list_page_size: None,
         page_limit: None,
         plugin_max_attempts: None,
-        api: None,
-        grpc: None,
         socket: None,
         admin: None,
         snowflake_worker_id: None,
