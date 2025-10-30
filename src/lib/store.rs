@@ -914,7 +914,7 @@ impl EventStore {
         };
 
         if meta.version + 1 != record.version {
-            let existing = self.event_by_version(&aggregate_type, &aggregate_id, record.version)?;
+            let existing = self.event_by_version(&aggregate_type, &aggregate_id, meta.version)?;
             return Err(ReplicationConflict::new(
                 aggregate_type.clone(),
                 aggregate_id.clone(),
