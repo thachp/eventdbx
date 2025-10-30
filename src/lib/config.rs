@@ -449,6 +449,10 @@ impl Config {
         self.domain_data_dir().join("plugin_queue.db")
     }
 
+    pub fn conflict_store_db_path(&self) -> PathBuf {
+        self.domain_data_dir().join("conflicts.db")
+    }
+
     pub fn pid_file_path(&self) -> PathBuf {
         self.domain_data_dir().join("eventdbx.pid")
     }

@@ -6,6 +6,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+
+use crate::conflict::ReplicationConflict;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, EventError>;
@@ -40,6 +42,8 @@ pub enum EventError {
     Io(#[from] io::Error),
     #[error("serialization error: {0}")]
     Serialization(String),
+    #[error("{0}")]
+    Conflict(#[from] ReplicationConflict),
 }
 
 impl From<toml::de::Error> for EventError {
@@ -79,6 +83,7 @@ impl IntoResponse for EventError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             Self::InvalidSchema(_) => StatusCode::BAD_REQUEST,
+            Self::Conflict(_) => StatusCode::CONFLICT,
         };
 
         let message = self.to_string();

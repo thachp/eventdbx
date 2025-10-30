@@ -10,6 +10,7 @@ use eventdbx::observability;
 use crate::commands::{
     aggregate::AggregateCommands,
     config::ConfigArgs,
+    conflicts::ConflictCommands,
     domain::{DomainCheckoutArgs, DomainMergeArgs},
     list::ListArgs,
     plugin::{PluginCommands, PluginWorkerArgs},
@@ -62,6 +63,11 @@ enum Commands {
     Schema {
         #[command(subcommand)]
         command: SchemaCommands,
+    },
+    /// Inspect and resolve replication conflicts
+    Conflicts {
+        #[command(subcommand)]
+        command: ConflictCommands,
     },
     /// Manage plugins
     Plugin {
@@ -126,6 +132,7 @@ async fn main() -> Result<()> {
         Commands::Config(args) => commands::config::execute(config, args)?,
         Commands::Token { command } => commands::token::execute(config, command)?,
         Commands::Schema { command } => commands::schema::execute(config, command)?,
+        Commands::Conflicts { command } => commands::conflicts::execute(config, command)?,
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
         Commands::Events(args) => commands::events::list(config, args)?,
         Commands::Queue(args) => commands::queue::execute(config, args)?,

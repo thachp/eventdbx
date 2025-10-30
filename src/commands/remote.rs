@@ -12,6 +12,7 @@ use clap::{Args, Subcommand};
 
 use eventdbx::{
     config::{Config, RemoteConfig, load_or_default},
+    conflict_store::ConflictStore,
     error::EventError,
     replication_capnp_client::{CapnpReplicationClient, decode_schemas, normalize_capnp_endpoint},
     schema::{AggregateSchema, SchemaManager},
@@ -532,6 +533,9 @@ pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Res
     if !args.schema_only {
         let filter = normalize_filter(&args.aggregates, &args.aggregate_ids)?;
         let batch_size = args.batch_size.max(1);
+        let conflicts = Arc::new(ConflictStore::open(
+            config.conflict_store_db_path().as_path(),
+        )?);
         if args.dry_run {
             let store = Arc::new(EventStore::open_read_only(
                 config.event_store_path(),
@@ -539,7 +543,8 @@ pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Res
             )?);
             let local_positions = store.aggregate_positions()?;
             pull_remote_impl(
-                store,
+                Arc::clone(&store),
+                Arc::clone(&conflicts),
                 local_positions,
                 remote.clone(),
                 remote_name.clone(),
@@ -558,7 +563,8 @@ pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Res
                     let store = Arc::new(store);
                     let local_positions = store.aggregate_positions()?;
                     pull_remote_impl(
-                        store,
+                        Arc::clone(&store),
+                        Arc::clone(&conflicts),
                         local_positions,
                         remote.clone(),
                         remote_name.clone(),
@@ -754,6 +760,7 @@ async fn push_remote_impl(
 
 async fn pull_remote_impl(
     store: Arc<EventStore>,
+    conflicts: Arc<ConflictStore>,
     local_positions: Vec<AggregatePositionEntry>,
     remote: RemoteConfig,
     remote_name: String,
@@ -792,6 +799,7 @@ async fn pull_remote_impl(
     let mut total_applied = 0u64;
     for plan in &plans {
         let mut current = plan.from_version;
+        let mut conflict_encountered = false;
         while current < plan.to_version {
             let events = client
                 .pull_events(
@@ -811,9 +819,33 @@ async fn pull_remote_impl(
 
             for record in events {
                 current = record.version;
-                store.append_replica(record)?;
-                total_applied += 1;
+                match store.append_replica(record.clone()) {
+                    Ok(()) => {
+                        total_applied += 1;
+                    }
+                    Err(EventError::Conflict(conflict)) => {
+                        let entry = conflicts.record(conflict, Some(remote_name.clone()))?;
+                        println!(
+                            "conflict recorded (id {}) for {}::{} version {} while pulling from '{}'",
+                            entry.id,
+                            entry.aggregate_type,
+                            entry.aggregate_id,
+                            record.version,
+                            remote_name
+                        );
+                        conflict_encountered = true;
+                        break;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
             }
+
+            if conflict_encountered {
+                break;
+            }
+        }
+        if conflict_encountered {
+            break;
         }
     }
 

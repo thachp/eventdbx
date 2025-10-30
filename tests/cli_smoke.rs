@@ -2288,7 +2288,7 @@ fn event_show_returns_single_event() -> Result<()> {
         .as_str()
         .context("aggregate apply output missing event_id")?;
 
-    let detail = cli.run_json(&["event", event_id, "--json"])?;
+    let detail = cli.run_json(&["events", event_id, "--json"])?;
     assert_eq!(detail["event_type"], "order_created");
     assert_eq!(detail["aggregate_id"], "order-1");
     assert_eq!(detail["payload"]["status"], "open");

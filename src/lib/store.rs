@@ -22,6 +22,7 @@ use super::{
     schema::MAX_EVENT_NOTE_LENGTH,
 };
 use crate::{
+    conflict::{ConflictKind, ReplicationConflict},
     filter::FilterExpr,
     snowflake::{MAX_WORKER_ID, SnowflakeGenerator, SnowflakeId},
 };
@@ -913,13 +914,18 @@ impl EventStore {
         };
 
         if meta.version + 1 != record.version {
-            return Err(EventError::Storage(format!(
-                "replication version mismatch for {}::{} (expected {}, got {})",
-                aggregate_type,
-                aggregate_id,
-                meta.version + 1,
-                record.version
-            )));
+            let existing = self.event_by_version(&aggregate_type, &aggregate_id, record.version)?;
+            return Err(ReplicationConflict::new(
+                aggregate_type.clone(),
+                aggregate_id.clone(),
+                ConflictKind::VersionMismatch {
+                    expected: meta.version + 1,
+                    found: record.version,
+                },
+                record,
+                existing,
+            )
+            .into());
         }
         let payload_map = payload_to_map(&record.payload);
 
@@ -932,10 +938,18 @@ impl EventStore {
         );
 
         if computed_hash != record.hash {
-            return Err(EventError::Storage(format!(
-                "replication hash mismatch for {}::{} v{}",
-                aggregate_type, aggregate_id, record.version
-            )));
+            let record_hash = record.hash.clone();
+            return Err(ReplicationConflict::new(
+                aggregate_type.clone(),
+                aggregate_id.clone(),
+                ConflictKind::HashMismatch {
+                    expected: computed_hash,
+                    found: record_hash,
+                },
+                record,
+                None,
+            )
+            .into());
         }
 
         for (key, value) in payload_map {
@@ -947,10 +961,19 @@ impl EventStore {
         meta.merkle_root = compute_merkle_root(&meta.event_hashes);
 
         if meta.merkle_root != record.merkle_root {
-            return Err(EventError::Storage(format!(
-                "replication merkle root mismatch for {}::{} v{}",
-                aggregate_type, aggregate_id, record.version
-            )));
+            let expected_root = meta.merkle_root.clone();
+            let record_root = record.merkle_root.clone();
+            return Err(ReplicationConflict::new(
+                aggregate_type.clone(),
+                aggregate_id.clone(),
+                ConflictKind::MerkleMismatch {
+                    expected: expected_root,
+                    found: record_root,
+                },
+                record,
+                None,
+            )
+            .into());
         }
 
         let stored_record = self.encode_record(&record)?;
@@ -1015,6 +1038,37 @@ impl EventStore {
         aggregate_id: &str,
     ) -> Result<Vec<EventRecord>> {
         self.list_events_paginated(aggregate_type, aggregate_id, 0, None)
+    }
+
+    pub fn event_by_version(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        version: u64,
+    ) -> Result<Option<EventRecord>> {
+        if version == 0 {
+            return Ok(None);
+        }
+        let (meta, index) = match self.load_meta_any(aggregate_type, aggregate_id)? {
+            Some((meta, idx)) => (meta, idx),
+            None => return Ok(None),
+        };
+        if version > meta.version {
+            return Ok(None);
+        }
+
+        let key = event_key_for(index, aggregate_type, aggregate_id, version);
+        let value = match self
+            .db
+            .get(key)
+            .map_err(|err| EventError::Storage(err.to_string()))?
+        {
+            Some(bytes) => bytes,
+            None => return Ok(None),
+        };
+        let stored: EventRecord = serde_json::from_slice(&value)?;
+        let decoded = self.decode_record(stored)?;
+        Ok(Some(decoded))
     }
 
     pub fn list_events_paginated(

@@ -3,6 +3,8 @@ pub mod cache;
 pub mod cli_capnp;
 pub mod cli_proxy;
 pub mod config;
+pub mod conflict;
+pub mod conflict_store;
 pub mod control_capnp;
 pub mod encryption;
 pub mod error;
