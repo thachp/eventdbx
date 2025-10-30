@@ -313,6 +313,7 @@ fn append_resolution_event(
         config.restrict,
         config.list_page_size,
         config.page_limit,
+        None,
     );
 
     let token_value = issue_resolution_token(tokens.as_ref())?;

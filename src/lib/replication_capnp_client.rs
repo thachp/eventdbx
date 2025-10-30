@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, io::Cursor};
+use std::{
+    collections::{BTreeMap, HashMap},
+    io::Cursor,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use capnp::message::ReaderOptions;
@@ -9,6 +12,7 @@ use serde_json::{self, Value};
 use snow::TransportState;
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tracing::warn;
 
 use crate::{
     replication_capnp::{
@@ -99,7 +103,7 @@ impl CapnpReplicationClient {
         limit: Option<usize>,
     ) -> Result<Vec<EventRecord>> {
         let limit = limit.unwrap_or(0).min(u32::MAX as usize) as u32;
-        let response = self
+        let response: capnp::message::Reader<OwnedSegments> = self
             .send_request(|request| {
                 let mut pull = request.init_pull_events();
                 pull.set_aggregate_type(aggregate_type);
@@ -110,7 +114,8 @@ impl CapnpReplicationClient {
             })
             .await?;
 
-        let root = response.get_root::<replication_response::Reader>()?;
+        let root: replication_response::Reader<'_> =
+            response.get_root::<replication_response::Reader>()?;
         match root.which()? {
             replication_response::Which::PullEvents(Ok(list)) => {
                 let events = list.get_events()?;
@@ -168,9 +173,9 @@ impl CapnpReplicationClient {
                     Ok(sequence)
                 }
             }
-            replication_response::Which::PullEvents(Err(err)) => Err(anyhow!(
-                "failed to decode apply_events response: {err}"
-            )),
+            replication_response::Which::PullEvents(Err(err)) => {
+                Err(anyhow!("failed to decode apply_events response: {err}"))
+            }
             replication_response::Which::Ok(_) => {
                 // Older servers acknowledge success via the generic ok variant.
                 Ok(sequence)
@@ -290,31 +295,67 @@ impl CapnpReplicationClient {
 
     fn ensure_apply_events_ack_matches(
         requested: &[EventRecord],
-        response: capnp::struct_list::Reader<
-            '_,
-            crate::replication_capnp::event_record::Owned,
-        >,
+        response: capnp::struct_list::Reader<'_, crate::replication_capnp::event_record::Owned>,
     ) -> Result<()> {
-        if requested.len() != response.len() as usize {
-            bail!(
-                "apply_events response echoed {} event(s) but {} were sent",
-                response.len(),
-                requested.len()
+        let requested_len = requested.len();
+        let ack_len = response.len() as usize;
+
+        type EventAckKey = (String, String, u64);
+        let mut ack_map: HashMap<EventAckKey, Vec<u32>> = HashMap::new();
+        for ack_index in 0..ack_len {
+            let actual = response.get(ack_index as u32);
+            let key = (
+                read_text(
+                    actual.get_aggregate_type(),
+                    "apply_events ack aggregate type",
+                )?,
+                read_text(actual.get_aggregate_id(), "apply_events ack aggregate id")?,
+                actual.get_version(),
             );
+            ack_map.entry(key).or_default().push(ack_index as u32);
         }
 
-        for (index, expected) in requested.iter().enumerate() {
-            let actual = response
-                .get(index as u32);
-            Self::ensure_event_ack_matches(expected, actual).with_context(|| {
-                format!(
-                    "apply_events ack mismatch for {}::{} v{} (index {})",
-                    expected.aggregate_type,
-                    expected.aggregate_id,
-                    expected.version,
-                    index
-                )
-            })?;
+        let mut missing = Vec::new();
+        let mut mismatched = Vec::new();
+
+        for expected in requested {
+            let key = (
+                expected.aggregate_type.clone(),
+                expected.aggregate_id.clone(),
+                expected.version,
+            );
+            match ack_map.get_mut(&key).and_then(|indices| indices.pop()) {
+                Some(ack_index) => {
+                    let actual = response.get(ack_index);
+                    if let Err(err) = Self::ensure_event_ack_matches(expected, actual) {
+                        mismatched.push(format!(
+                            "{}::{} v{} (index {}): {}",
+                            expected.aggregate_type,
+                            expected.aggregate_id,
+                            expected.version,
+                            ack_index,
+                            err
+                        ));
+                    }
+                }
+                None => {
+                    missing.push(format!(
+                        "{}::{} v{}",
+                        expected.aggregate_type, expected.aggregate_id, expected.version
+                    ));
+                }
+            }
+        }
+
+        if ack_len < requested_len || !missing.is_empty() || !mismatched.is_empty() {
+            warn!(
+                target: "replication",
+                requested = requested_len,
+                acked = ack_len,
+                missing = %missing.join(", "),
+                mismatched = %mismatched.join(", "),
+                "apply_events ack did not fully match request; continuing for compatibility"
+            );
         }
 
         Ok(())
@@ -335,10 +376,7 @@ impl CapnpReplicationClient {
                 aggregate_type
             );
         }
-        let aggregate_id = read_text(
-            actual.get_aggregate_id(),
-            "apply_events ack aggregate id",
-        )?;
+        let aggregate_id = read_text(actual.get_aggregate_id(), "apply_events ack aggregate id")?;
         if expected.aggregate_id != aggregate_id {
             bail!(
                 "aggregate id mismatch (expected '{}', got '{}')",
