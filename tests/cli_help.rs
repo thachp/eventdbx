@@ -91,6 +91,22 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "Validate payload against a schema definition",
     },
     HelpCase {
+        path: &["conflicts"],
+        expected_snippet: "Inspect and resolve replication conflicts",
+    },
+    HelpCase {
+        path: &["conflicts", "list"],
+        expected_snippet: "List recorded replication conflicts",
+    },
+    HelpCase {
+        path: &["conflicts", "show"],
+        expected_snippet: "Show details for a specific conflict",
+    },
+    HelpCase {
+        path: &["conflicts", "resolve"],
+        expected_snippet: "Resolve a pending replication conflict",
+    },
+    HelpCase {
         path: &["plugin"],
         expected_snippet: "Manage plugins",
     },

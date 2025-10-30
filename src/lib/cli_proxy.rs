@@ -26,6 +26,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     cli_capnp::{cli_request, cli_response},
     config::Config,
+    conflict_store::ConflictStore,
     control_capnp::{
         AggregateSortField as CapnpAggregateSortField, control_hello, control_hello_response,
         control_request, control_response,
@@ -195,6 +196,7 @@ fn control_error_code(err: &EventError) -> &'static str {
         EventError::Storage(_) => "storage",
         EventError::Io(_) => "io",
         EventError::Serialization(_) => "serialization",
+        EventError::Conflict(_) => "replication_conflict",
     }
 }
 
@@ -375,7 +377,18 @@ async fn handle_connection(
             .await
         }
         FirstMessage::Other(message) => {
-            handle_replication_session(message, &mut reader, &mut writer, core).await?;
+            let conflict_store_path = {
+                let guard = shared_config
+                    .read()
+                    .map_err(|_| anyhow!("failed to acquire config lock"))?;
+                guard.conflict_store_db_path()
+            };
+            let conflict_store = Arc::new(
+                ConflictStore::open(conflict_store_path.as_path())
+                    .map_err(|err| anyhow!("failed to open conflict store: {err}"))?,
+            );
+            handle_replication_session(message, &mut reader, &mut writer, core, conflict_store)
+                .await?;
             Ok(())
         }
     }
@@ -1417,6 +1430,7 @@ async fn handle_replication_session<R, W>(
     reader: &mut R,
     writer: &mut W,
     core: CoreContext,
+    conflicts: Arc<ConflictStore>,
 ) -> Result<()>
 where
     R: futures::AsyncRead + Unpin,
@@ -1509,6 +1523,7 @@ where
     let schemas = core.schemas();
     let store = Arc::clone(&store);
     let schemas = Arc::clone(&schemas);
+    let conflicts = Arc::clone(&conflicts);
     let mut last_sequence = 0u64;
 
     loop {
@@ -1532,8 +1547,13 @@ where
                     .get_root::<replication_request::Reader>()
                     .map_err(|err| anyhow!("failed to decode replication request: {err}"))?;
                 op_label = replication_request_name(&request)?;
-                let reply =
-                    process_replication_request(request, &store, &schemas, &mut last_sequence)?;
+                let reply = process_replication_request(
+                    request,
+                    &store,
+                    &schemas,
+                    conflicts.as_ref(),
+                    &mut last_sequence,
+                )?;
                 populate_replication_response(&mut response_root, reply)?;
                 Ok(())
             })();
@@ -1561,6 +1581,7 @@ fn process_replication_request(
     request: replication_request::Reader<'_>,
     store: &EventStore,
     schemas: &SchemaManager,
+    conflicts: &ConflictStore,
     last_sequence: &mut u64,
 ) -> Result<ReplicationReply> {
     use replication_request::Which;
@@ -1619,7 +1640,21 @@ fn process_replication_request(
 
             for event_reader in events.iter() {
                 let record = decode_capnp_event(event_reader)?;
-                store.append_replica(record)?;
+                match store.append_replica(record) {
+                    Ok(()) => {}
+                    Err(EventError::Conflict(conflict)) => {
+                        let entry = conflicts.record(conflict, None)?;
+                        warn!(
+                            target: "replication",
+                            conflict_id = entry.id,
+                            aggregate = %format!("{}::{}", entry.aggregate_type, entry.aggregate_id),
+                            version = entry.incoming.version,
+                            "replication conflict recorded"
+                        );
+                        return Err(anyhow!("replication conflict recorded (id {})", entry.id));
+                    }
+                    Err(err) => return Err(anyhow!("failed to append replicated event: {err}")),
+                }
             }
 
             *last_sequence = sequence;
