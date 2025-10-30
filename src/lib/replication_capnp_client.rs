@@ -160,7 +160,7 @@ impl CapnpReplicationClient {
                 let ack = resp
                     .get_events()
                     .map_err(|err| anyhow!("failed to decode legacy apply_events ack: {err}"))?;
-                if ack.len() == 0 {
+                if ack.is_empty() {
                     // Some legacy replicas acknowledge apply_events using an empty pull_events.
                     Ok(sequence)
                 } else {
