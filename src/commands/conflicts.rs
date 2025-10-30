@@ -223,6 +223,12 @@ fn resolve_conflict(config_path: Option<PathBuf>, args: ConflictResolveArgs) -> 
             resolved_at: Utc::now(),
         }
     } else if let Some(event_type) = args.append_event.as_ref() {
+        if args.payload.is_some() && args.payload_file.is_some() {
+            bail!("--payload and --payload-file cannot be used together");
+        }
+        let payload = load_json_input(args.payload.as_deref(), args.payload_file.as_ref())
+            .with_context(|| "payload must be provided via --payload or --payload-file")?;
+        let record = append_resolution_event(
             &config,
             &entry.aggregate_type,
             &entry.aggregate_id,
