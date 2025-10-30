@@ -130,13 +130,10 @@ impl CapnpReplicationClient {
             replication_response::Which::Error(Err(err)) => {
                 Err(anyhow!("failed to decode error response: {err}"))
             }
-            replication_response::Which::PullSchemas(_)
-            | replication_response::Which::ApplySchemas(_)
-            | replication_response::Which::Ok(())
-            | replication_response::Which::ListPositions(_)
-            | replication_response::Which::ApplyEvents(_) => {
-                bail!("unexpected response variant for pull_events response");
-            }
+            other => bail!(
+                "unexpected response variant for pull_events response: {}",
+                replication_response_variant_name(&other)
+            ),
         }
     }
 
@@ -159,7 +156,22 @@ impl CapnpReplicationClient {
             replication_response::Which::ApplyEvents(Err(err)) => {
                 Err(anyhow!("failed to decode apply_events response: {err}"))
             }
-            replication_response::Which::Ok(()) => {
+            replication_response::Which::PullEvents(Ok(resp)) => {
+                let ack = resp
+                    .get_events()
+                    .map_err(|err| anyhow!("failed to decode legacy apply_events ack: {err}"))?;
+                if ack.is_empty() {
+                    // Some legacy replicas acknowledge apply_events using an empty pull_events.
+                    Ok(sequence)
+                } else {
+                    Self::ensure_apply_events_ack_matches(events, ack)?;
+                    Ok(sequence)
+                }
+            }
+            replication_response::Which::PullEvents(Err(err)) => Err(anyhow!(
+                "failed to decode apply_events response: {err}"
+            )),
+            replication_response::Which::Ok(_) => {
                 // Older servers acknowledge success via the generic ok variant.
                 Ok(sequence)
             }
@@ -170,12 +182,10 @@ impl CapnpReplicationClient {
             replication_response::Which::Error(Err(err)) => {
                 Err(anyhow!("failed to decode error response: {err}"))
             }
-            replication_response::Which::PullSchemas(_)
-            | replication_response::Which::ApplySchemas(_)
-            | replication_response::Which::ListPositions(_)
-            | replication_response::Which::PullEvents(_) => {
-                bail!("unexpected response variant for apply_events response");
-            }
+            other => bail!(
+                "unexpected response variant for apply_events response: {}",
+                replication_response_variant_name(&other)
+            ),
         }
     }
 
@@ -204,7 +214,10 @@ impl CapnpReplicationClient {
             replication_response::Which::Error(Err(err)) => {
                 Err(anyhow!("failed to decode error response: {err}"))
             }
-            _ => bail!("unexpected response variant for pull_schemas response"),
+            other => bail!(
+                "unexpected response variant for pull_schemas response: {}",
+                replication_response_variant_name(&other)
+            ),
         }
     }
 
@@ -232,7 +245,10 @@ impl CapnpReplicationClient {
             replication_response::Which::Error(Err(err)) => {
                 Err(anyhow!("failed to decode error response: {err}"))
             }
-            _ => bail!("unexpected response variant for apply_schemas response"),
+            other => bail!(
+                "unexpected response variant for apply_schemas response: {}",
+                replication_response_variant_name(&other)
+            ),
         }
     }
 
@@ -270,6 +286,75 @@ impl CapnpReplicationClient {
             Some(bytes) => Ok(bytes),
             None => bail!("replication connection closed unexpectedly"),
         }
+    }
+
+    fn ensure_apply_events_ack_matches(
+        requested: &[EventRecord],
+        response: capnp::struct_list::Reader<
+            '_,
+            crate::replication_capnp::event_record::Owned,
+        >,
+    ) -> Result<()> {
+        if requested.len() != response.len() as usize {
+            bail!(
+                "apply_events response echoed {} event(s) but {} were sent",
+                response.len(),
+                requested.len()
+            );
+        }
+
+        for (index, expected) in requested.iter().enumerate() {
+            let actual = response
+                .get(index as u32);
+            Self::ensure_event_ack_matches(expected, actual).with_context(|| {
+                format!(
+                    "apply_events ack mismatch for {}::{} v{} (index {})",
+                    expected.aggregate_type,
+                    expected.aggregate_id,
+                    expected.version,
+                    index
+                )
+            })?;
+        }
+
+        Ok(())
+    }
+
+    fn ensure_event_ack_matches(
+        expected: &EventRecord,
+        actual: crate::replication_capnp::event_record::Reader<'_>,
+    ) -> Result<()> {
+        let aggregate_type = read_text(
+            actual.get_aggregate_type(),
+            "apply_events ack aggregate type",
+        )?;
+        if expected.aggregate_type != aggregate_type {
+            bail!(
+                "aggregate type mismatch (expected '{}', got '{}')",
+                expected.aggregate_type,
+                aggregate_type
+            );
+        }
+        let aggregate_id = read_text(
+            actual.get_aggregate_id(),
+            "apply_events ack aggregate id",
+        )?;
+        if expected.aggregate_id != aggregate_id {
+            bail!(
+                "aggregate id mismatch (expected '{}', got '{}')",
+                expected.aggregate_id,
+                aggregate_id
+            );
+        }
+        let version = actual.get_version();
+        if expected.version != version {
+            bail!(
+                "version mismatch (expected {}, got {})",
+                expected.version,
+                version
+            );
+        }
+        Ok(())
     }
 }
 
@@ -318,6 +403,20 @@ where
     perform_client_handshake(reader, writer, token.as_bytes())
         .await
         .context("failed to establish encrypted replication channel")
+}
+
+fn replication_response_variant_name<A0, A1, A2, A3, A4, A5>(
+    variant: &replication_response::Which<A0, A1, A2, A3, A4, A5>,
+) -> &'static str {
+    match variant {
+        replication_response::Which::Ok(_) => "ok",
+        replication_response::Which::ListPositions(_) => "list_positions",
+        replication_response::Which::PullEvents(_) => "pull_events",
+        replication_response::Which::ApplyEvents(_) => "apply_events",
+        replication_response::Which::PullSchemas(_) => "pull_schemas",
+        replication_response::Which::ApplySchemas(_) => "apply_schemas",
+        replication_response::Which::Error(_) => "error",
+    }
 }
 
 fn encode_event(
