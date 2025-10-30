@@ -159,6 +159,10 @@ impl CapnpReplicationClient {
             replication_response::Which::ApplyEvents(Err(err)) => {
                 Err(anyhow!("failed to decode apply_events response: {err}"))
             }
+            replication_response::Which::Ok(()) => {
+                // Older servers acknowledge success via the generic ok variant.
+                Ok(sequence)
+            }
             replication_response::Which::Error(Ok(err)) => {
                 let message = read_text(err.get_message(), "error message")?;
                 bail!("remote returned error: {message}");
@@ -168,7 +172,6 @@ impl CapnpReplicationClient {
             }
             replication_response::Which::PullSchemas(_)
             | replication_response::Which::ApplySchemas(_)
-            | replication_response::Which::Ok(())
             | replication_response::Which::ListPositions(_)
             | replication_response::Which::PullEvents(_) => {
                 bail!("unexpected response variant for apply_events response");
