@@ -15,6 +15,10 @@ use eventdbx::{
     conflict_store::ConflictStore,
     error::EventError,
     replication_capnp_client::{CapnpReplicationClient, decode_schemas, normalize_capnp_endpoint},
+    replication_planner::{
+        PositionFilter, build_pull_plans, build_push_plans, positions_to_map, summarize_plans,
+        validate_fast_forward,
+    },
     schema::{AggregateSchema, SchemaManager},
     store::{AggregatePositionEntry, EventStore},
 };
@@ -701,7 +705,7 @@ async fn push_remote_impl(
         .await
         .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?;
 
-    let filter_ref = filter.as_ref();
+    let filter_ref = filter.as_ref().map(|f| f as &dyn PositionFilter);
     let remote_map = positions_to_map(&remote_positions, filter_ref);
     let local_map = positions_to_map(&local_positions, filter_ref);
 
@@ -774,7 +778,7 @@ async fn pull_remote_impl(
         .await
         .map_err(|err| anyhow!("remote {} list_positions failed: {}", remote_name, err))?;
 
-    let filter_ref = filter.as_ref();
+    let filter_ref = filter.as_ref().map(|f| f as &dyn PositionFilter);
     let remote_map = positions_to_map(&remote_positions, filter_ref);
     let local_map = positions_to_map(&local_positions, filter_ref);
 
@@ -876,7 +880,7 @@ async fn pull_remote_via_daemon(
         .await
         .map_err(|err| anyhow!("local list_positions failed: {}", err))?;
 
-    let filter_ref = filter.as_ref();
+    let filter_ref = filter.as_ref().map(|f| f as &dyn PositionFilter);
     let remote_map = positions_to_map(&remote_positions, filter_ref);
     let local_map = positions_to_map(&local_positions, filter_ref);
 
@@ -1115,7 +1119,7 @@ struct ReplicationFilter {
     aggregate_ids: HashMap<String, HashSet<String>>,
 }
 
-impl ReplicationFilter {
+impl PositionFilter for ReplicationFilter {
     fn includes(&self, aggregate_type: &str, aggregate_id: &str) -> bool {
         if let Some(ids) = self.aggregate_ids.get(aggregate_type) {
             return ids.contains(aggregate_id);
@@ -1130,123 +1134,9 @@ impl ReplicationFilter {
     }
 }
 
-fn positions_to_map(
-    entries: &[AggregatePositionEntry],
-    filter: Option<&ReplicationFilter>,
-) -> HashMap<(String, String), u64> {
-    entries
-        .iter()
-        .filter(|entry| match filter {
-            Some(filter) => filter.includes(&entry.aggregate_type, &entry.aggregate_id),
-            None => true,
-        })
-        .map(|entry| {
-            (
-                (entry.aggregate_type.clone(), entry.aggregate_id.clone()),
-                entry.version,
-            )
-        })
-        .collect()
-}
-
 fn is_lock_error(message: &str) -> bool {
     let lower = message.to_lowercase();
     lower.contains("lock file") || lower.contains("resource temporarily unavailable")
-}
-
-fn validate_fast_forward(
-    remote_name: &str,
-    local: &HashMap<(String, String), u64>,
-    remote: &HashMap<(String, String), u64>,
-) -> Result<()> {
-    for (key, remote_version) in remote {
-        if *remote_version == 0 {
-            continue;
-        }
-        match local.get(key) {
-            Some(local_version) => {
-                if remote_version > local_version {
-                    bail!(
-                        "remote '{}' is ahead for aggregate {}::{} (remote version {}, local version {})",
-                        remote_name,
-                        key.0,
-                        key.1,
-                        remote_version,
-                        local_version
-                    );
-                }
-            }
-            None => {
-                bail!(
-                    "remote '{}' contains aggregate {}::{} that does not exist locally; aborting push",
-                    remote_name,
-                    key.0,
-                    key.1
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct SyncPlan {
-    aggregate_type: String,
-    aggregate_id: String,
-    from_version: u64,
-    to_version: u64,
-    event_count: u64,
-}
-
-fn build_push_plans(
-    local: &HashMap<(String, String), u64>,
-    remote: &HashMap<(String, String), u64>,
-) -> Vec<SyncPlan> {
-    let mut plans = Vec::new();
-    for (key, local_version) in local {
-        let remote_version = remote.get(key).copied().unwrap_or(0);
-        if remote_version > *local_version {
-            continue;
-        }
-        if local_version > &remote_version {
-            plans.push(SyncPlan {
-                aggregate_type: key.0.clone(),
-                aggregate_id: key.1.clone(),
-                from_version: remote_version,
-                to_version: *local_version,
-                event_count: local_version - remote_version,
-            });
-        }
-    }
-    plans
-}
-
-fn build_pull_plans(
-    local: &HashMap<(String, String), u64>,
-    remote: &HashMap<(String, String), u64>,
-) -> Vec<SyncPlan> {
-    let mut plans = Vec::new();
-    for (key, remote_version) in remote {
-        let local_version = local.get(key).copied().unwrap_or(0);
-        if remote_version > &local_version {
-            plans.push(SyncPlan {
-                aggregate_type: key.0.clone(),
-                aggregate_id: key.1.clone(),
-                from_version: local_version,
-                to_version: *remote_version,
-                event_count: remote_version - local_version,
-            });
-        }
-    }
-    plans
-}
-
-fn summarize_plans(plans: &[SyncPlan]) -> BTreeMap<String, u64> {
-    let mut map = BTreeMap::new();
-    for plan in plans {
-        *map.entry(plan.aggregate_type.clone()).or_default() += plan.event_count;
-    }
-    map
 }
 
 #[derive(Debug)]

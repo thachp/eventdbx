@@ -17,6 +17,7 @@ use super::{
     config::Config,
     error::{EventError, Result},
     observability,
+    replication::ReplicationManager,
     schema::SchemaManager,
     service::CoreContext,
     store::EventStore,
@@ -119,6 +120,13 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         config_snapshot.snowflake_worker_id,
     )?);
     let schemas = Arc::new(SchemaManager::load(config_snapshot.schema_store_path())?);
+    let replication = ReplicationManager::from_config(&config_snapshot, Arc::clone(&store));
+    if let Some(_) = &replication {
+        info!(
+            remote_count = config_snapshot.remotes.len(),
+            "replication manager initialised"
+        );
+    }
 
     let core = CoreContext::new(
         Arc::clone(&tokens),
@@ -127,6 +135,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         config_snapshot.restrict,
         config_snapshot.list_page_size,
         config_snapshot.page_limit,
+        replication,
     );
 
     let state = AppState {

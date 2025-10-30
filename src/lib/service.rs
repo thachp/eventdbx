@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use crate::{
     error::{EventError, Result},
     filter::FilterExpr,
+    replication::ReplicationManager,
     restrict::{self, RestrictMode},
     schema::SchemaManager,
     store::{
@@ -27,6 +28,7 @@ pub struct CoreContext {
     restrict: RestrictMode,
     list_page_size: usize,
     page_limit: usize,
+    replication: Option<ReplicationManager>,
 }
 
 impl CoreContext {
@@ -37,6 +39,7 @@ impl CoreContext {
         restrict: RestrictMode,
         list_page_size: usize,
         page_limit: usize,
+        replication: Option<ReplicationManager>,
     ) -> Self {
         Self {
             tokens,
@@ -45,6 +48,7 @@ impl CoreContext {
             restrict,
             list_page_size,
             page_limit,
+            replication,
         }
     }
 
@@ -58,6 +62,15 @@ impl CoreContext {
 
     pub fn store(&self) -> Arc<EventStore> {
         Arc::clone(&self.store)
+    }
+
+    fn replicate(&self, events: &[EventRecord]) {
+        if events.is_empty() {
+            return;
+        }
+        if let Some(manager) = &self.replication {
+            manager.enqueue(events);
+        }
     }
 
     pub fn restrict(&self) -> RestrictMode {
@@ -426,6 +439,7 @@ impl CoreContext {
             issued_by,
             note,
         })?;
+        self.replicate(std::slice::from_ref(&record));
         Ok(record)
     }
 
