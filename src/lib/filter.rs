@@ -130,6 +130,14 @@ fn resolve_field_value(aggregate: &AggregateState, field: &str) -> Option<Compar
         "merkle_root" | "merkleRoot" => {
             Some(ComparableValue::String(aggregate.merkle_root.clone()))
         }
+        "created_at" | "createdAt" => Some(match aggregate.created_at {
+            Some(dt) => ComparableValue::Number(dt.timestamp_millis() as f64),
+            None => ComparableValue::Null,
+        }),
+        "updated_at" | "updatedAt" => Some(match aggregate.updated_at {
+            Some(dt) => ComparableValue::Number(dt.timestamp_millis() as f64),
+            None => ComparableValue::Null,
+        }),
         "archived" => Some(ComparableValue::Bool(aggregate.archived)),
         "version" => Some(ComparableValue::Number(aggregate.version as f64)),
         other => select_state_field(&aggregate.state, other).map(|value| match value {
@@ -893,6 +901,8 @@ mod tests {
             version: 7,
             state,
             merkle_root: "root".to_string(),
+            created_at: None,
+            updated_at: None,
             archived: false,
         }
     }

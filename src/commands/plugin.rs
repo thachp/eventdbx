@@ -1219,6 +1219,8 @@ fn run_plugin_test(
         version: 5,
         state: aggregate_state_map.clone(),
         merkle_root: "deadbeef…".to_string(),
+        created_at: None,
+        updated_at: None,
         archived: false,
     };
 
@@ -2303,6 +2305,8 @@ fn replay_single(
             version: event.version,
             state: state_map.clone(),
             merkle_root: event.merkle_root.clone(),
+            created_at: None,
+            updated_at: None,
             archived: false,
         };
         plugin.notify_event(PluginDelivery {

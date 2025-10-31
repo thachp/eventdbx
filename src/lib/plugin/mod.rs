@@ -462,6 +462,8 @@ mod tests {
             version: record.version,
             state: BTreeMap::from([("status".into(), "created".into())]),
             merkle_root: record.merkle_root.clone(),
+            created_at: None,
+            updated_at: None,
             archived: false,
         };
         (record, state)
