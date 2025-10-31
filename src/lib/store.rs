@@ -185,6 +185,8 @@ fn apply_event(
 
     let previous_version = meta.version;
     let event_time = Utc::now();
+    // Both conditions are checked to handle legacy aggregates that may have version 0 but a non-None created_at,
+    // or vice versa. This ensures backward compatibility with aggregates created before the created_at field was introduced.
     if previous_version == 0 && meta.created_at.is_none() {
         meta.created_at = Some(event_time);
     }
