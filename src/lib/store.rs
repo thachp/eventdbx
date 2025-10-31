@@ -183,8 +183,9 @@ fn apply_event(
     debug_assert_eq!(&meta.aggregate_type, &aggregate_type);
     debug_assert_eq!(&meta.aggregate_id, &aggregate_id);
 
+    let event_time = Utc::now();
     let version = meta.version + 1;
-    let created_at = Utc::now();
+    meta.record_write(event_time);
     let payload_map = payload_to_map(&payload);
     let hash = hash_event(
         &aggregate_type,
@@ -210,7 +211,7 @@ fn apply_event(
         extensions: metadata,
         metadata: EventMetadata {
             event_id,
-            created_at,
+            created_at: event_time,
             issued_by,
             note,
         },
@@ -353,6 +354,10 @@ pub struct AggregateState {
     pub version: u64,
     pub state: BTreeMap<String, String>,
     pub merkle_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub archived: bool,
 }
@@ -613,6 +618,10 @@ struct AggregateMeta {
     archived_at: Option<DateTime<Utc>>,
     #[serde(default)]
     archive_comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_at: Option<DateTime<Utc>>,
 }
 
 impl AggregateMeta {
@@ -626,7 +635,16 @@ impl AggregateMeta {
             archived: false,
             archived_at: None,
             archive_comment: None,
+            created_at: None,
+            updated_at: None,
         }
+    }
+
+    fn record_write(&mut self, event_time: DateTime<Utc>) {
+        if self.version == 0 && self.created_at.is_none() {
+            self.created_at = Some(event_time);
+        }
+        self.updated_at = Some(event_time);
     }
 }
 
@@ -956,6 +974,8 @@ impl EventStore {
             state.insert(key, value);
         }
 
+        let record_created_at = record.metadata.created_at;
+        meta.record_write(record_created_at);
         meta.event_hashes.push(record.hash.clone());
         meta.version = record.version;
         meta.merkle_root = compute_merkle_root(&meta.event_hashes);
@@ -1022,13 +1042,26 @@ impl EventStore {
             .ok_or(EventError::AggregateNotFound)?;
         let state = self.load_state_map_from(index, aggregate_type, aggregate_id)?;
 
+        let AggregateMeta {
+            aggregate_type,
+            aggregate_id,
+            version,
+            merkle_root,
+            archived,
+            created_at,
+            updated_at,
+            ..
+        } = meta;
+
         Ok(AggregateState {
-            aggregate_type: meta.aggregate_type,
-            aggregate_id: meta.aggregate_id,
-            version: meta.version,
+            aggregate_type,
+            aggregate_id,
+            version,
             state,
-            merkle_root: meta.merkle_root,
-            archived: meta.archived,
+            merkle_root,
+            created_at,
+            updated_at,
+            archived,
         })
     }
 
@@ -1300,14 +1333,16 @@ impl EventStore {
             .ok_or(EventError::AggregateNotFound)?;
         let state_map = self.load_state_map_from(current_index, aggregate_type, aggregate_id)?;
 
+        let changed_at = Utc::now();
         meta.archived = archived;
         if archived {
-            meta.archived_at = Some(Utc::now());
+            meta.archived_at = Some(changed_at);
             meta.archive_comment = comment;
         } else {
             meta.archived_at = None;
             meta.archive_comment = None;
         }
+        meta.updated_at = Some(changed_at);
 
         let destination_index = if archived {
             AggregateIndex::Archived
@@ -1627,22 +1662,33 @@ impl EventStore {
                 Err(_) => continue,
             };
 
-            let state =
-                match self.load_state_map_from(index, &meta.aggregate_type, &meta.aggregate_id) {
-                    Ok(state) => state,
-                    Err(_) => {
-                        status = "err";
-                        continue;
-                    }
-                };
+            let AggregateMeta {
+                aggregate_type,
+                aggregate_id,
+                version,
+                merkle_root,
+                archived,
+                created_at,
+                updated_at,
+                ..
+            } = meta;
+            let state = match self.load_state_map_from(index, &aggregate_type, &aggregate_id) {
+                Ok(state) => state,
+                Err(_) => {
+                    status = "err";
+                    continue;
+                }
+            };
 
             let aggregate = AggregateState {
-                aggregate_type: meta.aggregate_type.clone(),
-                aggregate_id: meta.aggregate_id.clone(),
-                version: meta.version,
+                aggregate_type,
+                aggregate_id,
+                version,
                 state,
-                merkle_root: meta.merkle_root,
-                archived: meta.archived,
+                merkle_root,
+                created_at,
+                updated_at,
+                archived,
             };
 
             let Some(aggregate) = transform(aggregate) else {

@@ -85,6 +85,8 @@ async fn http_plugin_posts_event_payload() -> Result<()> {
         version: 5,
         state: BTreeMap::from([("status".into(), "created".into())]),
         merkle_root: "state-root".into(),
+        created_at: None,
+        updated_at: None,
         archived: false,
     };
 
