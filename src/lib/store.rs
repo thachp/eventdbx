@@ -183,13 +183,9 @@ fn apply_event(
     debug_assert_eq!(&meta.aggregate_type, &aggregate_type);
     debug_assert_eq!(&meta.aggregate_id, &aggregate_id);
 
-    let previous_version = meta.version;
     let event_time = Utc::now();
-    if previous_version == 0 && meta.created_at.is_none() {
-        meta.created_at = Some(event_time);
-    }
-    meta.updated_at = Some(event_time);
-    let version = previous_version + 1;
+    let version = meta.version + 1;
+    meta.record_write(event_time);
     let payload_map = payload_to_map(&payload);
     let hash = hash_event(
         &aggregate_type,
@@ -643,6 +639,13 @@ impl AggregateMeta {
             updated_at: None,
         }
     }
+
+    fn record_write(&mut self, event_time: DateTime<Utc>) {
+        if self.version == 0 && self.created_at.is_none() {
+            self.created_at = Some(event_time);
+        }
+        self.updated_at = Some(event_time);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -971,12 +974,8 @@ impl EventStore {
             state.insert(key, value);
         }
 
-        let previous_version = meta.version;
         let record_created_at = record.metadata.created_at;
-        if previous_version == 0 && meta.created_at.is_none() {
-            meta.created_at = Some(record_created_at);
-        }
-        meta.updated_at = Some(record_created_at);
+        meta.record_write(record_created_at);
         meta.event_hashes.push(record.hash.clone());
         meta.version = record.version;
         meta.merkle_root = compute_merkle_root(&meta.event_hashes);
