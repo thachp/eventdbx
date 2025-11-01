@@ -15,7 +15,7 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    encryption::Encryptor,
+    encryption::{self, Encryptor},
     error::{EventError, Result},
     restrict::{self, RestrictMode},
     token::JwtManagerConfig,
@@ -25,6 +25,32 @@ pub const DEFAULT_PORT: u16 = 7070;
 pub const DEFAULT_SOCKET_PORT: u16 = 6363;
 pub const DEFAULT_CACHE_THRESHOLD: usize = 10_000;
 pub const DEFAULT_DOMAIN_NAME: &str = "default";
+
+const ENV_DATA_ENCRYPTION_KEY: &str = "EVENTDBX_DATA_ENCRYPTION_KEY";
+const ENV_DEK_LEGACY: &str = "EVENTDBX_DEK";
+const ENV_AUTH_PRIVATE_KEY: &str = "EVENTDBX_AUTH_PRIVATE_KEY";
+const ENV_AUTH_PUBLIC_KEY: &str = "EVENTDBX_AUTH_PUBLIC_KEY";
+const ENV_AUTH_KEY_ID: &str = "EVENTDBX_AUTH_KEY_ID";
+fn secret_from_env(vars: &[&str]) -> Option<String> {
+    for key in vars {
+        if let Ok(value) = env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn normalize_non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
@@ -57,6 +83,32 @@ impl Default for AuthConfig {
             default_ttl_secs: default_jwt_ttl_secs(),
             clock_skew_secs: default_jwt_clock_skew_secs(),
         }
+    }
+}
+
+impl AuthConfig {
+    pub fn resolved_private_key(&self) -> Option<String> {
+        secret_from_env(&[ENV_AUTH_PRIVATE_KEY]).or_else(|| {
+            self.private_key
+                .as_ref()
+                .and_then(|value| normalize_non_empty(value))
+        })
+    }
+
+    pub fn resolved_public_key(&self) -> Option<String> {
+        secret_from_env(&[ENV_AUTH_PUBLIC_KEY]).or_else(|| {
+            self.public_key
+                .as_ref()
+                .and_then(|value| normalize_non_empty(value))
+        })
+    }
+
+    pub fn resolved_key_id(&self) -> Option<String> {
+        secret_from_env(&[ENV_AUTH_KEY_ID]).or_else(|| {
+            self.key_id
+                .as_ref()
+                .and_then(|value| normalize_non_empty(value))
+        })
     }
 }
 
@@ -223,6 +275,14 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
 }
 
 impl Config {
+    pub fn resolved_data_encryption_key(&self) -> Option<String> {
+        secret_from_env(&[ENV_DATA_ENCRYPTION_KEY, ENV_DEK_LEGACY]).or_else(|| {
+            self.data_encryption_key
+                .as_ref()
+                .and_then(|value| normalize_non_empty(value))
+        })
+    }
+
     pub fn migrate_plugins(&mut self) -> Result<bool> {
         if self.plugins.is_empty() {
             return Ok(false);
@@ -327,7 +387,7 @@ impl Config {
     }
 
     pub fn ensure_encryption_key(&mut self) -> bool {
-        if self.is_initialized() {
+        if self.resolved_data_encryption_key().is_some() {
             return false;
         }
 
@@ -338,6 +398,12 @@ impl Config {
     }
 
     pub fn ensure_auth_keys(&mut self) -> Result<bool> {
+        if secret_from_env(&[ENV_AUTH_PRIVATE_KEY]).is_some()
+            || secret_from_env(&[ENV_AUTH_PUBLIC_KEY]).is_some()
+        {
+            return Ok(false);
+        }
+
         let needs_private = self
             .auth
             .private_key
@@ -381,41 +447,40 @@ impl Config {
     }
 
     pub fn jwt_manager_config(&self) -> Result<JwtManagerConfig> {
-        let private = self
+        let private_b64 = self
             .auth
-            .private_key
-            .as_ref()
+            .resolved_private_key()
             .ok_or_else(|| EventError::Config("jwt private key not configured".to_string()))?;
         let private_key = STANDARD
-            .decode(private.trim())
+            .decode(private_b64.trim())
             .map_err(|err| EventError::Config(format!("invalid jwt private key: {err}")))?;
         if private_key.is_empty() {
             return Err(EventError::Config(
                 "jwt private key must contain data".to_string(),
             ));
         }
-        let public = self
-            .auth
-            .public_key
-            .as_ref()
-            .ok_or_else(|| EventError::Config("jwt public key not configured".to_string()))?;
-        let public_key = STANDARD
-            .decode(public.trim())
-            .map_err(|err| EventError::Config(format!("invalid jwt public key: {err}")))?;
-        if public_key.len() != ED25519_PUBLIC_KEY_LEN {
-            return Err(EventError::Config(format!(
-                "jwt public key must decode to {} bytes (got {})",
-                ED25519_PUBLIC_KEY_LEN,
-                public_key.len()
-            )));
-        }
         let key_pair = Ed25519KeyPair::from_pkcs8(private_key.as_slice())
             .map_err(|err| EventError::Config(format!("invalid jwt private key: {err}")))?;
-        if key_pair.public_key().as_ref() != public_key.as_slice() {
-            return Err(EventError::Config(
-                "jwt public key does not match private key".to_string(),
-            ));
-        }
+        let public_key = if let Some(public_b64) = self.auth.resolved_public_key() {
+            let decoded = STANDARD
+                .decode(public_b64.trim())
+                .map_err(|err| EventError::Config(format!("invalid jwt public key: {err}")))?;
+            if decoded.len() != ED25519_PUBLIC_KEY_LEN {
+                return Err(EventError::Config(format!(
+                    "jwt public key must decode to {} bytes (got {})",
+                    ED25519_PUBLIC_KEY_LEN,
+                    decoded.len()
+                )));
+            }
+            if key_pair.public_key().as_ref() != decoded.as_slice() {
+                return Err(EventError::Config(
+                    "jwt public key does not match private key".to_string(),
+                ));
+            }
+            decoded
+        } else {
+            key_pair.public_key().as_ref().to_vec()
+        };
         let ttl = self.auth.default_ttl_secs.max(60);
         let clock_skew = self.auth.clock_skew_secs.clamp(0, 300);
         Ok(JwtManagerConfig {
@@ -423,7 +488,7 @@ impl Config {
             audience: self.auth.audience.clone(),
             private_key,
             public_key,
-            key_id: self.auth.key_id.clone(),
+            key_id: self.auth.resolved_key_id(),
             default_ttl: Duration::seconds(ttl as i64),
             clock_skew: Duration::seconds(clock_skew as i64),
         })
@@ -462,20 +527,12 @@ impl Config {
     }
 
     pub fn is_initialized(&self) -> bool {
-        self.data_encryption_key
-            .as_ref()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
+        self.resolved_data_encryption_key().is_some()
     }
 
     pub fn encryption_key(&self) -> Result<Option<Encryptor>> {
-        match self
-            .data_encryption_key
-            .as_ref()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-        {
-            Some(value) => Ok(Some(Encryptor::new_from_base64(value)?)),
+        match self.resolved_data_encryption_key() {
+            Some(value) => Ok(Some(Encryptor::new_from_base64(&value)?)),
             None => Ok(None),
         }
     }
@@ -575,12 +632,78 @@ pub struct AdminApiConfigUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
     pub endpoint: String,
-    #[serde(default, alias = "public_key")]
-    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "public_key")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
     #[serde(default)]
     pub locator: Option<String>,
     #[serde(default)]
     pub remote_domain: Option<String>,
+}
+
+impl RemoteConfig {
+    pub fn set_plain_token(&mut self, token: String, encryptor: Option<&Encryptor>) -> Result<()> {
+        let normalized = normalize_non_empty(&token)
+            .ok_or_else(|| EventError::Config("remote token cannot be empty".to_string()))?;
+        self.token_env = None;
+        if let Some(enc) = encryptor {
+            let ciphertext = enc.encrypt_to_string(normalized.as_bytes())?;
+            self.token = Some(ciphertext);
+        } else {
+            self.token = Some(normalized);
+        }
+        Ok(())
+    }
+
+    pub fn set_token_env(&mut self, env_name: String) -> Result<()> {
+        let normalized = normalize_non_empty(&env_name).ok_or_else(|| {
+            EventError::Config("token environment variable cannot be empty".to_string())
+        })?;
+        self.token = None;
+        self.token_env = Some(normalized);
+        Ok(())
+    }
+
+    pub fn resolved_token(&self, encryptor: Option<&Encryptor>) -> Result<String> {
+        if let Some(env_name) = &self.token_env {
+            let value = env::var(env_name).map_err(|_| {
+                EventError::Config(format!(
+                    "environment variable '{}' is not set for remote token",
+                    env_name
+                ))
+            })?;
+            return normalize_non_empty(&value).ok_or_else(|| {
+                EventError::Config(format!(
+                    "environment variable '{}' is empty for remote token",
+                    env_name
+                ))
+            });
+        }
+
+        let stored = self
+            .token
+            .as_ref()
+            .ok_or_else(|| EventError::Config("remote token is not configured".to_string()))?;
+        if encryption::is_encrypted_blob(stored) {
+            let encryptor = encryptor.ok_or_else(|| {
+                EventError::Config(
+                    "remote token is encrypted but data encryption key is not configured"
+                        .to_string(),
+                )
+            })?;
+            let plaintext = encryptor.decrypt_from_str(stored)?;
+            let token = String::from_utf8(plaintext).map_err(|err| {
+                EventError::Config(format!("remote token contains invalid UTF-8: {err}"))
+            })?;
+            normalize_non_empty(&token).ok_or_else(|| {
+                EventError::Config("remote token cannot be empty after decryption".to_string())
+            })
+        } else {
+            normalize_non_empty(stored)
+                .ok_or_else(|| EventError::Config("remote token cannot be empty".to_string()))
+        }
+    }
 }
 
 fn default_config_root() -> Result<PathBuf> {

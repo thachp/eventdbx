@@ -110,13 +110,14 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    - `column_types` declare data types, validation formats, and rule blocks per field. Rules can enforce length, numeric ranges, regexes, or cross-field matches.
    - `events.<event>.fields` restrict the properties an event may set; leaving the list empty keeps the event permissive.
    - `field_locks` and `hidden_fields` control which fields can be updated or returned in aggregate detail calls.
-   - `locked: true` freezes the schema to prevent further event writes until it is unlocked.
+
+- `locked: true` freezes the schema to prevent further event writes until it is unlocked.
 
 4. **Issue a token for CLI access**
 
-   ```bash
-   dbx token generate --group admin --user jane --expiration 3600
-   ```
+```bash
+dbx token generate --group admin --user jane --expiration 3600
+```
 
 5. **Append an event**
    - When the server is running the CLI proxies writes through the control socket automatically. Pass a token with `--token` or set `EVENTDBX_TOKEN` to reuse your own credentials; otherwise the CLI mints a short-lived token for the call.
@@ -129,6 +130,60 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort created_at:desc --take 5` or drill into the payload of a specific event via `dbx events <snowflake_id> --json`.
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
+
+## Run with Docker
+
+### Use the published image
+
+```bash
+# Pull the latest published release
+docker pull thachp/eventdbx:tagname
+
+# Start the daemon with persistent storage and required ports
+docker run \
+  --name eventdbx \
+  --detach \
+  --publish 7070:7070 \
+  --publish 6363:6363 \
+  --volume "$PWD/data:/var/lib/eventdbx" \
+  thachp/eventdbx:tagname
+```
+
+###
+
+```typescript
+// Connect with EventDBX using libraries in your language of choice.
+// Only Javascript / Typescript is supported. Ie, pnpm install eventdbxjs
+
+import { createClient } from 'eventdbxjs';
+
+const client = createClient({
+  ip: process.env.EVENTDBX_HOST,
+  port: Number(process.env.EVENTDBX_PORT) || 6363,
+  token: process.env.EVENTDBX_TOKEN,
+  verbose: true, // should match verbose_responses = false on the server config file
+});
+
+await client.connect();
+
+// create an aggregate
+const snapshot = await client.create('person', 'p-110', 'person_registered', {
+  payload: { name: 'Jane Doe', status: 'active' },
+  metadata: { '@source': 'seed-script' },
+  note: 'seed aggregate',
+});
+console.log('created aggregate version', snapshot.version);
+
+// apply an event
+await client.apply('person', 'p-110', 'person_contact_added', {
+  payload: { name: 'Jane Doe', status: 'active' },
+  metadata: { note: 'seed data' },
+});
+
+// return a list of events of a p-110
+const history = await client.events('person', 'p-110');
+console.log('event count:', history.length);
+```
 
 ## Features
 
@@ -202,7 +257,7 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 
 ### Aggregates
 
-- `dbx aggregate create --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--metadata <json>] [--note <text>] [--token <value>] [--json]`  
+- `dbx aggregate create --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--metadata <json>] [--note <text>] [--token <value>] [--json]`
 - `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--payload <json>] [--stage] [--token <value>] [--note <text>]`  
   Appends an event immediately—use `--stage` to queue it for a later commit.
 - `dbx aggregate patch --aggregate <type> --aggregate-id <id> --event <name> --patch <json> [--stage] [--token <value>] [--metadata <json>] [--note <text>]`  
