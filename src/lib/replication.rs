@@ -5,6 +5,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     config::{Config, RemoteConfig},
+    encryption::Encryptor,
     error::{EventError, Result},
     replication_capnp_client::{CapnpReplicationClient, normalize_capnp_endpoint},
     replication_planner::{
@@ -27,7 +28,11 @@ struct RemoteHandle {
 }
 
 impl ReplicationManager {
-    pub fn from_config(config: &Config, store: Arc<EventStore>) -> Option<Self> {
+    pub fn from_config(
+        config: &Config,
+        store: Arc<EventStore>,
+        encryptor: Option<Encryptor>,
+    ) -> Option<Self> {
         if config.remotes.is_empty() {
             return None;
         }
@@ -35,8 +40,13 @@ impl ReplicationManager {
         let mut handles = Vec::new();
         for (name, remote_config) in &config.remotes {
             let (tx, rx) = mpsc::channel(REPLICATION_CHANNEL_CAPACITY);
-            let worker =
-                RemoteWorker::new(name.clone(), remote_config.clone(), Arc::clone(&store), rx);
+            let worker = RemoteWorker::new(
+                name.clone(),
+                remote_config.clone(),
+                Arc::clone(&store),
+                rx,
+                encryptor.clone(),
+            );
             tokio::spawn(async move { worker.run().await });
             handles.push(RemoteHandle {
                 name: name.clone(),
@@ -83,6 +93,7 @@ struct RemoteWorker {
     receiver: mpsc::Receiver<Vec<EventRecord>>,
     pending: Option<Vec<EventRecord>>,
     sequence: u64,
+    encryptor: Option<Encryptor>,
 }
 
 impl RemoteWorker {
@@ -91,6 +102,7 @@ impl RemoteWorker {
         config: RemoteConfig,
         store: Arc<EventStore>,
         receiver: mpsc::Receiver<Vec<EventRecord>>,
+        encryptor: Option<Encryptor>,
     ) -> Self {
         Self {
             name,
@@ -99,6 +111,7 @@ impl RemoteWorker {
             receiver,
             pending: None,
             sequence: 0,
+            encryptor,
         }
     }
 
@@ -289,10 +302,8 @@ impl RemoteWorker {
     async fn connect(&self) -> Result<CapnpReplicationClient> {
         let endpoint = normalize_capnp_endpoint(&self.config.endpoint)
             .map_err(|err| EventError::Config(err.to_string()))?;
-        if self.config.token.trim().is_empty() {
-            return Err(EventError::Config("remote token cannot be empty".into()));
-        }
-        CapnpReplicationClient::connect(&endpoint, &self.config.token)
+        let token = self.config.resolved_token(self.encryptor.as_ref())?;
+        CapnpReplicationClient::connect(&endpoint, &token)
             .await
             .map_err(|err| EventError::Storage(err.to_string()))
     }

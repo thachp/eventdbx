@@ -13,6 +13,7 @@ use clap::{Args, Subcommand};
 use eventdbx::{
     config::{Config, RemoteConfig, load_or_default},
     conflict_store::ConflictStore,
+    encryption,
     error::EventError,
     replication_capnp_client::{CapnpReplicationClient, decode_schemas, normalize_capnp_endpoint},
     replication_planner::{
@@ -51,6 +52,9 @@ pub struct RemoteAddArgs {
     /// Access token granting replication privileges on the remote (required for direct targets)
     #[arg(long = "token")]
     pub token: Option<String>,
+    /// Environment variable that resolves to the replication token
+    #[arg(long = "token-env", value_name = "ENV", conflicts_with = "token")]
+    pub token_env: Option<String>,
     /// Remote replication port
     #[arg(long, default_value_t = 6363)]
     pub port: u16,
@@ -154,10 +158,25 @@ fn add_remote(config_path: Option<PathBuf>, args: RemoteAddArgs) -> Result<()> {
         bail!("remote target cannot be empty");
     }
 
-    let (endpoint, token, locator, remote_domain, summary_target) =
+    #[derive(Debug)]
+    enum RemoteTokenSource {
+        Inline(String),
+        Env(String),
+    }
+
+    let token_env = args.token_env.as_ref().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    let (endpoint, token_source, locator, remote_domain, summary_target) =
         if let Some(locator) = RemoteLocator::parse(target) {
-            if args.token.is_some() {
-                bail!("--token cannot be supplied when using a locator target");
+            if args.token.is_some() || token_env.is_some() {
+                bail!("--token and --token-env cannot be supplied when using a locator target");
             }
             let resolved = resolve_remote_locator(&locator)?;
             let normalized_token = normalize_token(&resolved.token)?;
@@ -170,7 +189,7 @@ fn add_remote(config_path: Option<PathBuf>, args: RemoteAddArgs) -> Result<()> {
             }
             (
                 endpoint,
-                normalized_token,
+                RemoteTokenSource::Inline(normalized_token),
                 Some(locator.to_string()),
                 resolved.remote_domain.clone(),
                 locator.to_string(),
@@ -182,28 +201,49 @@ fn add_remote(config_path: Option<PathBuf>, args: RemoteAddArgs) -> Result<()> {
             if args.port == 0 {
                 bail!("remote port must be greater than zero");
             }
-            let token_input = args
-                .token
-                .as_deref()
-                .ok_or_else(|| anyhow!("--token is required when adding a direct remote"))?;
-            let normalized_token = normalize_token(token_input)?;
+            let secret = if let Some(env_name) = token_env.clone() {
+                RemoteTokenSource::Env(env_name)
+            } else {
+                let token_input = args.token.as_deref().ok_or_else(|| {
+                    anyhow!(
+                        "either --token or --token-env must be provided when adding a direct remote"
+                    )
+                })?;
+                let normalized_token = normalize_token(token_input)?;
+                RemoteTokenSource::Inline(normalized_token)
+            };
             let endpoint = format!("tcp://{}:{}", target, args.port);
-            (endpoint, normalized_token, None, None, target.to_string())
+            (endpoint, secret, None, None, target.to_string())
         };
 
-    config.remotes.insert(
-        name.to_string(),
-        RemoteConfig {
-            endpoint: endpoint.clone(),
-            token: token.clone(),
-            locator,
-            remote_domain: remote_domain.clone(),
-        },
-    );
+    let encryptor = config.encryption_key()?;
+    let mut remote_config = RemoteConfig {
+        endpoint: endpoint.clone(),
+        token: None,
+        token_env: None,
+        locator,
+        remote_domain: remote_domain.clone(),
+    };
+
+    let token_summary = match token_source {
+        RemoteTokenSource::Inline(token_value) => {
+            if encryptor.is_none() {
+                eprintln!(
+                    "warning: data encryption key is not available; storing remote token in plaintext"
+                );
+            }
+            remote_config.set_plain_token(token_value.clone(), encryptor.as_ref())?;
+            summarize_token(&token_value)
+        }
+        RemoteTokenSource::Env(env_name) => {
+            remote_config.set_token_env(env_name.clone())?;
+            format!("<env:{}>", env_name)
+        }
+    };
+
+    config.remotes.insert(name.to_string(), remote_config);
     config.updated_at = Utc::now();
     config.save(&path)?;
-
-    let token_summary = summarize_token(&token);
     match remote_domain {
         Some(domain) => println!(
             "Remote '{}' resolved '{}' to endpoint {} (domain {}) with token {}",
@@ -443,7 +483,7 @@ fn show_remote(config_path: Option<PathBuf>, args: RemoteShowArgs) -> Result<()>
 
     println!("name: {}", name);
     println!("endpoint: {}", remote.endpoint);
-    println!("token: {}", summarize_token(&remote.token));
+    println!("token: {}", describe_remote_token(remote));
     if let Some(locator) = &remote.locator {
         println!("locator: {}", locator);
     }
@@ -478,7 +518,7 @@ pub async fn push(config_path: Option<PathBuf>, mut args: RemotePushArgs) -> Res
 
     if args.schema {
         let manager = Arc::new(SchemaManager::load(config.schema_store_path())?);
-        push_remote_schemas(manager, remote.clone(), &remote_name, args.dry_run).await?;
+        push_remote_schemas(&config, manager, remote.clone(), &remote_name, args.dry_run).await?;
         if args.schema_only {
             return Ok(());
         }
@@ -493,6 +533,7 @@ pub async fn push(config_path: Option<PathBuf>, mut args: RemotePushArgs) -> Res
     let filter = normalize_filter(&args.aggregates, &args.aggregate_ids)?;
 
     push_remote_impl(
+        &config,
         store,
         local_positions,
         remote,
@@ -547,6 +588,7 @@ pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Res
             )?);
             let local_positions = store.aggregate_positions()?;
             pull_remote_impl(
+                &config,
                 Arc::clone(&store),
                 Arc::clone(&conflicts),
                 local_positions,
@@ -567,6 +609,7 @@ pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Res
                     let store = Arc::new(store);
                     let local_positions = store.aggregate_positions()?;
                     pull_remote_impl(
+                        &config,
                         Arc::clone(&store),
                         Arc::clone(&conflicts),
                         local_positions,
@@ -606,7 +649,7 @@ pub async fn pull(config_path: Option<PathBuf>, mut args: RemotePullArgs) -> Res
             pull_remote_schemas_via_daemon(&config, remote, &remote_name, args.dry_run).await?;
         } else {
             let manager = Arc::new(SchemaManager::load(config.schema_store_path())?);
-            pull_remote_schemas(manager, remote, &remote_name, args.dry_run).await?;
+            pull_remote_schemas(&config, manager, remote, &remote_name, args.dry_run).await?;
         }
     }
 
@@ -636,6 +679,17 @@ fn summarize_token(token: &str) -> String {
     let prefix = &token[..prefix_len];
     let suffix = &token[token.len() - suffix_len..];
     format!("{}…{}", prefix, suffix)
+}
+
+fn describe_remote_token(remote: &RemoteConfig) -> String {
+    if let Some(env_name) = &remote.token_env {
+        return format!("<env:{}>", env_name);
+    }
+    match remote.token.as_deref() {
+        Some(token) if encryption::is_encrypted_blob(token) => "<encrypted>".to_string(),
+        Some(token) => summarize_token(token),
+        None => "<unset>".to_string(),
+    }
 }
 
 fn normalize_filter(
@@ -691,6 +745,7 @@ fn normalize_filter(
 }
 
 async fn push_remote_impl(
+    config: &Config,
     store: Arc<EventStore>,
     local_positions: Vec<AggregatePositionEntry>,
     remote: RemoteConfig,
@@ -699,7 +754,7 @@ async fn push_remote_impl(
     batch_size: usize,
     filter: Option<ReplicationFilter>,
 ) -> Result<()> {
-    let mut client = connect_client(&remote).await?;
+    let mut client = connect_client(config, &remote).await?;
     let remote_positions = client
         .list_positions()
         .await
@@ -763,6 +818,7 @@ async fn push_remote_impl(
 }
 
 async fn pull_remote_impl(
+    config: &Config,
     store: Arc<EventStore>,
     conflicts: Arc<ConflictStore>,
     local_positions: Vec<AggregatePositionEntry>,
@@ -772,7 +828,7 @@ async fn pull_remote_impl(
     batch_size: usize,
     filter: Option<ReplicationFilter>,
 ) -> Result<()> {
-    let mut client = connect_client(&remote).await?;
+    let mut client = connect_client(config, &remote).await?;
     let remote_positions: Vec<AggregatePositionEntry> = client
         .list_positions()
         .await
@@ -868,7 +924,7 @@ async fn pull_remote_via_daemon(
     batch_size: usize,
     filter: Option<ReplicationFilter>,
 ) -> Result<()> {
-    let mut remote_client = connect_client(&remote).await?;
+    let mut remote_client = connect_client(config, &remote).await?;
     let remote_positions = remote_client
         .list_positions()
         .await
@@ -942,12 +998,13 @@ async fn pull_remote_via_daemon(
 }
 
 async fn pull_remote_schemas(
+    config: &Config,
     manager: Arc<SchemaManager>,
     remote: RemoteConfig,
     remote_name: &str,
     dry_run: bool,
 ) -> Result<()> {
-    let mut client = connect_client(&remote).await?;
+    let mut client = connect_client(config, &remote).await?;
     let payload = client
         .pull_schemas()
         .await
@@ -991,7 +1048,7 @@ async fn pull_remote_schemas_via_daemon(
     remote_name: &str,
     dry_run: bool,
 ) -> Result<()> {
-    let mut remote_client = connect_client(&remote).await?;
+    let mut remote_client = connect_client(config, &remote).await?;
     let payload = remote_client
         .pull_schemas()
         .await
@@ -1040,12 +1097,13 @@ async fn pull_remote_schemas_via_daemon(
 }
 
 async fn push_remote_schemas(
+    config: &Config,
     manager: Arc<SchemaManager>,
     remote: RemoteConfig,
     remote_name: &str,
     dry_run: bool,
 ) -> Result<()> {
-    let mut client = connect_client(&remote).await?;
+    let mut client = connect_client(config, &remote).await?;
     let payload = client
         .pull_schemas()
         .await
@@ -1099,16 +1157,18 @@ async fn connect_local_replication_client(config: &Config) -> Result<CapnpReplic
         .map_err(|err| anyhow!("failed to connect to local replication endpoint: {}", err))
 }
 
-async fn connect_client(remote: &RemoteConfig) -> Result<CapnpReplicationClient> {
+async fn connect_client(config: &Config, remote: &RemoteConfig) -> Result<CapnpReplicationClient> {
     let endpoint = normalize_capnp_endpoint(&remote.endpoint)?;
-    if remote.token.trim().is_empty() {
-        bail!(
-            "remote '{}' does not have a replication token configured",
-            remote.endpoint
-        );
-    }
+    let encryptor = config.encryption_key()?;
+    let token = remote.resolved_token(encryptor.as_ref()).map_err(|err| {
+        anyhow!(
+            "failed to resolve token for remote {}: {}",
+            remote.endpoint,
+            err
+        )
+    })?;
 
-    CapnpReplicationClient::connect(&endpoint, &remote.token)
+    CapnpReplicationClient::connect(&endpoint, &token)
         .await
         .map_err(|err| anyhow!("failed to connect to remote {}: {}", remote.endpoint, err))
 }

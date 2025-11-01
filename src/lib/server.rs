@@ -120,7 +120,8 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         config_snapshot.snowflake_worker_id,
     )?);
     let schemas = Arc::new(SchemaManager::load(config_snapshot.schema_store_path())?);
-    let replication = ReplicationManager::from_config(&config_snapshot, Arc::clone(&store));
+    let replication =
+        ReplicationManager::from_config(&config_snapshot, Arc::clone(&store), encryption.clone());
     if let Some(_) = &replication {
         info!(
             remote_count = config_snapshot.remotes.len(),
