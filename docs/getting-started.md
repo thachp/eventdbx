@@ -32,7 +32,7 @@ dbx config --dek "$(cat dek.txt)"
 
 > The configuration lives under `~/.eventdbx/config.toml` by default. Pass `--config <path>` to every command if you store it elsewhere.
 
-Each writer process needs a distinct Snowflake worker id so generated `event_id`s stay unique during replication. Set it once per node:
+Each writer process needs a distinct Snowflake worker id so generated `event_id`s stay unique across nodes. Set it once per node:
 
 ```bash
 dbx config --snowflake-worker-id 7
@@ -165,5 +165,5 @@ Plugins expose REST/GraphQL/gRPC endpoints for external readers. Check the plugi
 
 ## Next steps
 
-- Explore the full [CLI reference]({{ '/cli/' | relative_url }}) for backups, replication, plugins, and admin tooling.
+- Explore the full [CLI reference]({{ '/cli/' | relative_url }}) for backups, plugins, and admin tooling.
 - Review the [API reference]({{ '/apis/' | relative_url }}) for REST, GraphQL, gRPC, and the new Admin API endpoints.

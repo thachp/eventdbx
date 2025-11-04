@@ -868,65 +868,6 @@ fn schema_show_outputs_json() -> Result<()> {
 }
 
 #[test]
-fn remote_list_empty_json() -> Result<()> {
-    let cli = CliTest::new()?;
-    let stdout = cli.run(&["remote", "ls", "--json"])?;
-    let remotes: Value =
-        serde_json::from_str(stdout.trim()).context("failed to parse remote ls JSON")?;
-    assert!(
-        remotes
-            .as_object()
-            .map(|map| map.is_empty())
-            .unwrap_or(false),
-        "expected empty JSON object for remotes, got {}",
-        remotes
-    );
-    Ok(())
-}
-
-cli_success_contains_test!(
-    remote_list_empty_text,
-    ["remote", "ls"],
-    "(no remotes configured)"
-);
-
-cli_failure_test!(
-    remote_show_unknown_fails,
-    ["remote", "show", "ghost"],
-    "no remote named 'ghost' is configured"
-);
-
-cli_failure_test!(
-    remote_remove_unknown_fails,
-    ["remote", "rm", "ghost"],
-    "no remote named 'ghost' is configured"
-);
-
-cli_failure_test!(
-    remote_push_unknown_remote_fails,
-    ["push", "ghost"],
-    "no remote named 'ghost' is configured"
-);
-
-cli_failure_test!(
-    remote_pull_unknown_remote_fails,
-    ["pull", "ghost"],
-    "no remote named 'ghost' is configured"
-);
-
-cli_failure_test!(
-    remote_push_schema_only_filter_conflict,
-    ["push", "ghost", "--schema-only", "--aggregate", "order"],
-    "--schema-only cannot be combined with aggregate filters"
-);
-
-cli_failure_test!(
-    remote_pull_schema_only_filter_conflict,
-    ["pull", "ghost", "--schema-only", "--aggregate", "order"],
-    "--schema-only cannot be combined with aggregate filters"
-);
-
-#[test]
 fn backup_output_inside_data_dir_fails() -> Result<()> {
     let cli = CliTest::new()?;
     let output_path = cli.data_dir().join("backup.tar.gz");

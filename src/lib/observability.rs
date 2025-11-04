@@ -68,14 +68,6 @@ pub fn init() -> Result<()> {
                 "Latency of Cap'n Proto control requests handled over the TCP socket."
             );
             describe_counter!(
-                "eventdbx_capnp_replication_requests_total",
-                "Total number of replication socket requests handled."
-            );
-            describe_histogram!(
-                "eventdbx_capnp_replication_request_duration_seconds",
-                "Latency of replication socket requests handled."
-            );
-            describe_counter!(
                 "eventdbx_cli_proxy_commands_total",
                 "Total number of CLI proxy shell-out commands executed."
             );
@@ -150,23 +142,6 @@ pub fn record_capnp_control_request(operation: &str, status: &str, duration: f64
     .increment(1);
     histogram!(
         "eventdbx_capnp_control_request_duration_seconds",
-        "operation" => operation_label,
-        "status" => status_label
-    )
-    .record(duration);
-}
-
-pub fn record_capnp_replication_request(operation: &str, status: &str, duration: f64) {
-    let operation_label = operation.to_owned();
-    let status_label = status.to_owned();
-    counter!(
-        "eventdbx_capnp_replication_requests_total",
-        "operation" => operation_label.clone(),
-        "status" => status_label.clone()
-    )
-    .increment(1);
-    histogram!(
-        "eventdbx_capnp_replication_request_duration_seconds",
         "operation" => operation_label,
         "status" => status_label
     )

@@ -61,4 +61,4 @@ Requests to `/admin/...` must include an `Authorization: Bearer <token>` header 
 - [Getting started]({{ '/getting-started/' | relative_url }}) walks through schema setup, tokens, and common workflows.
 - [CLI reference]({{ '/cli/' | relative_url }}) details every subcommand with practical examples.
 - [Plugin architecture]({{ '/plugins/' | relative_url }}) explains how the job queue works and how to build new read-side connectors.
-- [API reference]({{ '/apis/' | relative_url }}) covers REST, GraphQL, gRPC, replication, and the Admin API routes.
+- [API reference]({{ '/apis/' | relative_url }}) covers REST, GraphQL, gRPC, and the Admin API routes.

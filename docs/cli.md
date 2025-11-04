@@ -6,7 +6,7 @@ nav_id: cli
 
 # CLI Reference
 
-The `dbx` binary manages servers, schemas, tokens, plugins, replication, and backups. Every command accepts `--config <path>` when you need to point at a non-default configuration file. The CLI programs the *write* side of EventDBX and orchestrates the plugin pipeline that pushes jobs to read-side services.
+The `dbx` binary manages servers, schemas, tokens, plugins, and backups. Every command accepts `--config <path>` when you need to point at a non-default configuration file. The CLI programs the *write* side of EventDBX and orchestrates the plugin pipeline that pushes jobs to read-side services.
 
 ## Global options
 
@@ -86,17 +86,6 @@ Staging (`--stage`) records events to `~/.eventdbx/staged_events.json` until you
 EventDBX’s core store owns the *write* side of CQRS; plugins serve the *read* side by consuming jobs from the queue and projecting them into downstream systems (search, analytics, notification hubs, and more). Jobs are persisted in RocksDB so delivery survives restarts, and each plugin can request only the data it needs—event documents, materialised state, schemas, or combinations thereof.
 
 See the [Plugin architecture]({{ '/plugins/' | relative_url }}) guide for deeper details, payload modes, and extension patterns.
-
-## Replication
-
-- `dbx remote add <name> <ip> --token <jwt> [--port <u16>] [--replace]`
-- `dbx remote rm <name>`
-- `dbx remote ls`
-- `dbx remote show <name>`
-- `dbx push <name> [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>…] [--aggregate-id <type:id>…]`
-- `dbx pull <name> [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>…] [--aggregate-id <type:id>…]`
-
-Remotes authenticate with issued JWT tokens and reuse the CLI socket (`tcp://…:6363` by default).
 
 ## Maintenance
 
