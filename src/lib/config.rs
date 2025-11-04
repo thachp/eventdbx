@@ -27,7 +27,6 @@ pub const DEFAULT_CACHE_THRESHOLD: usize = 10_000;
 pub const DEFAULT_DOMAIN_NAME: &str = "default";
 
 const ENV_DATA_ENCRYPTION_KEY: &str = "EVENTDBX_DATA_ENCRYPTION_KEY";
-const ENV_DEK_LEGACY: &str = "EVENTDBX_DEK";
 const ENV_AUTH_PRIVATE_KEY: &str = "EVENTDBX_AUTH_PRIVATE_KEY";
 const ENV_AUTH_PUBLIC_KEY: &str = "EVENTDBX_AUTH_PUBLIC_KEY";
 const ENV_AUTH_KEY_ID: &str = "EVENTDBX_AUTH_KEY_ID";
@@ -263,7 +262,7 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
 
 impl Config {
     pub fn resolved_data_encryption_key(&self) -> Option<String> {
-        secret_from_env(&[ENV_DATA_ENCRYPTION_KEY, ENV_DEK_LEGACY]).or_else(|| {
+        secret_from_env(&[ENV_DATA_ENCRYPTION_KEY]).or_else(|| {
             self.data_encryption_key
                 .as_ref()
                 .and_then(|value| normalize_non_empty(value))

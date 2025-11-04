@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use anyhow::{Context, Result, anyhow, bail};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use sha2::{Digest, Sha256};
-use snow::{TransportState, params::NoiseParams};
+use snow::{HandshakeState, TransportState, params::NoiseParams};
 
 const NOISE_PROTOCOL_NAME: &str = "Noise_NNpsk0_25519_ChaChaPoly_SHA256";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -19,6 +19,71 @@ fn derive_psk(token: &[u8]) -> [u8; 32] {
     psk
 }
 
+fn noise_params() -> Result<NoiseParams> {
+    NOISE_PROTOCOL_NAME
+        .parse()
+        .context("failed to parse Noise protocol definition")
+}
+
+fn build_initiator_state(token: &[u8]) -> Result<HandshakeState> {
+    let params = noise_params()?;
+    let psk = derive_psk(token);
+    snow::Builder::new(params)
+        .psk(0, &psk)
+        .build_initiator()
+        .context("failed to build Noise initiator")
+}
+
+fn build_responder_state(token: &[u8]) -> Result<HandshakeState> {
+    let params = noise_params()?;
+    let psk = derive_psk(token);
+    snow::Builder::new(params)
+        .psk(0, &psk)
+        .build_responder()
+        .context("failed to build Noise responder")
+}
+
+fn encrypt_payload(state: &mut TransportState, plaintext: &[u8]) -> Result<Vec<u8>> {
+    if plaintext.len() > MAX_FRAME_LEN {
+        bail!(
+            "plaintext message exceeds maximum Noise frame length ({} bytes)",
+            MAX_FRAME_LEN
+        );
+    }
+    let mut buffer = vec![0u8; plaintext.len() + AEAD_TAG_LEN];
+    let len = state
+        .write_message(plaintext, &mut buffer)
+        .context("failed to encrypt Noise frame")?;
+    buffer.truncate(len);
+    Ok(buffer)
+}
+
+fn decrypt_payload(state: &mut TransportState, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    if ciphertext.len() > MAX_FRAME_LEN + AEAD_TAG_LEN {
+        bail!(
+            "encrypted Noise frame exceeds maximum length ({} bytes)",
+            MAX_FRAME_LEN + AEAD_TAG_LEN
+        );
+    }
+    let mut buffer = vec![0u8; ciphertext.len()];
+    let len = state
+        .read_message(ciphertext, &mut buffer)
+        .context("failed to decrypt Noise frame")?;
+    buffer.truncate(len);
+    Ok(buffer)
+}
+
+fn ensure_frame_size(len: usize) -> Result<()> {
+    if len > MAX_FRAME_LEN + AEAD_TAG_LEN {
+        bail!(
+            "frame length {} exceeds allowed maximum {}",
+            len,
+            MAX_FRAME_LEN + AEAD_TAG_LEN
+        );
+    }
+    Ok(())
+}
+
 pub async fn perform_client_handshake<R, W>(
     reader: &mut R,
     writer: &mut W,
@@ -28,14 +93,7 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let params: NoiseParams = NOISE_PROTOCOL_NAME
-        .parse()
-        .context("failed to parse Noise protocol definition")?;
-    let psk = derive_psk(token);
-    let builder = snow::Builder::new(params).psk(0, &psk);
-    let mut state = builder
-        .build_initiator()
-        .context("failed to build Noise initiator")?;
+    let mut state = build_initiator_state(token)?;
     let mut buffer = vec![0u8; HANDSHAKE_MESSAGE_MAX];
     let len = state
         .write_message(&[], &mut buffer)
@@ -66,14 +124,7 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let params: NoiseParams = NOISE_PROTOCOL_NAME
-        .parse()
-        .context("failed to parse Noise protocol definition")?;
-    let psk = derive_psk(token);
-    let builder = snow::Builder::new(params).psk(0, &psk);
-    let mut state = builder
-        .build_responder()
-        .context("failed to build Noise responder")?;
+    let mut state = build_responder_state(token)?;
 
     let message = read_frame(reader).await?;
     let frame = message.ok_or_else(|| anyhow!("peer closed connection during Noise handshake"))?;
@@ -104,17 +155,8 @@ pub async fn write_encrypted_frame<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    if plaintext.len() > MAX_FRAME_LEN {
-        bail!(
-            "plaintext message exceeds maximum Noise frame length ({} bytes)",
-            MAX_FRAME_LEN
-        );
-    }
-    let mut buffer = vec![0u8; plaintext.len() + AEAD_TAG_LEN];
-    let len = state
-        .write_message(plaintext, &mut buffer)
-        .context("failed to encrypt Noise frame")?;
-    send_frame(writer, &buffer[..len]).await?;
+    let buffer = encrypt_payload(state, plaintext)?;
+    send_frame(writer, &buffer).await?;
     writer
         .flush()
         .await
@@ -133,18 +175,8 @@ where
         Some(frame) => frame,
         None => return Ok(None),
     };
-    if frame.len() > MAX_FRAME_LEN + AEAD_TAG_LEN {
-        bail!(
-            "encrypted Noise frame exceeds maximum length ({} bytes)",
-            MAX_FRAME_LEN + AEAD_TAG_LEN
-        );
-    }
-    let mut buffer = vec![0u8; frame.len()];
-    let len = state
-        .read_message(&frame, &mut buffer)
-        .context("failed to decrypt Noise frame")?;
-    buffer.truncate(len);
-    Ok(Some(buffer))
+    let plaintext = decrypt_payload(state, &frame)?;
+    Ok(Some(plaintext))
 }
 
 async fn send_frame<W>(writer: &mut W, payload: &[u8]) -> Result<()>
@@ -181,13 +213,7 @@ where
         }
     }
     let len = u32::from_be_bytes(header) as usize;
-    if len > MAX_FRAME_LEN + AEAD_TAG_LEN {
-        bail!(
-            "frame length {} exceeds allowed maximum {}",
-            len,
-            MAX_FRAME_LEN + AEAD_TAG_LEN
-        );
-    }
+    ensure_frame_size(len)?;
     let mut payload = vec![0u8; len];
     if len > 0 {
         if let Err(err) = reader.read_exact(&mut payload).await {
@@ -204,14 +230,7 @@ pub fn perform_client_handshake_blocking<S>(stream: &mut S, token: &[u8]) -> Res
 where
     S: Read + Write,
 {
-    let params: NoiseParams = NOISE_PROTOCOL_NAME
-        .parse()
-        .context("failed to parse Noise protocol definition")?;
-    let psk = derive_psk(token);
-    let builder = snow::Builder::new(params).psk(0, &psk);
-    let mut state = builder
-        .build_initiator()
-        .context("failed to build Noise initiator")?;
+    let mut state = build_initiator_state(token)?;
     let mut buffer = vec![0u8; HANDSHAKE_MESSAGE_MAX];
     let len = state
         .write_message(&[], &mut buffer)
@@ -235,17 +254,8 @@ pub fn write_encrypted_frame_blocking<W: Write>(
     state: &mut TransportState,
     plaintext: &[u8],
 ) -> Result<()> {
-    if plaintext.len() > MAX_FRAME_LEN {
-        bail!(
-            "plaintext message exceeds maximum Noise frame length ({} bytes)",
-            MAX_FRAME_LEN
-        );
-    }
-    let mut buffer = vec![0u8; plaintext.len() + AEAD_TAG_LEN];
-    let len = state
-        .write_message(plaintext, &mut buffer)
-        .context("failed to encrypt Noise frame")?;
-    send_frame_blocking(writer, &buffer[..len])?;
+    let buffer = encrypt_payload(state, plaintext)?;
+    send_frame_blocking(writer, &buffer)?;
     writer.flush()?;
     Ok(())
 }
@@ -258,18 +268,8 @@ pub fn read_encrypted_frame_blocking<R: Read>(
         Some(frame) => frame,
         None => return Ok(None),
     };
-    if frame.len() > MAX_FRAME_LEN + AEAD_TAG_LEN {
-        bail!(
-            "encrypted Noise frame exceeds maximum length ({} bytes)",
-            MAX_FRAME_LEN + AEAD_TAG_LEN
-        );
-    }
-    let mut buffer = vec![0u8; frame.len()];
-    let len = state
-        .read_message(&frame, &mut buffer)
-        .context("failed to decrypt Noise frame")?;
-    buffer.truncate(len);
-    Ok(Some(buffer))
+    let plaintext = decrypt_payload(state, &frame)?;
+    Ok(Some(plaintext))
 }
 
 fn send_frame_blocking<W: Write>(writer: &mut W, payload: &[u8]) -> Result<()> {
@@ -298,13 +298,7 @@ fn read_frame_blocking<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>> {
         }
     }
     let len = u32::from_be_bytes(header) as usize;
-    if len > MAX_FRAME_LEN + AEAD_TAG_LEN {
-        bail!(
-            "frame length {} exceeds allowed maximum {}",
-            len,
-            MAX_FRAME_LEN + AEAD_TAG_LEN
-        );
-    }
+    ensure_frame_size(len)?;
     let mut payload = vec![0u8; len];
     if len > 0 {
         if let Err(err) = reader.read_exact(&mut payload) {
