@@ -68,6 +68,9 @@ pub fn checkout(config_path: Option<PathBuf>, args: DomainCheckoutArgs) -> Resul
 
     let target = resolve_checkout_domain(&args)?;
     let (mut config, path) = load_or_default(config_path)?;
+    let mut candidate = config.clone();
+    candidate.domain = target.clone();
+    let domain_dir = candidate.domain_data_dir();
 
     if args.create {
         create_domain(&config, &target)?;
@@ -80,6 +83,13 @@ pub fn checkout(config_path: Option<PathBuf>, args: DomainCheckoutArgs) -> Resul
             config.domain_data_dir().display()
         );
         return Ok(());
+    }
+
+    if !args.create && !candidate.is_default_domain() && !domain_dir.exists() {
+        bail!(
+            "domain '{}' does not exist; re-run with --create to create it",
+            target
+        );
     }
 
     config.domain = target.clone();
@@ -505,6 +515,7 @@ struct PidRecord {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use tempfile::tempdir;
 
     #[test]
     fn normalizes_default_domain_case_insensitively() {
@@ -561,6 +572,96 @@ mod tests {
         assert!(normalize_domain_name("bad/name").is_err());
         assert!(normalize_domain_name("  ").is_err());
         assert!(normalize_domain_name("-leading").is_err());
+    }
+
+    #[test]
+    fn checkout_requires_create_for_new_domain() {
+        let temp = tempdir().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.data_dir = temp.path().join("data");
+        cfg.ensure_data_dir().expect("create default data dir");
+        cfg.save(&config_path).expect("write config");
+
+        let args = DomainCheckoutArgs {
+            flag_domain: Some("herds".to_string()),
+            positional_domain: None,
+            create: false,
+            delete: false,
+            force: false,
+        };
+
+        let err = checkout(Some(config_path.clone()), args)
+            .expect_err("checkout should fail when domain is missing");
+        let message = err.to_string();
+        assert!(
+            message.contains("does not exist"),
+            "unexpected error: {message}"
+        );
+
+        let (reloaded, _) =
+            load_or_default(Some(config_path.clone())).expect("reload configuration");
+        assert_eq!(reloaded.active_domain(), DEFAULT_DOMAIN_NAME);
+
+        let mut candidate = reloaded.clone();
+        candidate.domain = "herds".to_string();
+        assert!(
+            !candidate.domain_data_dir().exists(),
+            "missing domain directory should not be created automatically"
+        );
+    }
+
+    #[test]
+    fn checkout_switches_to_existing_domain_without_create() {
+        let temp = tempdir().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.data_dir = temp.path().join("data");
+        cfg.ensure_data_dir().expect("create default data dir");
+        cfg.save(&config_path).expect("write config");
+
+        let create_args = DomainCheckoutArgs {
+            flag_domain: Some("Herds".to_string()),
+            positional_domain: None,
+            create: true,
+            delete: false,
+            force: false,
+        };
+        checkout(Some(config_path.clone()), create_args)
+            .expect("domain creation should succeed");
+
+        let default_args = DomainCheckoutArgs {
+            flag_domain: Some(DEFAULT_DOMAIN_NAME.to_string()),
+            positional_domain: None,
+            create: false,
+            delete: false,
+            force: false,
+        };
+        checkout(Some(config_path.clone()), default_args)
+            .expect("switching to default domain should succeed");
+
+        let switch_args = DomainCheckoutArgs {
+            flag_domain: Some("herds".to_string()),
+            positional_domain: None,
+            create: false,
+            delete: false,
+            force: false,
+        };
+        checkout(Some(config_path.clone()), switch_args)
+            .expect("switching to an existing domain should succeed");
+
+        let (reloaded, _) =
+            load_or_default(Some(config_path.clone())).expect("reload configuration");
+        assert_eq!(reloaded.active_domain(), "herds");
+
+        let mut candidate = reloaded.clone();
+        candidate.domain = "herds".to_string();
+        assert!(
+            candidate.domain_data_dir().exists(),
+            "existing domain directory should be preserved"
+        );
     }
 
     #[test]
