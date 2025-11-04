@@ -26,7 +26,7 @@ RUN apt-get update \
 # Install the published EventDBX binary, then upgrade to the latest available release.
 RUN set -eux; \
     curl --proto '=https' --tlsv1.2 -LsSf \
-      https://github.com/thachp/eventdbx/releases/download/v3.9.12/eventdbx-installer.sh \
+      https://github.com/thachp/eventdbx/releases/download/v3.10.2/eventdbx-installer.sh \
       | sh; \
     install -Dm755 "$HOME/.cargo/bin/dbx" /usr/local/bin/dbx; \
     dbx upgrade; \
