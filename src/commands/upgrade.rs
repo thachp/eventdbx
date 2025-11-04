@@ -1,7 +1,8 @@
 use std::{
+    collections::BTreeSet,
     fs,
+    io::Cursor,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use anyhow::{Context, Result, bail};
@@ -11,14 +12,14 @@ use reqwest::{Client, StatusCode, header::ACCEPT};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use tempfile::tempdir;
 use tracing::{debug, warn};
+use xz2::read::XzDecoder;
+use zip::ZipArchive;
 
 use eventdbx::config::default_config_path;
 
 const USER_AGENT: &str = concat!("eventdbx-cli/", env!("CARGO_PKG_VERSION"));
-const REPO_BASE: &str = "https://github.com/thachp/eventdbx";
-const INSTALLER_SH: &str = "eventdbx-installer.sh";
-const INSTALLER_PS1: &str = "eventdbx-installer.ps1";
 const RELEASES_API: &str = "https://api.github.com/repos/thachp/eventdbx/releases";
 const MIN_UPGRADE_VERSION: &str = "1.13.2";
 const UPDATE_CHECK_INTERVAL_HOURS: i64 = 6;
@@ -41,21 +42,24 @@ pub struct UpgradeArgs {
     /// Release tag (e.g. v1.12.4) or 'latest'
     #[arg(value_name = "VERSION")]
     pub version: Option<String>,
-    /// Print the installer command without executing it
+    /// Show the download and activation steps without performing them
     #[arg(long, default_value_t = false)]
     pub print_only: bool,
+    /// Download and store the release without switching the active binary
+    #[arg(long, default_value_t = false)]
+    pub no_switch: bool,
     /// Suppress upgrade notices for the provided release tag
     #[arg(
         long = "suppress",
         value_name = "VERSION",
-        conflicts_with_all = ["version", "print_only", "clear_suppress"],
+        conflicts_with_all = ["version", "print_only", "clear_suppress", "no_switch"],
         help = "Suppress upgrade reminders for the specified release (e.g. v1.15.3)"
     )]
     pub suppress_version: Option<String>,
     /// Clear any suppressed release tag so future notices appear
     #[arg(
         long = "clear-suppress",
-        conflicts_with_all = ["version", "print_only", "suppress_version"],
+        conflicts_with_all = ["version", "print_only", "suppress_version", "no_switch"],
         default_value_t = false
     )]
     pub clear_suppress: bool,
@@ -65,6 +69,10 @@ pub struct UpgradeArgs {
 pub enum UpgradeCommand {
     /// List available EventDBX releases
     List(UpgradeListArgs),
+    /// Activate an installed EventDBX release
+    Use(UpgradeUseArgs),
+    /// Show locally installed EventDBX releases
+    Installed(UpgradeInstalledArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -75,6 +83,85 @@ pub struct UpgradeListArgs {
     /// Emit the release list as JSON
     #[arg(long, default_value_t = false)]
     pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct UpgradeUseArgs {
+    /// Installed release tag to activate (e.g. v3.9.13)
+    #[arg(value_name = "VERSION")]
+    pub version: String,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct UpgradeInstalledArgs {
+    /// Emit installed versions as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveFormat {
+    TarXz,
+    Zip,
+}
+
+impl ArchiveFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            ArchiveFormat::TarXz => ".tar.xz",
+            ArchiveFormat::Zip => ".zip",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TargetInfo {
+    triple: &'static str,
+    binary_name: &'static str,
+    format: ArchiveFormat,
+}
+
+impl TargetInfo {
+    fn asset_name(&self) -> String {
+        format!("eventdbx-{}{}", self.triple, self.format.extension())
+    }
+}
+
+fn current_target_info() -> Result<TargetInfo> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    match (os, arch) {
+        ("macos", "aarch64") => Ok(TargetInfo {
+            triple: "aarch64-apple-darwin",
+            binary_name: "dbx",
+            format: ArchiveFormat::TarXz,
+        }),
+        ("macos", "x86_64") => Ok(TargetInfo {
+            triple: "x86_64-apple-darwin",
+            binary_name: "dbx",
+            format: ArchiveFormat::TarXz,
+        }),
+        ("linux", "x86_64") => Ok(TargetInfo {
+            triple: "x86_64-unknown-linux-gnu",
+            binary_name: "dbx",
+            format: ArchiveFormat::TarXz,
+        }),
+        ("linux", "aarch64") => Ok(TargetInfo {
+            triple: "aarch64-unknown-linux-gnu",
+            binary_name: "dbx",
+            format: ArchiveFormat::TarXz,
+        }),
+        ("windows", "x86_64") => Ok(TargetInfo {
+            triple: "x86_64-pc-windows-msvc",
+            binary_name: "dbx.exe",
+            format: ArchiveFormat::Zip,
+        }),
+        (other_os, other_arch) => bail!(
+            "upgrades are not supported on this platform ({}-{})",
+            other_os,
+            other_arch
+        ),
+    }
 }
 
 fn upgrade_state_path() -> Result<PathBuf> {
@@ -148,6 +235,343 @@ fn normalize_release_spec(spec: &str) -> Result<String> {
     }
 }
 
+fn versions_root() -> Result<PathBuf> {
+    let config_path = default_config_path()?;
+    let root = config_path
+        .parent()
+        .context("configuration path has no parent directory")?
+        .to_path_buf();
+    Ok(root.join("versions"))
+}
+
+fn target_versions_dir(target: &TargetInfo) -> Result<PathBuf> {
+    Ok(versions_root()?.join(target.triple))
+}
+
+fn version_dir(target: &TargetInfo, version: &str) -> Result<PathBuf> {
+    Ok(target_versions_dir(target)?.join(version))
+}
+
+fn current_version_tag() -> String {
+    format!("v{}", env!("CARGO_PKG_VERSION"))
+}
+
+fn set_executable_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = fs::metadata(path)
+            .with_context(|| format!("failed to read permissions for {}", path.display()))?;
+        let mut perms = metadata.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms)
+            .with_context(|| format!("failed to update permissions for {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn ensure_current_version_snapshot(target: &TargetInfo) -> Result<()> {
+    let current_tag = current_version_tag();
+    let dir = version_dir(target, &current_tag)?;
+    let binary_path = dir.join(target.binary_name);
+    if binary_path.exists() {
+        if read_active_marker(target)?.is_none() {
+            write_active_marker(target, &current_tag)?;
+        }
+        return Ok(());
+    }
+
+    let active_path = std::env::current_exe()
+        .with_context(|| "failed to resolve current executable path for snapshot")?;
+
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    fs::copy(&active_path, &binary_path).with_context(|| {
+        format!(
+            "failed to copy existing binary to {}",
+            binary_path.display()
+        )
+    })?;
+    set_executable_permissions(&binary_path)?;
+    write_active_marker(target, &current_tag)?;
+    Ok(())
+}
+
+fn installed_versions_set(target: &TargetInfo) -> Result<BTreeSet<String>> {
+    let mut versions = BTreeSet::new();
+    let dir = target_versions_dir(target)?;
+    if dir.is_dir() {
+        for entry in
+            fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))?
+        {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    versions.insert(name.to_string());
+                }
+            }
+        }
+    }
+    Ok(versions)
+}
+
+fn read_active_marker(target: &TargetInfo) -> Result<Option<String>> {
+    let marker_path = target_versions_dir(target)?.join("active");
+    if !marker_path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&marker_path).with_context(|| {
+        format!(
+            "failed to read active version marker at {}",
+            marker_path.display()
+        )
+    })?;
+    Ok(Some(contents.trim().to_string()))
+}
+
+fn write_active_marker(target: &TargetInfo, version: &str) -> Result<()> {
+    let dir = target_versions_dir(target)?;
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let marker_path = dir.join("active");
+    fs::write(&marker_path, version).with_context(|| {
+        format!(
+            "failed to write active version marker at {}",
+            marker_path.display()
+        )
+    })
+}
+
+fn version_binary_path(target: &TargetInfo, version: &str) -> Result<PathBuf> {
+    Ok(version_dir(target, version)?.join(target.binary_name))
+}
+
+fn select_asset<'a>(release: &'a GithubRelease, target: &TargetInfo) -> Result<&'a GithubAsset> {
+    let expected = target.asset_name();
+    release
+        .assets
+        .iter()
+        .find(|asset| asset.name == expected)
+        .with_context(|| {
+            format!(
+                "release '{}' does not include asset '{}'",
+                release.tag_name, expected
+            )
+        })
+}
+
+async fn download_asset(client: &Client, asset: &GithubAsset) -> Result<Vec<u8>> {
+    let response = client
+        .get(&asset.browser_download_url)
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to download release asset from {}",
+                asset.browser_download_url
+            )
+        })?
+        .error_for_status()
+        .with_context(|| {
+            format!(
+                "GitHub returned an error when downloading {}",
+                asset.browser_download_url
+            )
+        })?;
+    let bytes = response
+        .bytes()
+        .await
+        .with_context(|| "failed to read release asset bytes")?;
+    Ok(bytes.to_vec())
+}
+
+fn unpack_archive(bytes: &[u8], format: ArchiveFormat, output_dir: &Path) -> Result<()> {
+    match format {
+        ArchiveFormat::TarXz => {
+            let decoder = XzDecoder::new(Cursor::new(bytes));
+            let mut archive = tar::Archive::new(decoder);
+            archive.unpack(output_dir).with_context(|| {
+                format!("failed to unpack archive into {}", output_dir.display())
+            })?;
+        }
+        ArchiveFormat::Zip => {
+            let cursor = Cursor::new(bytes);
+            let mut archive =
+                ZipArchive::new(cursor).with_context(|| "failed to parse zip archive")?;
+            archive.extract(output_dir).with_context(|| {
+                format!("failed to extract archive into {}", output_dir.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn find_binary(root: &Path, binary_name: &str) -> Result<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)
+            .with_context(|| format!("failed to inspect extracted archive at {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("failed to inspect {}", path.display()))?;
+            if metadata.is_dir() {
+                stack.push(path);
+            } else if metadata.is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name == binary_name {
+                        return Ok(path);
+                    }
+                }
+            }
+        }
+    }
+    bail!(
+        "failed to locate binary '{}' in extracted archive",
+        binary_name
+    );
+}
+
+fn copy_binary_to_version(source: &Path, target_dir: &Path, binary_name: &str) -> Result<PathBuf> {
+    fs::create_dir_all(target_dir)
+        .with_context(|| format!("failed to create {}", target_dir.display()))?;
+    let destination = target_dir.join(binary_name);
+    fs::copy(source, &destination)
+        .with_context(|| format!("failed to copy binary to {}", destination.display()))?;
+    set_executable_permissions(&destination)?;
+    Ok(destination)
+}
+
+async fn ensure_release_installed(
+    client: &Client,
+    release: &GithubRelease,
+    target: &TargetInfo,
+    print_only: bool,
+) -> Result<PathBuf> {
+    let version = &release.tag_name;
+    let version_dir = version_dir(target, version)?;
+    let binary_path = version_binary_path(target, version)?;
+    if binary_path.exists() {
+        if print_only {
+            println!(
+                "EventDBX CLI ({}) is already installed at {}",
+                version,
+                version_dir.display()
+            );
+        } else {
+            println!(
+                "EventDBX CLI ({}) is already installed at {}",
+                version,
+                version_dir.display()
+            );
+        }
+        return Ok(version_dir);
+    }
+
+    let asset = select_asset(release, target)?;
+    if print_only {
+        println!(
+            "Would download EventDBX CLI ({}) from {}",
+            version, asset.browser_download_url
+        );
+        println!("Install location: {}", version_dir.display());
+        return Ok(version_dir);
+    }
+
+    println!(
+        "Downloading EventDBX CLI ({}) for {}",
+        version, target.triple
+    );
+    let bytes = download_asset(client, asset).await?;
+    let temp = tempdir().context("failed to create temporary directory for upgrade")?;
+    unpack_archive(&bytes, target.format, temp.path())?;
+    let extracted = find_binary(temp.path(), target.binary_name)?;
+    copy_binary_to_version(&extracted, &version_dir, target.binary_name)?;
+    println!(
+        "Stored EventDBX CLI ({}) in {}",
+        version,
+        version_dir.display()
+    );
+    Ok(version_dir)
+}
+
+#[cfg(not(windows))]
+fn replace_active_binary(source: &Path, active_path: &Path) -> Result<()> {
+    let staged = active_path.with_file_name(format!(".dbx-tmp-{}", std::process::id()));
+    fs::copy(source, &staged)
+        .with_context(|| format!("failed to stage new binary at {}", staged.display()))?;
+    set_executable_permissions(&staged)?;
+    fs::rename(&staged, active_path).with_context(|| {
+        format!(
+            "failed to replace active binary at {}",
+            active_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_active_binary(_source: &Path, _active_path: &Path) -> Result<()> {
+    bail!(
+        "switching installed versions is not supported on Windows yet; copy the binary from the versions directory manually or rerun the published installer"
+    );
+}
+
+fn activate_installed_version(target: &TargetInfo, version: &str, print_only: bool) -> Result<()> {
+    let source = version_binary_path(target, version)?;
+    if !source.exists() {
+        bail!(
+            "version '{}' is not installed; run 'dbx upgrade {}' first",
+            version,
+            version
+        );
+    }
+
+    let active_path =
+        std::env::current_exe().with_context(|| "failed to resolve current executable path")?;
+    if print_only {
+        println!(
+            "Would replace active binary at {} with {}",
+            active_path.display(),
+            source.display()
+        );
+        return Ok(());
+    }
+
+    replace_active_binary(&source, &active_path)?;
+    write_active_marker(target, version)?;
+    println!("Active EventDBX CLI switched to {}.", version);
+    println!("Re-run your command to use the new version.");
+    Ok(())
+}
+
+fn print_installed_versions(target: &TargetInfo, args: &UpgradeInstalledArgs) -> Result<()> {
+    let versions = installed_versions_set(target)?;
+    let active = read_active_marker(target)?;
+
+    if args.json {
+        let payload = InstalledVersionsList {
+            versions: versions.iter().cloned().collect::<Vec<_>>(),
+            active,
+            target: target.triple.to_string(),
+        };
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else if versions.is_empty() {
+        println!("(no versions installed)");
+    } else {
+        for version in versions {
+            if active.as_deref() == Some(version.as_str()) {
+                println!("{}  [active]", version);
+            } else {
+                println!("{}", version);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn update_suppressed_version(value: Option<String>) -> Result<()> {
     let path = upgrade_state_path()?;
     let mut state = load_upgrade_state(&path)?;
@@ -158,6 +582,9 @@ fn update_suppressed_version(value: Option<String>) -> Result<()> {
 pub async fn execute(args: UpgradeArgs) -> Result<()> {
     if args.command.is_some() && (args.suppress_version.is_some() || args.clear_suppress) {
         bail!("--suppress and --clear-suppress cannot be used with subcommands");
+    }
+    if args.command.is_some() && args.no_switch {
+        bail!("--no-switch cannot be used with subcommands");
     }
 
     if args.clear_suppress {
@@ -171,7 +598,7 @@ pub async fn execute(args: UpgradeArgs) -> Result<()> {
     if let Some(spec) = args.suppress_version.as_deref() {
         let normalized = normalize_release_spec(spec)?;
         let tag = if normalized.eq_ignore_ascii_case("latest") {
-            resolve_release(&client, "latest").await?
+            resolve_release(&client, "latest").await?.tag_name
         } else {
             normalized
         };
@@ -180,66 +607,73 @@ pub async fn execute(args: UpgradeArgs) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(subcommand) = &args.command {
+    let target = current_target_info()?;
+    ensure_current_version_snapshot(&target)?;
+
+    if let Some(subcommand) = args.command {
         match subcommand {
             UpgradeCommand::List(list_args) => {
-                list_releases(&client, list_args).await?;
-                return Ok(());
+                list_releases(&client, &list_args, &target).await?;
+            }
+            UpgradeCommand::Use(use_args) => {
+                let normalized = normalize_release_spec(&use_args.version)?;
+                if normalized.eq_ignore_ascii_case("latest") {
+                    bail!("please specify a concrete release tag when switching versions");
+                }
+                activate_installed_version(&target, &normalized, args.print_only)?;
+            }
+            UpgradeCommand::Installed(installed_args) => {
+                print_installed_versions(&target, &installed_args)?;
             }
         }
+        return Ok(());
     }
 
-    let version = args.version.as_deref().unwrap_or("latest");
-    let tag = resolve_release(&client, version).await?;
-    let path_segment = format!("download/{}", tag);
-    let display_version = tag.clone();
+    let version_spec = args.version.as_deref().unwrap_or("latest");
+    let release = resolve_release(&client, version_spec).await?;
+    let tag = release.tag_name.clone();
 
-    let os = std::env::consts::OS;
-    match os {
-        "macos" | "linux" => {
-            let url = format!("{}/releases/{}/{}", REPO_BASE, path_segment, INSTALLER_SH);
-            let command = format!("curl --proto '=https' --tlsv1.2 -LsSf {} | sh", url);
-            println!("Installing EventDBX CLI ({display_version}) via: {command}");
-            if args.print_only {
-                return Ok(());
-            }
-            let status = Command::new("sh")
-                .arg("-c")
-                .arg(&command)
-                .status()
-                .with_context(|| "failed to invoke shell for installer")?;
-            if !status.success() {
-                bail!("upgrade command exited with status {}", status);
-            }
-        }
-        "windows" => {
-            let url = format!("{}/releases/{}/{}", REPO_BASE, path_segment, INSTALLER_PS1);
-            let ps_command = format!("irm {} | iex", url);
+    if args.print_only {
+        let version_directory = version_dir(&target, &tag)?;
+        let binary_path = version_binary_path(&target, &tag)?;
+        if binary_path.exists() {
             println!(
-                "Installing EventDBX CLI ({display_version}) via PowerShell: {}",
-                ps_command
+                "EventDBX CLI ({}) is already installed at {}",
+                tag,
+                version_directory.display()
             );
-            if args.print_only {
-                return Ok(());
-            }
-            let status = Command::new("powershell")
-                .args([
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-Command",
-                    &ps_command,
-                ])
-                .status()
-                .with_context(|| "failed to invoke PowerShell for installer")?;
-            if !status.success() {
-                bail!("upgrade command exited with status {}", status);
-            }
+        } else {
+            let asset = select_asset(&release, &target)?;
+            println!(
+                "Would download EventDBX CLI ({}) from {}",
+                tag, asset.browser_download_url
+            );
+            println!("Install location: {}", version_directory.display());
         }
-        other => bail!("upgrades are not supported on this platform ({other})"),
+        let active_path =
+            std::env::current_exe().with_context(|| "failed to resolve current executable path")?;
+        if args.no_switch {
+            println!("Active binary would remain at {}.", active_path.display());
+        } else {
+            println!(
+                "Active binary at {} would be replaced with {} after download.",
+                active_path.display(),
+                tag
+            );
+        }
+        return Ok(());
     }
 
+    ensure_release_installed(&client, &release, &target, false).await?;
+    if args.no_switch {
+        println!(
+            "Installation complete. Activate this version with `dbx upgrade use {}`.",
+            tag
+        );
+        return Ok(());
+    }
+
+    activate_installed_version(&target, &tag, false)?;
     Ok(())
 }
 
@@ -257,7 +691,9 @@ pub async fn try_handle_shortcut(raw: &[String]) -> Result<bool> {
         if trimmed.eq_ignore_ascii_case("list") {
             let client = build_client()?;
             let default_args = UpgradeListArgs::default();
-            list_releases(&client, &default_args).await?;
+            let target = current_target_info()?;
+            ensure_current_version_snapshot(&target)?;
+            list_releases(&client, &default_args, &target).await?;
         } else {
             execute(UpgradeArgs {
                 command: None,
@@ -267,6 +703,7 @@ pub async fn try_handle_shortcut(raw: &[String]) -> Result<bool> {
                     trimmed.to_string()
                 }),
                 print_only: false,
+                no_switch: false,
                 suppress_version: None,
                 clear_suppress: false,
             })
@@ -291,8 +728,9 @@ pub async fn maybe_print_upgrade_notice() -> Result<()> {
 
     if latest_tag.is_none() || is_check_stale(state.last_checked, now) {
         match build_client() {
-            Ok(client) => match fetch_latest(&client).await {
-                Ok(tag) => {
+            Ok(client) => match fetch_latest_release(&client).await {
+                Ok(release) => {
+                    let tag = release.tag_name.clone();
                     if state.latest_known_version.as_deref() != Some(tag.as_str()) {
                         state.latest_known_version = Some(tag.clone());
                         state_changed = true;
@@ -353,20 +791,22 @@ fn build_client() -> Result<Client> {
         .context("failed to build HTTP client")
 }
 
-async fn resolve_release(client: &Client, spec: &str) -> Result<String> {
+async fn resolve_release(client: &Client, spec: &str) -> Result<GithubRelease> {
     let trimmed = spec.trim();
     let normalized = trimmed.strip_prefix('@').unwrap_or(trimmed).trim();
     if normalized.is_empty() || normalized.eq_ignore_ascii_case("latest") {
-        return fetch_latest(client).await;
+        return fetch_latest_release(client).await;
     }
 
-    fetch_tag(client, normalized).await
+    fetch_tag_release(client, normalized).await
 }
 
-async fn list_releases(client: &Client, args: &UpgradeListArgs) -> Result<()> {
+async fn list_releases(client: &Client, args: &UpgradeListArgs, target: &TargetInfo) -> Result<()> {
     let limit = args.limit.max(1);
     let mut releases: Vec<GithubRelease> = Vec::new();
     let mut page: usize = 1;
+    let installed = installed_versions_set(target)?;
+    let active = read_active_marker(target)?;
 
     while releases.len() < limit {
         let remaining = limit - releases.len();
@@ -409,7 +849,16 @@ async fn list_releases(client: &Client, args: &UpgradeListArgs) -> Result<()> {
     releases.truncate(limit);
 
     if args.json {
-        let listed: Vec<ListedRelease> = releases.iter().map(ListedRelease::from).collect();
+        let listed: Vec<ListedRelease> = releases
+            .iter()
+            .map(|release| {
+                ListedRelease::from_release(
+                    release,
+                    installed.contains(&release.tag_name),
+                    active.as_deref() == Some(release.tag_name.as_str()),
+                )
+            })
+            .collect();
         println!("{}", serde_json::to_string_pretty(&listed)?);
     } else {
         for release in &releases {
@@ -424,6 +873,11 @@ async fn list_releases(client: &Client, args: &UpgradeListArgs) -> Result<()> {
             if release.draft {
                 flags.push("draft");
             }
+            if active.as_deref() == Some(release.tag_name.as_str()) {
+                flags.push("active");
+            } else if installed.contains(&release.tag_name) {
+                flags.push("installed");
+            }
             if !flags.is_empty() {
                 line.push_str(&format!("  [{}]", flags.join(", ")));
             }
@@ -434,7 +888,7 @@ async fn list_releases(client: &Client, args: &UpgradeListArgs) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_latest(client: &Client) -> Result<String> {
+async fn fetch_latest_release(client: &Client) -> Result<GithubRelease> {
     let url = format!("{}/latest", RELEASES_API);
     let response = client
         .get(&url)
@@ -452,10 +906,10 @@ async fn fetch_latest(client: &Client) -> Result<String> {
         .await
         .with_context(|| "failed to parse GitHub latest release response")?;
     validate_supported_version(&release.tag_name)?;
-    Ok(release.tag_name)
+    Ok(release)
 }
 
-async fn fetch_tag(client: &Client, spec: &str) -> Result<String> {
+async fn fetch_tag_release(client: &Client, spec: &str) -> Result<GithubRelease> {
     let tag = if spec.starts_with('v') {
         spec.to_string()
     } else {
@@ -478,7 +932,13 @@ async fn fetch_tag(client: &Client, spec: &str) -> Result<String> {
         .json()
         .await
         .with_context(|| format!("failed to parse GitHub response for tag {}", tag))?;
-    Ok(release.tag_name)
+    Ok(release)
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+    browser_download_url: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -491,6 +951,8 @@ struct GithubRelease {
     #[serde(default)]
     prerelease: bool,
     html_url: Option<String>,
+    #[serde(default)]
+    assets: Vec<GithubAsset>,
 }
 
 #[derive(Debug, Serialize)]
@@ -501,10 +963,12 @@ struct ListedRelease {
     draft: bool,
     prerelease: bool,
     html_url: Option<String>,
+    installed: bool,
+    active: bool,
 }
 
-impl From<&GithubRelease> for ListedRelease {
-    fn from(release: &GithubRelease) -> Self {
+impl ListedRelease {
+    fn from_release(release: &GithubRelease, installed: bool, active: bool) -> Self {
         Self {
             tag: release.tag_name.clone(),
             name: release.name.clone(),
@@ -512,8 +976,17 @@ impl From<&GithubRelease> for ListedRelease {
             draft: release.draft,
             prerelease: release.prerelease,
             html_url: release.html_url.clone(),
+            installed,
+            active,
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct InstalledVersionsList {
+    versions: Vec<String>,
+    active: Option<String>,
+    target: String,
 }
 
 impl Default for UpgradeListArgs {
@@ -545,6 +1018,7 @@ fn validate_supported_version(tag: &str) -> Result<()> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use std::fs;
     use tempfile::tempdir;
 
     #[test]
@@ -587,6 +1061,25 @@ mod tests {
 
         let future = now + Duration::hours(1);
         assert!(is_check_stale(Some(future), now));
+    }
+
+    #[test]
+    fn find_binary_locates_nested_target() {
+        let dir = tempdir().expect("create temp dir");
+        let nested = dir.path().join("deep").join("bin");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let binary = nested.join("dbx");
+        fs::write(&binary, b"fake-binary").expect("write binary stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&binary).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&binary, perms).expect("set permissions");
+        }
+
+        let found = find_binary(dir.path(), "dbx").expect("binary should be discovered");
+        assert_eq!(found, binary);
     }
 
     #[test]

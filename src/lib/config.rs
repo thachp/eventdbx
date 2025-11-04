@@ -15,7 +15,7 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    encryption::{self, Encryptor},
+    encryption::Encryptor,
     error::{EventError, Result},
     restrict::{self, RestrictMode},
     token::JwtManagerConfig,
@@ -167,10 +167,6 @@ pub struct Config {
     #[serde(default)]
     pub plugin_queue: PluginQueueConfig,
     #[serde(default)]
-    pub replication: ReplicationConfig,
-    #[serde(default)]
-    pub remotes: BTreeMap<String, RemoteConfig>,
-    #[serde(default)]
     pub socket: SocketConfig,
     #[serde(default)]
     pub admin: AdminApiConfig,
@@ -200,8 +196,6 @@ impl Default for Config {
             page_limit: default_page_limit(),
             plugin_max_attempts: default_plugin_max_attempts(),
             plugin_queue: PluginQueueConfig::default(),
-            replication: ReplicationConfig::default(),
-            remotes: BTreeMap::new(),
             socket: SocketConfig::default(),
             admin: AdminApiConfig::default(),
             verbose_responses: default_verbose_responses(),
@@ -250,16 +244,9 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
 
         let updated = cfg.ensure_encryption_key();
         let auth_updated = cfg.ensure_auth_keys()?;
-        let replication_updated = if cfg.socket.bind_addr == "0.0.0.0:7443" {
-            cfg.socket.bind_addr = default_socket_bind_addr();
-            cfg.updated_at = Utc::now();
-            true
-        } else {
-            false
-        };
         cfg.ensure_data_dir()?;
         let migrated = cfg.migrate_plugins()?;
-        if updated || migrated || auth_updated || replication_updated {
+        if updated || migrated || auth_updated {
             cfg.save(&config_path)?;
         }
         Ok((cfg, config_path))
@@ -514,10 +501,6 @@ impl Config {
         self.domain_data_dir().join("plugin_queue.db")
     }
 
-    pub fn conflict_store_db_path(&self) -> PathBuf {
-        self.domain_data_dir().join("conflicts.db")
-    }
-
     pub fn pid_file_path(&self) -> PathBuf {
         self.domain_data_dir().join("eventdbx.pid")
     }
@@ -560,23 +543,6 @@ impl Config {
         let payload = serde_json::to_string_pretty(plugins)?;
         fs::write(path, payload)?;
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplicationConfig {
-    #[serde(default = "default_replication_bind")]
-    pub bind_addr: String,
-    #[serde(default, alias = "identity_key", skip_serializing)]
-    pub legacy_identity_key: Option<PathBuf>,
-}
-
-impl Default for ReplicationConfig {
-    fn default() -> Self {
-        Self {
-            bind_addr: default_replication_bind(),
-            legacy_identity_key: None,
-        }
     }
 }
 
@@ -627,83 +593,6 @@ pub struct AdminApiConfigUpdate {
     pub enabled: Option<bool>,
     pub bind_addr: Option<String>,
     pub port: Option<Option<u16>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteConfig {
-    pub endpoint: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "public_key")]
-    pub token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_env: Option<String>,
-    #[serde(default)]
-    pub locator: Option<String>,
-    #[serde(default)]
-    pub remote_domain: Option<String>,
-}
-
-impl RemoteConfig {
-    pub fn set_plain_token(&mut self, token: String, encryptor: Option<&Encryptor>) -> Result<()> {
-        let normalized = normalize_non_empty(&token)
-            .ok_or_else(|| EventError::Config("remote token cannot be empty".to_string()))?;
-        self.token_env = None;
-        if let Some(enc) = encryptor {
-            let ciphertext = enc.encrypt_to_string(normalized.as_bytes())?;
-            self.token = Some(ciphertext);
-        } else {
-            self.token = Some(normalized);
-        }
-        Ok(())
-    }
-
-    pub fn set_token_env(&mut self, env_name: String) -> Result<()> {
-        let normalized = normalize_non_empty(&env_name).ok_or_else(|| {
-            EventError::Config("token environment variable cannot be empty".to_string())
-        })?;
-        self.token = None;
-        self.token_env = Some(normalized);
-        Ok(())
-    }
-
-    pub fn resolved_token(&self, encryptor: Option<&Encryptor>) -> Result<String> {
-        if let Some(env_name) = &self.token_env {
-            let value = env::var(env_name).map_err(|_| {
-                EventError::Config(format!(
-                    "environment variable '{}' is not set for remote token",
-                    env_name
-                ))
-            })?;
-            return normalize_non_empty(&value).ok_or_else(|| {
-                EventError::Config(format!(
-                    "environment variable '{}' is empty for remote token",
-                    env_name
-                ))
-            });
-        }
-
-        let stored = self
-            .token
-            .as_ref()
-            .ok_or_else(|| EventError::Config("remote token is not configured".to_string()))?;
-        if encryption::is_encrypted_blob(stored) {
-            let encryptor = encryptor.ok_or_else(|| {
-                EventError::Config(
-                    "remote token is encrypted but data encryption key is not configured"
-                        .to_string(),
-                )
-            })?;
-            let plaintext = encryptor.decrypt_from_str(stored)?;
-            let token = String::from_utf8(plaintext).map_err(|err| {
-                EventError::Config(format!("remote token contains invalid UTF-8: {err}"))
-            })?;
-            normalize_non_empty(&token).ok_or_else(|| {
-                EventError::Config("remote token cannot be empty after decryption".to_string())
-            })
-        } else {
-            normalize_non_empty(stored)
-                .ok_or_else(|| EventError::Config("remote token cannot be empty".to_string()))
-        }
-    }
 }
 
 fn default_config_root() -> Result<PathBuf> {
@@ -799,10 +688,6 @@ fn default_queue_prune_done_ttl_secs() -> u64 {
 
 fn default_queue_prune_interval_secs() -> u64 {
     300
-}
-
-fn default_replication_bind() -> String {
-    format!("0.0.0.0:{}", DEFAULT_SOCKET_PORT)
 }
 
 fn default_admin_enabled() -> bool {

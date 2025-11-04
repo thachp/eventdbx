@@ -105,7 +105,6 @@ async fn control_capnp_regression_flows() -> Result<()> {
         config.restrict,
         config.list_page_size,
         config.page_limit,
-        None,
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
 
@@ -633,7 +632,6 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         config.restrict,
         config.list_page_size,
         config.page_limit,
-        None,
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
 

@@ -1,12 +1,12 @@
 ---
 title: API Reference
-description: Integrate EventDBX via REST, GraphQL, gRPC, replication, and the Admin API.
+description: Integrate EventDBX via REST, GraphQL, gRPC, and the Admin API.
 nav_id: apis
 ---
 
 # API Reference
 
-EventDBX exposes multiple surfaces so you can choose the right tool for each integration. Tokens issued by the CLI are accepted everywhere unless specifically noted. REST/GraphQL/gRPC are now provided by companion binaries in the [dbx_plugins](https://github.com/thachp/dbx_plugins) workspace; the core daemon retains the admin API, replication socket, and control channel.
+EventDBX exposes multiple surfaces so you can choose the right tool for each integration. Tokens issued by the CLI are accepted everywhere unless specifically noted. REST/GraphQL/gRPC are now provided by companion binaries in the [dbx_plugins](https://github.com/thachp/dbx_plugins) workspace; the core daemon retains the admin API and control channel.
 
 ## REST
 
@@ -48,7 +48,7 @@ Event writes enforce a few key rules:
 - Declare a schema for the aggregate before the first write when running with validation enabled.
 - `aggregate_id` accepts letters, numbers, underscores, and hyphens (max 128 characters) with no surrounding whitespace.
 - Payload JSON is limited to 256 KiB, and optional `metadata` objects (keys prefixed with `@`) are capped at 64 KiB so plugins can react without overwhelming the bus.
-- `event_id` values are Snowflake IDs encoded as strings; assign each node a unique `snowflake_worker_id` (0-1023) in `config.toml` to avoid collisions when pushing or pulling events.
+- `event_id` values are Snowflake IDs encoded as strings; assign each node a unique `snowflake_worker_id` (0-1023) in `config.toml` to avoid collisions across nodes.
 - Plugins receive the event envelope with `metadata.event_id` as a stringified Snowflake and (optionally) an `extensions` object; ensure the [dbx_plugins](https://github.com/thachp/dbx_plugins) repo or any custom adapters tolerate the new fields.
 
 ## GraphQL
@@ -103,22 +103,6 @@ grpcurl \
 ```
 
 The service mirrors REST operations: `AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, `VerifyAggregate`, and `Health`.
-
-## Replication socket
-
-`dbx push` and `dbx pull` connect over the Cap'n Proto socket defined in `[socket].bind_addr` (default `0.0.0.0:6363`). Remotes authenticate with replication access tokens:
-
-```bash
-dbx remote add standby1 10.10.0.5 \
-  --token "$(cat standby1.token)" \
-  --port 6363
-```
-
-Dry-run pushes report pending changes without transferring events:
-
-```bash
-dbx push standby1 --dry-run --aggregate patient
-```
 
 ## Admin API
 

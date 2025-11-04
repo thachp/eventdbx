@@ -1,7 +1,7 @@
 [package]
 name = "eventdbx"
 description = "An event-sourced, nosql, write-side database system."
-version = "3.9.13"
+version = "3.10.2"
 edition = "2024"
 repository = "https://github.com/thachp/eventdbx"
 keywords = [
@@ -84,48 +84,17 @@ jsonwebtoken = "9.3"
 once_cell = "1.19"
 metrics = "0.22"
 metrics-exporter-prometheus = "0.13"
+xz2 = "0.1"
 
 [features]
 default = []
-bench-postgres = ["dep:tokio-postgres"]
-bench-mongodb = ["dep:mongodb"]
-bench-sqlite = ["dep:rusqlite"]
-bench-mssql = ["dep:tiberius", "dep:tokio-rustls"]
-bench-all = ["bench-postgres", "bench-mongodb", "bench-sqlite", "bench-mssql"]
-
-[dependencies.tokio-postgres]
-version = "0.7"
-optional = true
-
-[dependencies.mongodb]
-version = "2.8"
-default-features = false
-features = ["tokio-runtime"]
-optional = true
-
-[dependencies.rusqlite]
-version = "0.31"
-features = ["bundled"]
-optional = true
-
-[dependencies.tiberius]
-version = "0.12"
-default-features = false
-features = ["tokio", "rustls"]
-optional = true
-
-[dependencies.tokio-rustls]
-version = "0.26"
-optional = true
 
 [dev-dependencies]
 fake = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 portpicker = "0.1"
-rand = "0.8"
 assert_cmd = "2"
 tower = { version = "0.5", default-features = false, features = ["util"] }
-criterion = "0.5"
 
 [build-dependencies]
 capnpc = "0.19"

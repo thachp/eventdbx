@@ -195,8 +195,7 @@ console.log('event count:', history.length);
 - **Extensible Read Models via Plugins**: Every event that lands in the write-side store can be dispatched to external systems through the plugin job queue. Configure plugins to receive only the slices they care about (event, state snapshot, schema), and let specialized services—search, analytics, personalization, alerting—build optimized read models without touching the write path.
 - **Built-in Observability**: A Prometheus-compatible `/metrics` endpoint reports HTTP traffic and plugin queue health so you can wire EventDBX into Grafana, Datadog, or any other monitoring stack out of the box.
 - **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. Tokens are signed with an Ed25519 key pair stored under `[auth]` in `config.toml`; keep `private_key` secret and distribute `public_key` to services that need to validate them. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes.
-- **Encrypted Payloads & Secrets at Rest**: Event payloads, aggregate snapshots, and `tokens.json` are encrypted transparently when a DEK is configured. Metadata such as aggregate identifiers, versions, and Merkle roots remain readable so plugins, replication, and integrity checks keep working without additional configuration.
-- **Peer replication**: Keep deployments in sync with `dbx push` and `dbx pull`, selectively streaming aggregates, schemas, or both between trusted peers over the builtin Cap'n Proto transport.
+- **Encrypted Payloads & Secrets at Rest**: Event payloads, aggregate snapshots, and `tokens.json` are encrypted transparently when a DEK is configured. Metadata such as aggregate identifiers, versions, and Merkle roots remain readable so plugins and integrity checks keep working without additional configuration.
 - **Schema validation**: Enforce aggregate contracts with builtin formats (`email`, `url`, `wgs_84`, and more), rule blocks for length, range, regex, required fields, and nested `properties`, plus strict/relaxed enforcement modes.
 - **Powered by RocksDB and Rust**: At its core, EventDBX utilizes RocksDB for storage, taking advantage of its high performance and efficiency. The system is developed in Rust, known for its safety, efficiency, and concurrency capabilities, ensuring that it is both rapid and dependable.
 
@@ -331,26 +330,9 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 
 Plugins consume jobs from a durable RocksDB-backed queue. EventDBX enqueues a job for every aggregate mutation, and each plugin can opt into the data it needs—event payloads, materialized state, schemas, or combinations thereof. Clearing dead entries prompts for confirmation to avoid accidental removal. Manual retries run the failed jobs immediately; use `--event-id` to target a specific entry.
 
-### Replication
-
-- `dbx remote add <name> <ip> --token <jwt> [--port <n>]`
-  Registers a standby and stores the replication access token issued by the primary. The CLI formats the IP and port into a `tcp://` endpoint (default port `6363`).
-- `dbx remote rm <name>`  
-  Removes a configured remote.
-- `dbx remote ls`  
-  Lists remotes with their endpoints.
-- `dbx remote show <name>`  
-  Displays the endpoint and a shortened token fingerprint for a remote.
-- `dbx push <name> [<domain>] [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
-  Streams local events to the remote in fast-forward mode; dry runs report pending changes.
-- `dbx pull <name> [<domain>] [--dry-run] [--schema] [--schema-only] [--batch-size <n>] [--aggregate <type>...] [--aggregate-id <type:id>...]`  
-  Fast-forwards the local node from the remote, reporting changes in dry-run mode.
-
-Replication relies on JWT access tokens issued through `dbx token issue` (for example, grant `replication.*` or `*.*` actions). Share that token with trusted peers and store it with the remote configuration; it doubles as the symmetric key for the Noise channel that encrypts replication traffic. Pass an optional `<domain>` argument to operate on a different local domain than the currently active one; omit it to inherit the existing checkout. The Cap'n Proto listener that powers CLI automation and replication defaults to `[socket].bind_addr` (default `0.0.0.0:6363`); point remotes at that address with a `tcp://` endpoint or override the bind address in `config.toml` when you expose the replica on another interface. The `dbx push` and `dbx pull` commands connect over this socket—no gRPC listener is required—and every session is authenticated with the presenting token. Use `--aggregate` repeatedly to scope push/pull to specific aggregate types when you only need to sync a subset of data, `--aggregate-id TYPE:ID` to target individual aggregates, `--schema` to copy schema definitions alongside events, and `--schema-only` to synchronize schemas without touching event data.
-
 ### Admin API
 
-The Admin API exposes token, schema, remote, and plugin management over HTTP so automation can operate EventDBX without shell access. It is disabled by default; enable it with:
+The Admin API exposes token, schema, and plugin management over HTTP so automation can operate EventDBX without shell access. It is disabled by default; enable it with:
 
 ```bash
 dbx config \
@@ -363,7 +345,7 @@ Authorization uses the same JWTs as the CLI. The first server start writes a tok
 
 ```bash
 curl -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
-  http://127.0.0.1:7171/admin/remotes
+  http://127.0.0.1:7171/admin/tokens
 ```
 
 Key routes:
@@ -372,19 +354,22 @@ Key routes:
 | -------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `GET /admin/tokens`  | List issued tokens; `POST` issues a new token, `/revoke` and `/refresh` manage lifecycle.                    |
 | `GET /admin/schemas` | Fetch declared schemas or append new ones with `POST`.                                                       |
-| `GET /admin/remotes` | Show replication remotes; `PUT /admin/remotes/{name}` upserts a remote using the same validation as the CLI. |
 | `GET /admin/plugins` | Inspect plugin configuration and toggle instances with `/enable` or `/disable`.                              |
 
 Disable access any time with `dbx config --admin-enabled false` or issue a new root token and revoke the old one via `dbx token revoke`.
 
 ### Upgrades
 
-- `dbx upgrade [<version>|latest] [--print-only]`  
-  Downloads and runs the platform-specific installer to switch binaries. The CLI looks up releases from GitHub, so you can use `latest` or supply a tag like `v1.13.2` (omitting the leading `v` also works). Versions lower than `v1.13.2` are rejected because upgrades are unsupported before that release. Use `--print-only` to show the command without executing it. Shortcut syntax `dbx upgrade@<version>` resolves through the same lookup.
+- `dbx upgrade [<version>|latest] [--no-switch] [--print-only]`  
+  Downloads the selected release into `~/.eventdbx/versions/<target>/<tag>/` and switches the active `dbx` binary unless `--no-switch` is supplied. The CLI looks up releases from GitHub, so you can use `latest` or supply a tag like `v1.13.2` (omitting the leading `v` also works). Versions lower than `v1.13.2` are rejected because upgrades are unsupported before that release. Use `--print-only` to preview the download and activation steps without performing them. Shortcut syntax `dbx upgrade@<version>` resolves through the same lookup.
+- `dbx upgrade use <version> [--print-only]`  
+  Switches to an installed release without re-downloading it so you can hop between versions like `nvm`. The command references the locally cached binary; on Windows the switch must still be completed manually by replacing the executable.
+- `dbx upgrade installed [--json]`  
+  Lists every cached CLI release and marks the one currently active. Use `--json` for machine-readable output that includes the detected target triple.
 - `dbx upgrade --suppress <version>`  
   Suppresses the upgrade reminder for the provided release tag. Combine it with `latest` to ignore the current release until a newer one ships. Use `dbx upgrade --clear-suppress` to re-enable reminders for all releases.
 - `dbx upgrade list [--limit <n>] [--json]`  
-  Queries the GitHub releases API and prints the most recent versions. The default limit is 20; use `--json` for a machine-readable list, and call `dbx upgrade@list` for the same shortcut.
+  Queries the GitHub releases API and prints the most recent versions. Installed releases are annotated with `[installed]` and the active release with `[active]`. The default limit is 20; use `--json` for a machine-readable list, and call `dbx upgrade@list` for the same shortcut.
 
 > The CLI checks for new releases on startup and prints a reminder when a newer version is available. Set `DBX_NO_UPGRADE_CHECK=1` to bypass the check for automation scenarios.
 
@@ -399,7 +384,6 @@ Plugins fire after every committed event to keep external systems in sync. Remai
 
 - **TCP** – Writes a single-line JSON `EventRecord` to the configured socket.
 - **HTTP** – POSTs the `EventRecord` JSON to an endpoint with optional headers; add `--https` during configuration to force HTTPS when the endpoint lacks a scheme.
-- **gRPC** – Sends `EventRecord` batches to a remote gRPC endpoint compatible with the replication `ApplyEvents` API.
 - **Log** – Emits a formatted line via `tracing` at the configured level. By default: `aggregate=<type> id=<id> event=<event>`.
 - **Process** – Launches an installed plugin binary as a supervised subprocess and streams events to it over Cap'n Proto. Use this for first-party plugins from the [`dbx_plugins`](https://github.com/thachp/dbx_plugins) workspace or your own extensions.
 
@@ -416,28 +400,13 @@ dbx plugin config process \
 dbx plugin enable search
 ```
 
-EventDBX supervises the subprocess, restarts it on failure, and delivers every `EventRecord`/aggregate snapshot over the stream. Plugins that run as independent services can continue to use the TCP/HTTP/GRPC emitters instead.
+EventDBX supervises the subprocess, restarts it on failure, and delivers every `EventRecord`/aggregate snapshot over the stream. Plugins that run as independent services can continue to use the TCP/HTTP emitters instead.
 
 Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications. Use `dbx queue` to inspect pending/dead event IDs.
 
 Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instance requires a unique `--name` so you can update, enable, disable, remove, or replay it later. `plugin enable` validates connectivity (creating directories, touching files, or checking network access) before marking the plugin active. Remove a plugin only after disabling it with `plugin disable <name>`. `plugin replay` resends stored events for a single aggregate instance—or every instance of a type—through the selected plugin.
 
 Need point-in-time snapshots instead of streaming plugins? Use `dbx aggregate export` to capture aggregate state as CSV or JSON on demand.
-
-Example gRPC configuration:
-
-```bash
-# point at an existing replication-compatible listener
-dbx plugin config grpc \
-  --name audit-grpc \
-  --endpoint grpc://replica.internal:8800
-
-# enable the plugin once connectivity is confirmed
-dbx plugin enable audit-grpc
-
-# inspect status
-dbx plugin list
-```
 
 Example HTTP/TCP payload (`EventRecord`):
 

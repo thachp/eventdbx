@@ -22,7 +22,6 @@ use super::{
     schema::MAX_EVENT_NOTE_LENGTH,
 };
 use crate::{
-    conflict::{ConflictKind, ReplicationConflict},
     filter::FilterExpr,
     snowflake::{MAX_WORKER_ID, SnowflakeGenerator, SnowflakeId},
 };
@@ -910,7 +909,7 @@ impl EventStore {
         Ok(record)
     }
 
-    pub fn append_replica(&self, record: EventRecord) -> Result<()> {
+    pub fn append_imported_event(&self, record: EventRecord) -> Result<()> {
         self.ensure_writable()?;
         let _guard = self.write_lock.lock();
 
@@ -932,18 +931,13 @@ impl EventStore {
         };
 
         if meta.version + 1 != record.version {
-            let existing = self.event_by_version(&aggregate_type, &aggregate_id, meta.version)?;
-            return Err(ReplicationConflict::new(
-                aggregate_type.clone(),
-                aggregate_id.clone(),
-                ConflictKind::VersionMismatch {
-                    expected: meta.version + 1,
-                    found: record.version,
-                },
-                record,
-                existing,
-            )
-            .into());
+            return Err(EventError::Storage(format!(
+                "imported event version mismatch for {}::{} (expected {}, found {})",
+                aggregate_type,
+                aggregate_id,
+                meta.version + 1,
+                record.version
+            )));
         }
         let payload_map = payload_to_map(&record.payload);
 
@@ -956,18 +950,10 @@ impl EventStore {
         );
 
         if computed_hash != record.hash {
-            let record_hash = record.hash.clone();
-            return Err(ReplicationConflict::new(
-                aggregate_type.clone(),
-                aggregate_id.clone(),
-                ConflictKind::HashMismatch {
-                    expected: computed_hash,
-                    found: record_hash,
-                },
-                record,
-                None,
-            )
-            .into());
+            return Err(EventError::Storage(format!(
+                "imported event hash mismatch for {}::{} (expected {}, found {})",
+                aggregate_type, aggregate_id, computed_hash, record.hash
+            )));
         }
 
         for (key, value) in payload_map {
@@ -981,19 +967,10 @@ impl EventStore {
         meta.merkle_root = compute_merkle_root(&meta.event_hashes);
 
         if meta.merkle_root != record.merkle_root {
-            let expected_root = meta.merkle_root.clone();
-            let record_root = record.merkle_root.clone();
-            return Err(ReplicationConflict::new(
-                aggregate_type.clone(),
-                aggregate_id.clone(),
-                ConflictKind::MerkleMismatch {
-                    expected: expected_root,
-                    found: record_root,
-                },
-                record,
-                None,
-            )
-            .into());
+            return Err(EventError::Storage(format!(
+                "imported event merkle mismatch for {}::{} (expected {}, found {})",
+                aggregate_type, aggregate_id, meta.merkle_root, record.merkle_root
+            )));
         }
 
         let stored_record = self.encode_record(&record)?;

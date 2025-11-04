@@ -410,7 +410,7 @@ fn merge_events(source: &Config, target: &Config) -> Result<EventMergeStats> {
         let events =
             source_store.list_events(&aggregate.aggregate_type, &aggregate.aggregate_id)?;
         for event in events {
-            target_store.append_replica(event)?;
+            target_store.append_imported_event(event)?;
             stats.events += 1;
         }
 

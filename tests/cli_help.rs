@@ -91,22 +91,6 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "Validate payload against a schema definition",
     },
     HelpCase {
-        path: &["conflicts"],
-        expected_snippet: "Inspect and resolve replication conflicts",
-    },
-    HelpCase {
-        path: &["conflicts", "list"],
-        expected_snippet: "List recorded replication conflicts",
-    },
-    HelpCase {
-        path: &["conflicts", "show"],
-        expected_snippet: "Show details for a specific conflict",
-    },
-    HelpCase {
-        path: &["conflicts", "resolve"],
-        expected_snippet: "Resolve a pending replication conflict",
-    },
-    HelpCase {
         path: &["plugin"],
         expected_snippet: "Manage plugins",
     },
@@ -231,36 +215,8 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "Export aggregate state to CSV or JSON",
     },
     HelpCase {
-        path: &["push"],
-        expected_snippet: "Push events to a remote standby",
-    },
-    HelpCase {
-        path: &["pull"],
-        expected_snippet: "Pull events from a remote primary",
-    },
-    HelpCase {
         path: &["upgrade"],
         expected_snippet: "Upgrade or switch the EventDBX CLI binary",
-    },
-    HelpCase {
-        path: &["remote"],
-        expected_snippet: "Manage replication remotes",
-    },
-    HelpCase {
-        path: &["remote", "add"],
-        expected_snippet: "Add a replication remote",
-    },
-    HelpCase {
-        path: &["remote", "rm"],
-        expected_snippet: "Remove a replication remote",
-    },
-    HelpCase {
-        path: &["remote", "ls"],
-        expected_snippet: "List configured remotes",
-    },
-    HelpCase {
-        path: &["remote", "show"],
-        expected_snippet: "Show details for a remote",
     },
     HelpCase {
         path: &["backup"],

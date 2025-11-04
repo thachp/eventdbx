@@ -10,12 +10,10 @@ use eventdbx::observability;
 use crate::commands::{
     aggregate::AggregateCommands,
     config::ConfigArgs,
-    conflicts::ConflictCommands,
     domain::{DomainCheckoutArgs, DomainMergeArgs},
     list::ListArgs,
     plugin::{PluginCommands, PluginWorkerArgs},
     queue::QueueArgs,
-    remote::RemoteCommands,
     schema::SchemaCommands,
     start::{DestroyArgs, StartArgs},
     system::{BackupArgs, RestoreArgs},
@@ -64,11 +62,6 @@ enum Commands {
         #[command(subcommand)]
         command: SchemaCommands,
     },
-    /// Inspect and resolve replication conflicts
-    Conflicts {
-        #[command(subcommand)]
-        command: ConflictCommands,
-    },
     /// Manage plugins
     Plugin {
         #[command(subcommand)]
@@ -83,17 +76,8 @@ enum Commands {
         #[command(subcommand)]
         command: AggregateCommands,
     },
-    /// Push events to a remote standby
-    Push(commands::remote::RemotePushArgs),
-    /// Pull events from a remote primary
-    Pull(commands::remote::RemotePullArgs),
     /// Upgrade or switch the EventDBX CLI binary
     Upgrade(UpgradeArgs),
-    /// Manage replication remotes
-    Remote {
-        #[command(subcommand)]
-        command: RemoteCommands,
-    },
     /// Create a backup archive containing all EventDBX data
     Backup(BackupArgs),
     /// Restore EventDBX data from a backup archive
@@ -132,15 +116,11 @@ async fn main() -> Result<()> {
         Commands::Config(args) => commands::config::execute(config, args)?,
         Commands::Token { command } => commands::token::execute(config, command)?,
         Commands::Schema { command } => commands::schema::execute(config, command)?,
-        Commands::Conflicts { command } => commands::conflicts::execute(config, command)?,
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
         Commands::Events(args) => commands::events::list(config, args)?,
         Commands::Queue(args) => commands::queue::execute(config, args)?,
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
-        Commands::Push(args) => commands::remote::push(config, args).await?,
-        Commands::Pull(args) => commands::remote::pull(config, args).await?,
         Commands::Upgrade(args) => commands::upgrade::execute(args).await?,
-        Commands::Remote { command } => commands::remote::execute(config, command).await?,
         Commands::Backup(args) => commands::system::backup(config, args)?,
         Commands::Restore(args) => commands::system::restore(config, args)?,
         Commands::InternalServer => commands::start::run_internal(config).await?,
