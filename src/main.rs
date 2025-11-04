@@ -10,7 +10,7 @@ use eventdbx::observability;
 use crate::commands::{
     aggregate::AggregateCommands,
     config::ConfigArgs,
-    domain::{DomainCheckoutArgs, DomainMergeArgs},
+    domain::{DomainCheckoutArgs, DomainMergeArgs, PullCommand, PushCommand},
     list::ListArgs,
     plugin::{PluginCommands, PluginWorkerArgs},
     queue::QueueArgs,
@@ -50,6 +50,16 @@ enum Commands {
     Checkout(DomainCheckoutArgs),
     /// Merge data from one domain into another
     Merge(DomainMergeArgs),
+    /// Push local domain data or schemas to a configured remote endpoint
+    Push {
+        #[command(subcommand)]
+        command: PushCommand,
+    },
+    /// Pull remote domain data or schemas into the local store
+    Pull {
+        #[command(subcommand)]
+        command: PullCommand,
+    },
     /// Update system configuration
     Config(ConfigArgs),
     /// Manage access tokens
@@ -113,6 +123,8 @@ async fn main() -> Result<()> {
         Commands::Destroy(args) => commands::start::destroy(config, args)?,
         Commands::Checkout(args) => commands::domain::checkout(config, args)?,
         Commands::Merge(args) => commands::domain::merge(config, args)?,
+        Commands::Push { command } => commands::domain::push(config, command)?,
+        Commands::Pull { command } => commands::domain::pull(config, command)?,
         Commands::Config(args) => commands::config::execute(config, args)?,
         Commands::Token { command } => commands::token::execute(config, command)?,
         Commands::Schema { command } => commands::schema::execute(config, command)?,

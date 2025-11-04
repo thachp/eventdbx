@@ -253,6 +253,9 @@ async fn control_capnp_regression_flows() -> Result<()> {
                 payload::SetAggregateArchive(_) => Err(anyhow!(
                     "unexpected set_aggregate_archive response to patch_event"
                 )),
+                _ => Err(anyhow!(
+                    "unexpected control response variant returned to patch_event"
+                )),
             }
         },
     )
@@ -422,6 +425,9 @@ async fn control_capnp_regression_flows() -> Result<()> {
                 )),
                 payload::SetAggregateArchive(_) => Err(anyhow!(
                     "unexpected set_aggregate_archive response to get_aggregate"
+                )),
+                _ => Err(anyhow!(
+                    "unexpected control response variant returned to get_aggregate"
                 )),
             }
         },
@@ -849,6 +855,9 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
                 )),
                 payload::SetAggregateArchive(_) => Err(anyhow!(
                     "unexpected set_aggregate_archive response to patch_event"
+                )),
+                _ => Err(anyhow!(
+                    "unexpected control response variant returned to patch_event"
                 )),
             }
         },
