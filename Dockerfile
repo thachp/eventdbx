@@ -9,6 +9,11 @@ LABEL org.opencontainers.image.source="https://github.com/thachp/eventdbx" \
 ENV EVENTDBX_DATA_DIR=/var/lib/eventdbx
 ENV HOME=${EVENTDBX_DATA_DIR}
 
+# Secrets are loaded from env vars at runtime; supply them with `docker run -e ...` when needed:
+#   EVENTDBX_DATA_ENCRYPTION_KEY – 32-byte base64 string encrypting on-disk data
+#   EVENTDBX_AUTH_PRIVATE_KEY – base64 Ed25519 private key used for JWT signing
+#   EVENTDBX_AUTH_PUBLIC_KEY – matching Ed25519 public key distributed to verifiers
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -26,7 +31,7 @@ RUN apt-get update \
 # Install the published EventDBX binary, then upgrade to the latest available release.
 RUN set -eux; \
     curl --proto '=https' --tlsv1.2 -LsSf \
-      https://github.com/thachp/eventdbx/releases/download/v3.10.2/eventdbx-installer.sh \
+      https://github.com/thachp/eventdbx/releases/download/v3.10.3/eventdbx-installer.sh \
       | sh; \
     install -Dm755 "$HOME/.cargo/bin/dbx" /usr/local/bin/dbx; \
     dbx upgrade; \

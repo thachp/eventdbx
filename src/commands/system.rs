@@ -49,6 +49,15 @@ struct BackupManifest {
     config_path: String,
 }
 
+fn capture_effective_config(config: &Config) -> Config {
+    let mut resolved = config.clone();
+    resolved.data_encryption_key = config.resolved_data_encryption_key();
+    resolved.auth.private_key = config.auth.resolved_private_key();
+    resolved.auth.public_key = config.auth.resolved_public_key();
+    resolved.auth.key_id = config.auth.resolved_key_id();
+    resolved
+}
+
 #[derive(Deserialize)]
 struct PidRecord {
     pid: u32,
@@ -103,7 +112,7 @@ pub fn backup(config_path: Option<PathBuf>, args: BackupArgs) -> Result<()> {
     let manifest = BackupManifest {
         version: 1,
         created_at: Utc::now(),
-        config: config.clone(),
+        config: capture_effective_config(&config),
         config_path: resolved_config_path.to_string_lossy().into_owned(),
     };
     let manifest_bytes =
@@ -170,6 +179,7 @@ pub fn restore(config_path: Option<PathBuf>, args: RestoreArgs) -> Result<()> {
         restored_config.data_dir = data_dir;
     }
     restored_config.updated_at = Utc::now();
+    restored_config = capture_effective_config(&restored_config);
 
     ensure_server_stopped(&restored_config)?;
 
