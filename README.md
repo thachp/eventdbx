@@ -360,12 +360,16 @@ Disable access any time with `dbx config --admin-enabled false` or issue a new r
 
 ### Upgrades
 
-- `dbx upgrade [<version>|latest] [--print-only]`  
-  Downloads and runs the platform-specific installer to switch binaries. The CLI looks up releases from GitHub, so you can use `latest` or supply a tag like `v1.13.2` (omitting the leading `v` also works). Versions lower than `v1.13.2` are rejected because upgrades are unsupported before that release. Use `--print-only` to show the command without executing it. Shortcut syntax `dbx upgrade@<version>` resolves through the same lookup.
+- `dbx upgrade [<version>|latest] [--no-switch] [--print-only]`  
+  Downloads the selected release into `~/.eventdbx/versions/<target>/<tag>/` and switches the active `dbx` binary unless `--no-switch` is supplied. The CLI looks up releases from GitHub, so you can use `latest` or supply a tag like `v1.13.2` (omitting the leading `v` also works). Versions lower than `v1.13.2` are rejected because upgrades are unsupported before that release. Use `--print-only` to preview the download and activation steps without performing them. Shortcut syntax `dbx upgrade@<version>` resolves through the same lookup.
+- `dbx upgrade use <version> [--print-only]`  
+  Switches to an installed release without re-downloading it so you can hop between versions like `nvm`. The command references the locally cached binary; on Windows the switch must still be completed manually by replacing the executable.
+- `dbx upgrade installed [--json]`  
+  Lists every cached CLI release and marks the one currently active. Use `--json` for machine-readable output that includes the detected target triple.
 - `dbx upgrade --suppress <version>`  
   Suppresses the upgrade reminder for the provided release tag. Combine it with `latest` to ignore the current release until a newer one ships. Use `dbx upgrade --clear-suppress` to re-enable reminders for all releases.
 - `dbx upgrade list [--limit <n>] [--json]`  
-  Queries the GitHub releases API and prints the most recent versions. The default limit is 20; use `--json` for a machine-readable list, and call `dbx upgrade@list` for the same shortcut.
+  Queries the GitHub releases API and prints the most recent versions. Installed releases are annotated with `[installed]` and the active release with `[active]`. The default limit is 20; use `--json` for a machine-readable list, and call `dbx upgrade@list` for the same shortcut.
 
 > The CLI checks for new releases on startup and prints a reminder when a newer version is available. Set `DBX_NO_UPGRADE_CHECK=1` to bypass the check for automation scenarios.
 

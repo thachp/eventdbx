@@ -84,6 +84,7 @@ jsonwebtoken = "9.3"
 once_cell = "1.19"
 metrics = "0.22"
 metrics-exporter-prometheus = "0.13"
+xz2 = "0.1"
 
 [features]
 default = []

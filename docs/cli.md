@@ -91,9 +91,13 @@ See the [Plugin architecture]({{ '/plugins/' | relative_url }}) guide for deeper
 
 - `dbx backup --output <path> [--force]`
 - `dbx restore --input <path> [--data-dir <path>] [--force]`
-- `dbx upgrade [<version>|latest] [--print-only]`
+- `dbx upgrade [<version>|latest] [--no-switch] [--print-only]`
+- `dbx upgrade use <version> [--print-only]`
+- `dbx upgrade installed [--json]`
 - `dbx upgrade --suppress <version>`
 - `dbx upgrade list [--limit <n>] [--json]`
+
+`dbx upgrade` now caches every downloaded release in `~/.eventdbx/versions/<target>/<tag>/`, allowing you to install multiple versions side-by-side and activate them later with `dbx upgrade use`. The `installed` subcommand lists cached versions, and `list` marks installed entries with `[installed]` and the active version with `[active]`. Use `--no-switch` to keep the current binary in place after downloading, and `--print-only` to preview the actions without making changes.
 
 ## Shortcuts for the Admin API
 

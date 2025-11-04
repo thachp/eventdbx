@@ -38,9 +38,7 @@ use crate::{
         AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
         normalize_optional_comment,
     },
-    store::{
-        AggregateQueryScope, AggregateSort, AggregateSortField,
-    },
+    store::{AggregateQueryScope, AggregateSort, AggregateSortField},
 };
 
 #[derive(Debug, Clone)]
