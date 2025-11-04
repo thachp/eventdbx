@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fs, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -75,7 +79,7 @@ fn domain_summary(
     let domain_root = domain_data_dir(config, domain);
     let event_store_path = domain_root.join("event_store");
 
-    let counts = if event_store_path.exists() {
+    let counts = if event_store_initialized(&event_store_path) {
         let store =
             EventStore::open_read_only(event_store_path.clone(), encryptor).with_context(|| {
                 format!(
@@ -175,6 +179,10 @@ fn domain_data_dir(config: &Config, domain: &str) -> PathBuf {
     } else {
         config.domains_root().join(domain)
     }
+}
+
+fn event_store_initialized(path: &Path) -> bool {
+    path.is_dir() && path.join("CURRENT").is_file()
 }
 
 fn is_directory(entry: &fs::DirEntry) -> bool {
