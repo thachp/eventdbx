@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use snow::{HandshakeState, TransportState, params::NoiseParams};
 
 const NOISE_PROTOCOL_NAME: &str = "Noise_NNpsk0_25519_ChaChaPoly_SHA256";
-const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+pub const MAX_NOISE_FRAME_PAYLOAD: usize = 65_535;
 const AEAD_TAG_LEN: usize = 16;
 const HANDSHAKE_MESSAGE_MAX: usize = 1024;
 
@@ -44,10 +44,10 @@ fn build_responder_state(token: &[u8]) -> Result<HandshakeState> {
 }
 
 fn encrypt_payload(state: &mut TransportState, plaintext: &[u8]) -> Result<Vec<u8>> {
-    if plaintext.len() > MAX_FRAME_LEN {
+    if plaintext.len() > MAX_NOISE_FRAME_PAYLOAD {
         bail!(
             "plaintext message exceeds maximum Noise frame length ({} bytes)",
-            MAX_FRAME_LEN
+            MAX_NOISE_FRAME_PAYLOAD
         );
     }
     let mut buffer = vec![0u8; plaintext.len() + AEAD_TAG_LEN];
@@ -59,10 +59,10 @@ fn encrypt_payload(state: &mut TransportState, plaintext: &[u8]) -> Result<Vec<u
 }
 
 fn decrypt_payload(state: &mut TransportState, ciphertext: &[u8]) -> Result<Vec<u8>> {
-    if ciphertext.len() > MAX_FRAME_LEN + AEAD_TAG_LEN {
+    if ciphertext.len() > MAX_NOISE_FRAME_PAYLOAD + AEAD_TAG_LEN {
         bail!(
             "encrypted Noise frame exceeds maximum length ({} bytes)",
-            MAX_FRAME_LEN + AEAD_TAG_LEN
+            MAX_NOISE_FRAME_PAYLOAD + AEAD_TAG_LEN
         );
     }
     let mut buffer = vec![0u8; ciphertext.len()];
@@ -74,11 +74,11 @@ fn decrypt_payload(state: &mut TransportState, ciphertext: &[u8]) -> Result<Vec<
 }
 
 fn ensure_frame_size(len: usize) -> Result<()> {
-    if len > MAX_FRAME_LEN + AEAD_TAG_LEN {
+    if len > MAX_NOISE_FRAME_PAYLOAD + AEAD_TAG_LEN {
         bail!(
             "frame length {} exceeds allowed maximum {}",
             len,
-            MAX_FRAME_LEN + AEAD_TAG_LEN
+            MAX_NOISE_FRAME_PAYLOAD + AEAD_TAG_LEN
         );
     }
     Ok(())
