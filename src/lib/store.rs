@@ -1050,6 +1050,40 @@ impl EventStore {
         self.list_events_paginated(aggregate_type, aggregate_id, 0, None)
     }
 
+    pub fn merkle_root_at(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        version: u64,
+    ) -> Result<Option<String>> {
+        if version == 0 {
+            return Ok(Some(empty_root()));
+        }
+        let Some((meta, _)) = self.load_meta_any(aggregate_type, aggregate_id)? else {
+            return Ok(None);
+        };
+        if version > meta.version {
+            return Ok(None);
+        }
+        if version == meta.version {
+            return Ok(Some(meta.merkle_root.clone()));
+        }
+        let end = version as usize;
+        let hashes = &meta.event_hashes[..end];
+        Ok(Some(compute_merkle_root(hashes)))
+    }
+
+    pub fn event_hashes(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Option<Vec<String>>> {
+        let Some((meta, _)) = self.load_meta_any(aggregate_type, aggregate_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(meta.event_hashes.clone()))
+    }
+
     pub fn event_by_version(
         &self,
         aggregate_type: &str,

@@ -25,6 +25,7 @@ use eventdbx::{
     config::{Config, DEFAULT_DOMAIN_NAME, DEFAULT_SOCKET_PORT, load_or_default},
     encryption::{self, Encryptor},
     error::EventError,
+    merkle::{compute_merkle_root, empty_root},
     schema::{AggregateSchema, SchemaManager},
     store::{AggregateQueryScope, AggregateState, EventStore},
     validation::{ensure_aggregate_id, ensure_snake_case},
@@ -579,23 +580,6 @@ fn process_push_aggregate(
         aggregate_id
     ));
 
-    let local_events = store
-        .list_events(aggregate_type, aggregate_id)
-        .with_context(|| {
-            format!(
-                "failed to load local events for aggregate '{}::{}'",
-                aggregate_type, aggregate_id
-            )
-        })?;
-    if local_events.is_empty() {
-        logs.push("  no local events; skipping".to_string());
-        return Ok(PushAggregateStats {
-            events_pushed: 0,
-            aggregate_updated: false,
-            archive_updated: false,
-        });
-    }
-
     let remote_state = client
         .get_aggregate(token, aggregate_type, aggregate_id)
         .with_context(|| {
@@ -605,48 +589,87 @@ fn process_push_aggregate(
             )
         })?;
 
-    let remote_events = if remote_state.is_some() {
-        client
-            .list_events(token, aggregate_type, aggregate_id)
-            .with_context(|| {
-                format!(
-                    "failed to fetch remote events for '{}::{}'",
-                    aggregate_type, aggregate_id
-                )
-            })?
-    } else {
-        Vec::new()
-    };
+    let local_version = aggregate.version;
+    if local_version == 0 {
+        logs.push("  no local events; skipping".to_string());
+        return Ok(PushAggregateStats {
+            events_pushed: 0,
+            aggregate_updated: false,
+            archive_updated: false,
+        });
+    }
 
-    let total_events = local_events.len();
-    let new_events_total = total_events.saturating_sub(remote_events.len());
-
-    if remote_events.len() > local_events.len() {
+    let remote_version = remote_state
+        .as_ref()
+        .map(|state| state.version)
+        .unwrap_or(0);
+    if remote_version > local_version {
         bail!(
             "remote aggregate '{}::{}' has {} event(s) but local copy has {}; refusing to overwrite",
             aggregate_type,
             aggregate_id,
-            remote_events.len(),
-            local_events.len()
+            remote_version,
+            local_version
         );
     }
 
-    for (idx, remote_event) in remote_events.iter().enumerate() {
-        if remote_event.hash != local_events[idx].hash {
+    if remote_version > 0 {
+        let local_root = store
+            .merkle_root_at(aggregate_type, aggregate_id, remote_version)
+            .with_context(|| {
+                format!(
+                    "failed to compute local merkle root at version {} for '{}::{}'",
+                    remote_version, aggregate_type, aggregate_id
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow!(
+                    "local aggregate metadata missing for '{}::{}' when computing merkle root",
+                    aggregate_type,
+                    aggregate_id
+                )
+            })?;
+        let remote_root = remote_state
+            .as_ref()
+            .map(|state| state.merkle_root.clone())
+            .unwrap_or_else(|| empty_root());
+        if local_root != remote_root {
             bail!(
                 "remote aggregate '{}::{}' diverged at version {}",
                 aggregate_type,
                 aggregate_id,
-                idx + 1
+                remote_version
             );
         }
     }
 
+    let new_events_total = (local_version - remote_version) as usize;
+    let mut new_events = Vec::with_capacity(new_events_total);
+    for version in (remote_version + 1)..=local_version {
+        let event = store
+            .event_by_version(aggregate_type, aggregate_id, version)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "local event version {} missing for '{}::{}'",
+                    version,
+                    aggregate_type,
+                    aggregate_id
+                )
+            })?;
+        new_events.push(event);
+    }
+
     let mut remote_has_aggregate = remote_state.is_some();
-    let mut remote_version = remote_events.len();
     let mut wrote_events = 0usize;
 
-    for (offset, event) in local_events.iter().skip(remote_events.len()).enumerate() {
+    if !new_events.is_empty() && !remote_has_aggregate {
+        logs.push(format!(
+            "  created aggregate; pushing {} event(s)",
+            new_events.len()
+        ));
+    }
+
+    for (offset, event) in new_events.iter().enumerate() {
         if !remote_has_aggregate {
             client
                 .create_aggregate(
@@ -665,10 +688,6 @@ fn process_push_aggregate(
                     )
                 })?;
             remote_has_aggregate = true;
-            logs.push(format!(
-                "  created aggregate; pushing {} event(s)",
-                new_events_total.max(1)
-            ));
         } else {
             client
                 .append_event(
@@ -683,13 +702,10 @@ fn process_push_aggregate(
                 .with_context(|| {
                     format!(
                         "failed to append event version {} for '{}::{}' on remote endpoint",
-                        remote_version + 1,
-                        aggregate_type,
-                        aggregate_id
+                        event.version, aggregate_type, aggregate_id
                     )
                 })?;
         }
-        remote_version += 1;
         wrote_events += 1;
         logs.push(format!(
             "    pushed event {}/{} (version {})",
@@ -926,47 +942,90 @@ fn process_pull_aggregate(
         aggregate_id
     ));
 
-    let remote_events = client
-        .list_events(token, aggregate_type, aggregate_id)
-        .with_context(|| {
-            format!(
-                "failed to fetch remote events for '{}::{}'",
-                aggregate_type, aggregate_id
-            )
-        })?;
+    let remote_version = remote_state.version;
+    let remote_root = remote_state.merkle_root.clone();
 
-    let local_events = match store.list_events(aggregate_type, aggregate_id) {
-        Ok(events) => events,
-        Err(EventError::AggregateNotFound) => Vec::new(),
+    let local_version = match store.aggregate_version(aggregate_type, aggregate_id) {
+        Ok(Some(version)) => version,
+        Ok(None) => 0,
         Err(err) => return Err(err.into()),
     };
 
-    let total_remote_events = remote_events.len();
-    let new_events_total = total_remote_events.saturating_sub(local_events.len());
-
-    if local_events.len() > remote_events.len() {
+    if local_version > remote_version {
         bail!(
             "local aggregate '{}::{}' is ahead of remote ({} events vs {}); refusing to overwrite",
             aggregate_type,
             aggregate_id,
-            local_events.len(),
-            remote_events.len()
+            local_version,
+            remote_version
         );
     }
 
-    for (idx, local_event) in local_events.iter().enumerate() {
-        if remote_events[idx].hash != local_event.hash {
-            bail!(
-                "local aggregate '{}::{}' diverged from remote at version {}",
-                aggregate_type,
-                aggregate_id,
-                idx + 1
-            );
-        }
+    let mut combined_hashes = if local_version > 0 {
+        store
+            .event_hashes(aggregate_type, aggregate_id)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "local aggregate metadata missing for '{}::{}'",
+                    aggregate_type,
+                    aggregate_id
+                )
+            })?
+    } else {
+        Vec::new()
+    };
+
+    if combined_hashes.len() != local_version as usize {
+        bail!(
+            "local aggregate '{}::{}' has inconsistent metadata (expected {} hashes, found {})",
+            aggregate_type,
+            aggregate_id,
+            local_version,
+            combined_hashes.len()
+        );
+    }
+
+    let new_events_total = (remote_version - local_version) as usize;
+    let new_events = if new_events_total > 0 {
+        client
+            .list_events_since(token, aggregate_type, aggregate_id, local_version)
+            .with_context(|| {
+                format!(
+                    "failed to fetch remote events for '{}::{}' starting at version {}",
+                    aggregate_type,
+                    aggregate_id,
+                    local_version + 1
+                )
+            })?
+    } else {
+        Vec::new()
+    };
+
+    if new_events.len() != new_events_total {
+        bail!(
+            "remote aggregate '{}::{}' returned {} new event(s) but expected {} to reach version {}",
+            aggregate_type,
+            aggregate_id,
+            new_events.len(),
+            new_events_total,
+            remote_version
+        );
+    }
+
+    combined_hashes.extend(new_events.iter().map(|event| event.hash.clone()));
+    let expected_root = compute_merkle_root(&combined_hashes);
+    if expected_root != remote_root {
+        bail!(
+            "remote aggregate '{}::{}' diverged (expected merkle root {}, found {})",
+            aggregate_type,
+            aggregate_id,
+            expected_root,
+            remote_root
+        );
     }
 
     let mut imported = 0usize;
-    for (offset, event) in remote_events.iter().skip(local_events.len()).enumerate() {
+    for (offset, event) in new_events.iter().enumerate() {
         store
             .append_imported_event(event.clone())
             .with_context(|| {
