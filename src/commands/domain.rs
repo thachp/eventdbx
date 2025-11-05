@@ -1,24 +1,35 @@
 use std::{
     fs,
+    net::SocketAddr,
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
 use chrono::Utc;
-use clap::Args;
+use clap::{Args, Parser, Subcommand};
 #[cfg(unix)]
 use libc;
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{self, Value};
 
 use eventdbx::{
-    config::{Config, DEFAULT_DOMAIN_NAME, load_or_default},
+    config::{Config, DEFAULT_DOMAIN_NAME, DEFAULT_SOCKET_PORT, load_or_default},
+    encryption::{self, Encryptor},
+    error::EventError,
     schema::{AggregateSchema, SchemaManager},
-    store::{AggregateQueryScope, EventStore},
+    store::{AggregateQueryScope, AggregateState, EventStore},
+    validation::{ensure_aggregate_id, ensure_snake_case},
 };
 use std::io::{self, Write};
 
+use crate::commands::client::ServerClient;
+
 #[derive(Args)]
+#[command(arg_required_else_help = true)]
 pub struct DomainCheckoutArgs {
     /// Domain to activate
     #[arg(short = 'd', long = "domain", value_name = "NAME")]
@@ -44,6 +55,18 @@ pub struct DomainCheckoutArgs {
     /// Skip the interactive confirmation when deleting a domain
     #[arg(long, default_value_t = false, requires = "delete")]
     pub force: bool,
+
+    /// Remote control socket (host or host:port) to associate with the domain
+    #[arg(long = "remote", value_name = "ADDR")]
+    pub remote_addr: Option<String>,
+
+    /// Port for the remote control socket (defaults to 6363)
+    #[arg(long = "port", value_name = "PORT", requires = "remote_addr")]
+    pub remote_port: Option<u16>,
+
+    /// Authorization token used when syncing with the remote domain
+    #[arg(long = "token", value_name = "TOKEN")]
+    pub remote_token: Option<String>,
 }
 
 #[derive(Args)]
@@ -59,6 +82,87 @@ pub struct DomainMergeArgs {
     /// Replace conflicting schema definitions in the target domain
     #[arg(long, default_value_t = false)]
     pub overwrite_schemas: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct DomainRemoteConfig {
+    #[serde(default)]
+    connect_addr: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DomainRemoteEndpoint {
+    connect_addr: String,
+    token: String,
+}
+
+#[derive(Args)]
+pub struct SchemaSyncArgs {
+    /// Domain to synchronise
+    #[arg(value_name = "DOMAIN")]
+    pub domain: String,
+}
+
+#[derive(Subcommand)]
+pub enum PushCommand {
+    /// Push schemas to the remote endpoint
+    #[command(name = "schema")]
+    Schema(SchemaSyncArgs),
+    /// Push domain data (domain name as positional argument)
+    #[command(external_subcommand)]
+    External(Vec<String>),
+}
+
+#[derive(Subcommand)]
+pub enum PullCommand {
+    /// Pull schemas from the remote endpoint
+    #[command(name = "schema")]
+    Schema(SchemaSyncArgs),
+    /// Pull domain data (domain name as positional argument)
+    #[command(external_subcommand)]
+    External(Vec<String>),
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "domain-sync",
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+pub struct DomainSyncArgs {
+    /// Domain to synchronise
+    #[arg(value_name = "DOMAIN")]
+    pub domain: String,
+
+    /// Aggregate type to limit the operation to
+    #[arg(long = "aggregate", value_name = "AGGREGATE")]
+    pub aggregate: Option<String>,
+
+    /// Aggregate identifier to limit the operation to (requires --aggregate)
+    #[arg(long = "id", value_name = "AGGREGATE_ID", requires = "aggregate")]
+    pub aggregate_id: Option<String>,
+}
+
+pub fn push(config_path: Option<PathBuf>, command: PushCommand) -> Result<()> {
+    match command {
+        PushCommand::Schema(args) => push_schema(config_path, args),
+        PushCommand::External(argv) => {
+            let args = parse_domain_sync_args(argv)?;
+            push_domain(config_path, args)
+        }
+    }
+}
+
+pub fn pull(config_path: Option<PathBuf>, command: PullCommand) -> Result<()> {
+    match command {
+        PullCommand::Schema(args) => pull_schema(config_path, args),
+        PullCommand::External(argv) => {
+            let args = parse_domain_sync_args(argv)?;
+            pull_domain(config_path, args)
+        }
+    }
 }
 
 pub fn checkout(config_path: Option<PathBuf>, args: DomainCheckoutArgs) -> Result<()> {
@@ -97,6 +201,21 @@ pub fn checkout(config_path: Option<PathBuf>, args: DomainCheckoutArgs) -> Resul
     let domain_root = config.domain_data_dir();
     config.updated_at = Utc::now();
     config.save(&path)?;
+
+    let remote_port = if args.remote_addr.is_some() {
+        args.remote_port
+    } else {
+        None
+    };
+
+    if args.remote_addr.is_some() || args.remote_token.is_some() {
+        update_domain_remote_config(
+            &config,
+            args.remote_addr.as_deref(),
+            remote_port,
+            args.remote_token.as_deref(),
+        )?;
+    }
 
     println!(
         "Switched to domain '{}' (data directory: {}).",
@@ -246,6 +365,822 @@ pub fn merge(config_path: Option<PathBuf>, args: DomainMergeArgs) -> Result<()> 
         );
     }
 
+    Ok(())
+}
+
+fn push_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()> {
+    let domain = normalize_domain_name(&args.domain)?;
+    let (config, _) = load_or_default(config_path)?;
+    ensure_existing_domain(&config, &domain)?;
+
+    let mut domain_config = config.clone();
+    domain_config.domain = domain.clone();
+
+    ensure_domain_stopped(&domain_config)?;
+
+    let store = EventStore::open_read_only(
+        domain_config.event_store_path(),
+        domain_config.encryption_key()?,
+    )?;
+
+    let aggregates = collect_local_aggregates(
+        &store,
+        args.aggregate.as_deref(),
+        args.aggregate_id.as_deref(),
+    )?;
+    if aggregates.is_empty() {
+        println!("No aggregates matched the specified criteria.");
+        return Ok(());
+    }
+
+    let remote = load_remote_endpoint_for_domain(&config, &domain)?;
+    let client = ServerClient::with_addr(remote.connect_addr.clone());
+
+    let total_aggregates = aggregates.len();
+    let mut events_pushed = 0usize;
+    let mut aggregates_updated = 0usize;
+    let mut archive_updates = 0usize;
+
+    for (index, aggregate) in aggregates.iter().enumerate() {
+        let aggregate_type = &aggregate.aggregate_type;
+        let aggregate_id = &aggregate.aggregate_id;
+        println!(
+            "Pushing aggregate {}/{}: {}::{}",
+            index + 1,
+            total_aggregates,
+            aggregate_type,
+            aggregate_id
+        );
+        let local_events = store
+            .list_events(aggregate_type, aggregate_id)
+            .with_context(|| {
+                format!(
+                    "failed to load local events for aggregate '{}::{}'",
+                    aggregate_type, aggregate_id
+                )
+            })?;
+        if local_events.is_empty() {
+            println!("  no local events; skipping");
+            continue;
+        }
+
+        let remote_state = client
+            .get_aggregate(&remote.token, aggregate_type, aggregate_id)
+            .with_context(|| {
+                format!(
+                    "failed to fetch remote aggregate '{}::{}'",
+                    aggregate_type, aggregate_id
+                )
+            })?;
+
+        let remote_events = if remote_state.is_some() {
+            client
+                .list_events(&remote.token, aggregate_type, aggregate_id)
+                .with_context(|| {
+                    format!(
+                        "failed to fetch remote events for '{}::{}'",
+                        aggregate_type, aggregate_id
+                    )
+                })?
+        } else {
+            Vec::new()
+        };
+
+        let total_events = local_events.len();
+        let new_events_total = total_events.saturating_sub(remote_events.len());
+
+        if remote_events.len() > local_events.len() {
+            bail!(
+                "remote aggregate '{}::{}' has {} event(s) but local copy has {}; refusing to overwrite",
+                aggregate_type,
+                aggregate_id,
+                remote_events.len(),
+                local_events.len()
+            );
+        }
+
+        for (index, remote_event) in remote_events.iter().enumerate() {
+            if remote_event.hash != local_events[index].hash {
+                bail!(
+                    "remote aggregate '{}::{}' diverged at version {}",
+                    aggregate_type,
+                    aggregate_id,
+                    index + 1
+                );
+            }
+        }
+
+        let mut remote_has_aggregate = remote_state.is_some();
+        let mut remote_version = remote_events.len();
+        let mut wrote_events = 0usize;
+
+        for (offset, event) in local_events.iter().skip(remote_events.len()).enumerate() {
+            if !remote_has_aggregate {
+                client
+                    .create_aggregate(
+                        &remote.token,
+                        aggregate_type,
+                        aggregate_id,
+                        &event.event_type,
+                        &event.payload,
+                        event.extensions.as_ref(),
+                        event.metadata.note.as_deref(),
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to create remote aggregate '{}::{}'",
+                            aggregate_type, aggregate_id
+                        )
+                    })?;
+                remote_has_aggregate = true;
+                println!(
+                    "  created aggregate; pushing {} event(s)",
+                    new_events_total.max(1)
+                );
+            } else {
+                client
+                    .append_event(
+                        &remote.token,
+                        aggregate_type,
+                        aggregate_id,
+                        &event.event_type,
+                        Some(&event.payload),
+                        event.extensions.as_ref(),
+                        event.metadata.note.as_deref(),
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to append event version {} for '{}::{}' on remote endpoint",
+                            remote_version + 1,
+                            aggregate_type,
+                            aggregate_id
+                        )
+                    })?;
+            }
+            remote_version += 1;
+            wrote_events += 1;
+            println!(
+                "    pushed event {}/{} (version {})",
+                offset + 1,
+                new_events_total,
+                event.version
+            );
+        }
+
+        let remote_archived = remote_state
+            .as_ref()
+            .map(|state| state.archived)
+            .unwrap_or(false);
+        if aggregate.archived != remote_archived {
+            client
+                .set_aggregate_archive(
+                    &remote.token,
+                    aggregate_type,
+                    aggregate_id,
+                    aggregate.archived,
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to update archive status for '{}::{}' on remote endpoint",
+                        aggregate_type, aggregate_id
+                    )
+                })?;
+            archive_updates += 1;
+            println!(
+                "  updated archive status to {}",
+                if aggregate.archived {
+                    "archived"
+                } else {
+                    "active"
+                }
+            );
+        }
+
+        if wrote_events > 0 || aggregate.archived != remote_archived {
+            aggregates_updated += 1;
+        } else {
+            println!("  aggregate already synchronised");
+        }
+        events_pushed += wrote_events;
+    }
+
+    if aggregates_updated == 0 && archive_updates == 0 && events_pushed == 0 {
+        println!(
+            "Remote domain '{}' at {} is already up to date.",
+            domain, remote.connect_addr
+        );
+    } else {
+        if events_pushed > 0 {
+            println!(
+                "Pushed {} event(s) across {} aggregate(s) to remote {}.",
+                events_pushed, aggregates_updated, remote.connect_addr
+            );
+        }
+        if archive_updates > 0 {
+            println!(
+                "Updated archive status for {} aggregate(s) on remote {}.",
+                archive_updates, remote.connect_addr
+            );
+        }
+        if events_pushed == 0 && archive_updates > 0 {
+            println!("Remote domain '{}' archive flags synchronised.", domain);
+        }
+    }
+    Ok(())
+}
+
+fn pull_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()> {
+    let domain = normalize_domain_name(&args.domain)?;
+    let (config, _) = load_or_default(config_path)?;
+    ensure_existing_domain(&config, &domain)?;
+
+    let remote = load_remote_endpoint_for_domain(&config, &domain)?;
+    let client = ServerClient::with_addr(remote.connect_addr.clone());
+
+    let remote_aggregates = collect_remote_aggregates(
+        &client,
+        &remote.token,
+        args.aggregate.as_deref(),
+        args.aggregate_id.as_deref(),
+    )?;
+    if remote_aggregates.is_empty() {
+        println!("Remote domain has no aggregates matching the specified criteria.");
+        return Ok(());
+    }
+
+    let mut domain_config = config.clone();
+    domain_config.domain = domain.clone();
+
+    ensure_domain_stopped(&domain_config)?;
+
+    let store = EventStore::open(
+        domain_config.event_store_path(),
+        domain_config.encryption_key()?,
+        domain_config.snowflake_worker_id,
+    )?;
+
+    let total_remote = remote_aggregates.len();
+    let mut events_imported = 0usize;
+    let mut aggregates_modified = 0usize;
+    let mut archive_updates = 0usize;
+
+    for (index, remote_state) in remote_aggregates.into_iter().enumerate() {
+        let aggregate_type = &remote_state.aggregate_type;
+        let aggregate_id = &remote_state.aggregate_id;
+        println!(
+            "Pulling aggregate {}/{}: {}::{}",
+            index + 1,
+            total_remote,
+            aggregate_type,
+            aggregate_id
+        );
+
+        let remote_events = client
+            .list_events(&remote.token, aggregate_type, aggregate_id)
+            .with_context(|| {
+                format!(
+                    "failed to fetch remote events for '{}::{}'",
+                    aggregate_type, aggregate_id
+                )
+            })?;
+
+        let local_events = match store.list_events(aggregate_type, aggregate_id) {
+            Ok(events) => events,
+            Err(EventError::AggregateNotFound) => Vec::new(),
+            Err(err) => return Err(err.into()),
+        };
+
+        let total_remote_events = remote_events.len();
+        let new_events_total = total_remote_events.saturating_sub(local_events.len());
+
+        if local_events.len() > remote_events.len() {
+            bail!(
+                "local aggregate '{}::{}' is ahead of remote ({} events vs {}); refusing to overwrite",
+                aggregate_type,
+                aggregate_id,
+                local_events.len(),
+                remote_events.len()
+            );
+        }
+
+        for (index, local_event) in local_events.iter().enumerate() {
+            if remote_events[index].hash != local_event.hash {
+                bail!(
+                    "local aggregate '{}::{}' diverged from remote at version {}",
+                    aggregate_type,
+                    aggregate_id,
+                    index + 1
+                );
+            }
+        }
+
+        let mut imported = 0usize;
+        for (offset, event) in remote_events.iter().skip(local_events.len()).enumerate() {
+            store
+                .append_imported_event(event.clone())
+                .with_context(|| {
+                    format!(
+                        "failed to import remote event version {} for '{}::{}'",
+                        event.version, aggregate_type, aggregate_id
+                    )
+                })?;
+            imported += 1;
+            println!(
+                "    imported event {}/{} (version {})",
+                offset + 1,
+                new_events_total,
+                event.version
+            );
+        }
+
+        if remote_state.archived {
+            let local_archived = match store.get_aggregate_state(aggregate_type, aggregate_id) {
+                Ok(state) => state.archived,
+                Err(EventError::AggregateNotFound) => false,
+                Err(err) => return Err(err.into()),
+            };
+            if !local_archived {
+                store
+                    .set_archive(aggregate_type, aggregate_id, true, None)
+                    .with_context(|| {
+                        format!(
+                            "failed to archive aggregate '{}::{}' locally",
+                            aggregate_type, aggregate_id
+                        )
+                    })?;
+                archive_updates += 1;
+                println!("  updated archive status to archived");
+            }
+        } else if let Ok(state) = store.get_aggregate_state(aggregate_type, aggregate_id) {
+            if state.archived {
+                store
+                    .set_archive(aggregate_type, aggregate_id, false, None)
+                    .with_context(|| {
+                        format!(
+                            "failed to unarchive aggregate '{}::{}' locally",
+                            aggregate_type, aggregate_id
+                        )
+                    })?;
+                archive_updates += 1;
+                println!("  updated archive status to active");
+            }
+        }
+
+        if imported > 0 {
+            aggregates_modified += 1;
+        } else if !remote_state.archived {
+            if let Ok(state) = store.get_aggregate_state(aggregate_type, aggregate_id) {
+                if !state.archived {
+                    println!("  aggregate already synchronised");
+                }
+            }
+        }
+        events_imported += imported;
+    }
+
+    if aggregates_modified == 0 && archive_updates == 0 {
+        println!(
+            "Local domain '{}' is already synchronised with remote {}.",
+            domain, remote.connect_addr
+        );
+    } else {
+        if events_imported > 0 {
+            println!(
+                "Imported {} event(s) across {} aggregate(s) from remote {}.",
+                events_imported, aggregates_modified, remote.connect_addr
+            );
+        }
+        if archive_updates > 0 {
+            println!(
+                "Updated archive status for {} aggregate(s) from remote {}.",
+                archive_updates, remote.connect_addr
+            );
+        }
+        if events_imported == 0 && archive_updates > 0 {
+            println!("Archive status synchronised for domain '{}'.", domain);
+        }
+    }
+    Ok(())
+}
+
+fn push_schema(config_path: Option<PathBuf>, args: SchemaSyncArgs) -> Result<()> {
+    let domain = normalize_domain_name(&args.domain)?;
+    let (config, _) = load_or_default(config_path)?;
+    ensure_existing_domain(&config, &domain)?;
+
+    let remote = load_remote_endpoint_for_domain(&config, &domain)?;
+    let client = ServerClient::with_addr(remote.connect_addr.clone());
+
+    let mut domain_config = config.clone();
+    domain_config.domain = domain.clone();
+    ensure_domain_stopped(&domain_config)?;
+
+    let manager = SchemaManager::load(domain_config.schema_store_path())?;
+    let snapshot = manager.snapshot();
+
+    client
+        .replace_schemas(&remote.token, &snapshot)
+        .with_context(|| {
+            format!(
+                "failed to push schemas for domain '{}' to remote {}",
+                domain, remote.connect_addr
+            )
+        })?;
+
+    println!(
+        "Pushed {} schema(s) for domain '{}' to remote {}.",
+        snapshot.len(),
+        domain,
+        remote.connect_addr
+    );
+    Ok(())
+}
+
+fn pull_schema(config_path: Option<PathBuf>, args: SchemaSyncArgs) -> Result<()> {
+    let domain = normalize_domain_name(&args.domain)?;
+    let (config, _) = load_or_default(config_path)?;
+    ensure_existing_domain(&config, &domain)?;
+
+    let remote = load_remote_endpoint_for_domain(&config, &domain)?;
+    let client = ServerClient::with_addr(remote.connect_addr.clone());
+
+    let remote_snapshot = client.list_schemas(&remote.token).with_context(|| {
+        format!(
+            "failed to fetch remote schemas for domain '{}' from {}",
+            domain, remote.connect_addr
+        )
+    })?;
+
+    let mut domain_config = config.clone();
+    domain_config.domain = domain.clone();
+    ensure_domain_stopped(&domain_config)?;
+
+    let manager = SchemaManager::load(domain_config.schema_store_path())?;
+    let count = remote_snapshot.len();
+    manager.replace_all(remote_snapshot)?;
+
+    println!(
+        "Pulled {} schema(s) for domain '{}' from remote {}.",
+        count, domain, remote.connect_addr
+    );
+    Ok(())
+}
+
+fn parse_domain_sync_args(argv: Vec<String>) -> Result<DomainSyncArgs> {
+    if argv.is_empty() {
+        bail!("domain name must be provided");
+    }
+    let mut args = Vec::with_capacity(argv.len() + 1);
+    args.push("dbx-domain-sync".to_string());
+    args.extend(argv);
+    DomainSyncArgs::try_parse_from(args).map_err(|err| err.into())
+}
+
+fn ensure_existing_domain(config: &Config, domain: &str) -> Result<PathBuf> {
+    let root = domain_data_dir_for(config, domain);
+    if !root.exists() {
+        bail!(
+            "domain '{}' does not exist; run `dbx checkout {} --create` first",
+            domain,
+            domain
+        );
+    }
+    Ok(root)
+}
+
+fn domain_data_dir_for(config: &Config, domain: &str) -> PathBuf {
+    if domain.eq_ignore_ascii_case(DEFAULT_DOMAIN_NAME) {
+        config.data_dir.clone()
+    } else {
+        config.domains_root().join(domain)
+    }
+}
+
+fn load_remote_endpoint_for_domain(config: &Config, domain: &str) -> Result<DomainRemoteEndpoint> {
+    let path = remote_config_path(domain_data_dir_for(config, domain).as_path());
+    let encryptor = config.encryption_key()?;
+    let remote = load_remote_config(&path, encryptor.as_ref())?;
+    let connect_addr = remote.connect_addr.ok_or_else(|| {
+        anyhow::anyhow!(
+            "remote endpoint not configured for domain '{}'; run `dbx checkout {} --remote <addr> --token <token>`",
+            domain,
+            domain
+        )
+    })?;
+    let token = remote.token.ok_or_else(|| {
+        anyhow::anyhow!(
+            "remote token not configured for domain '{}'; run `dbx checkout {} --token <token>`",
+            domain,
+            domain
+        )
+    })?;
+    Ok(DomainRemoteEndpoint {
+        connect_addr,
+        token,
+    })
+}
+
+fn collect_local_aggregates(
+    store: &EventStore,
+    aggregate: Option<&str>,
+    aggregate_id: Option<&str>,
+) -> Result<Vec<AggregateState>> {
+    match (aggregate, aggregate_id) {
+        (Some(agg), Some(id)) => {
+            ensure_snake_case("aggregate_type", agg)?;
+            ensure_aggregate_id(id)?;
+            match store.get_aggregate_state(agg, id) {
+                Ok(state) => Ok(vec![state]),
+                Err(EventError::AggregateNotFound) => bail!(
+                    "aggregate '{}::{}' does not exist in the local store",
+                    agg,
+                    id
+                ),
+                Err(err) => Err(err.into()),
+            }
+        }
+        (Some(agg), None) => {
+            ensure_snake_case("aggregate_type", agg)?;
+            let aggregates = store.aggregates_paginated_with_transform(
+                0,
+                None,
+                None,
+                AggregateQueryScope::IncludeArchived,
+                |state| {
+                    if state.aggregate_type == agg {
+                        Some(state)
+                    } else {
+                        None
+                    }
+                },
+            );
+            Ok(aggregates)
+        }
+        (None, Some(_)) => bail!("--id requires --aggregate"),
+        (None, None) => Ok(store.aggregates_paginated_with_transform(
+            0,
+            None,
+            None,
+            AggregateQueryScope::IncludeArchived,
+            |state| Some(state),
+        )),
+    }
+}
+
+fn collect_remote_aggregates(
+    client: &ServerClient,
+    token: &str,
+    aggregate: Option<&str>,
+    aggregate_id: Option<&str>,
+) -> Result<Vec<AggregateState>> {
+    match (aggregate, aggregate_id) {
+        (Some(agg), Some(id)) => {
+            ensure_snake_case("aggregate_type", agg)?;
+            ensure_aggregate_id(id)?;
+            let state = client
+                .get_aggregate(token, agg, id)
+                .with_context(|| format!("failed to fetch remote aggregate '{}::{}'", agg, id))?;
+            match state {
+                Some(state) => Ok(vec![state]),
+                None => bail!("remote aggregate '{}::{}' not found", agg, id),
+            }
+        }
+        (Some(agg), None) => {
+            ensure_snake_case("aggregate_type", agg)?;
+            let filter = Some(build_aggregate_filter_expr(agg)?);
+            client.list_aggregates(token, filter.as_deref(), true, false)
+        }
+        (None, Some(_)) => bail!("--id requires --aggregate"),
+        (None, None) => client.list_aggregates(token, None, true, false),
+    }
+}
+
+fn build_aggregate_filter_expr(aggregate: &str) -> Result<String> {
+    let value = serde_json::to_string(aggregate)?;
+    Ok(format!("aggregate_type = {}", value))
+}
+
+fn update_domain_remote_config(
+    config: &Config,
+    remote: Option<&str>,
+    remote_port: Option<u16>,
+    token: Option<&str>,
+) -> Result<()> {
+    let domain_dir = config.domain_data_dir();
+    if !domain_dir.exists() {
+        fs::create_dir_all(&domain_dir)?;
+    }
+    let path = remote_config_path(domain_dir.as_path());
+    let encryptor = config.encryption_key()?;
+    let mut current = load_remote_config(&path, encryptor.as_ref())?;
+    let mut changed = false;
+
+    if let Some(raw_remote) = remote {
+        let trimmed = raw_remote.trim();
+        let normalized = if trimmed.is_empty() {
+            None
+        } else {
+            Some(normalize_remote_addr(trimmed, remote_port)?)
+        };
+        if current.connect_addr != normalized {
+            current.connect_addr = normalized;
+            changed = true;
+        }
+    } else if let Some(port) = remote_port {
+        if let Some(existing) = current.connect_addr.clone() {
+            let normalized = normalize_remote_addr(&existing, Some(port))?;
+            if Some(normalized.clone()) != current.connect_addr {
+                current.connect_addr = Some(normalized);
+                changed = true;
+            }
+        } else {
+            bail!("remote address must be provided before updating the port (use --remote)");
+        }
+    }
+
+    if let Some(raw_token) = token {
+        let trimmed = raw_token.trim();
+        let normalized = if trimmed.is_empty() {
+            None
+        } else {
+            ensure_jwt_token_format(trimmed)?;
+            Some(trimmed.to_string())
+        };
+        if current.token != normalized {
+            current.token = normalized;
+            changed = true;
+        }
+    }
+
+    if changed {
+        save_remote_config(&path, &current, encryptor.as_ref())?;
+        println!(
+            "Updated remote configuration for domain '{}'.",
+            config.active_domain()
+        );
+    }
+    Ok(())
+}
+
+fn normalize_remote_addr(raw: &str, override_port: Option<u16>) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("remote address cannot be empty");
+    }
+
+    if let Some(port) = override_port {
+        return Ok(normalize_with_port(trimmed, port)?);
+    }
+
+    if trimmed.parse::<SocketAddr>().is_ok() {
+        return Ok(trimmed.to_string());
+    }
+    if trimmed.starts_with('[') {
+        bail!(
+            "remote address '{}' must include a port (e.g. [::1]:{})",
+            trimmed,
+            DEFAULT_SOCKET_PORT
+        );
+    }
+    if let Ok(ip) = trimmed.parse::<std::net::IpAddr>() {
+        return Ok(match ip {
+            std::net::IpAddr::V4(_) => format!("{}:{}", trimmed, DEFAULT_SOCKET_PORT),
+            std::net::IpAddr::V6(_) => format!("[{}]:{}", trimmed, DEFAULT_SOCKET_PORT),
+        });
+    }
+    if let Some((host, port)) = trimmed.rsplit_once(':') {
+        if !host.is_empty() && port.parse::<u16>().is_ok() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    Ok(format!("{}:{}", trimmed, DEFAULT_SOCKET_PORT))
+}
+
+fn normalize_with_port(host: &str, port: u16) -> Result<String> {
+    if let Ok(addr) = host.parse::<SocketAddr>() {
+        return Ok(match addr.ip() {
+            std::net::IpAddr::V4(ip) => format!("{}:{}", ip, port),
+            std::net::IpAddr::V6(ip) => format!("[{}]:{}", ip, port),
+        });
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(match ip {
+            std::net::IpAddr::V4(ip) => format!("{}:{}", ip, port),
+            std::net::IpAddr::V6(ip) => format!("[{}]:{}", ip, port),
+        });
+    }
+    if host.starts_with('[') {
+        if let Some(end) = host.find(']') {
+            let inner = &host[1..end];
+            return Ok(format!("[{}]:{}", inner, port));
+        } else {
+            bail!(
+                "remote address '{}' must include a closing bracket (e.g. [::1])",
+                host
+            );
+        }
+    }
+    if let Some((base, _)) = host.rsplit_once(':') {
+        if base.find(':').is_none() {
+            return Ok(format!("{}:{}", base, port));
+        }
+    }
+    Ok(format!("{}:{}", host, port))
+}
+
+fn ensure_jwt_token_format(token: &str) -> Result<()> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        bail!("remote token must be a JWT (expected three segments separated by '.')");
+    }
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            bail!("remote token segments cannot be empty");
+        }
+        if part.chars().any(|ch| ch.is_whitespace()) {
+            bail!("remote token must not contain whitespace");
+        }
+        if index < 2 {
+            decode_jwt_segment(part)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_jwt_segment(segment: &str) -> Result<()> {
+    if URL_SAFE_NO_PAD.decode(segment).is_ok() {
+        return Ok(());
+    }
+    let mut padded = segment.to_string();
+    while padded.len() % 4 != 0 {
+        padded.push('=');
+    }
+    URL_SAFE
+        .decode(padded.as_bytes())
+        .map(|_| ())
+        .map_err(|err| anyhow!("remote token segment is not valid base64url: {}", err))
+}
+
+fn remote_config_path(domain_dir: &Path) -> PathBuf {
+    domain_dir.join("remote.json")
+}
+
+fn load_remote_config(path: &Path, encryptor: Option<&Encryptor>) -> Result<DomainRemoteConfig> {
+    if !path.exists() {
+        return Ok(DomainRemoteConfig::default());
+    }
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return Ok(DomainRemoteConfig::default());
+    }
+
+    if let Some(enc) = encryptor {
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            if let Some(ciphertext) = encryption::extract_encrypted_value(&value) {
+                let decrypted = enc.decrypt_from_str(ciphertext).with_context(|| {
+                    format!(
+                        "failed to decrypt {} using data encryption key",
+                        path.display()
+                    )
+                })?;
+                let config = serde_json::from_slice(&decrypted).with_context(|| {
+                    format!(
+                        "failed to parse decrypted remote configuration at {}",
+                        path.display()
+                    )
+                })?;
+                return Ok(config);
+            }
+        }
+    }
+
+    let config = serde_json::from_str(trimmed)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(config)
+}
+
+fn save_remote_config(
+    path: &Path,
+    remote: &DomainRemoteConfig,
+    encryptor: Option<&Encryptor>,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let contents = if let Some(enc) = encryptor {
+        let payload = serde_json::to_vec(remote)
+            .with_context(|| "failed to serialize remote configuration")?;
+        let ciphertext = enc
+            .encrypt_to_string(&payload)
+            .with_context(|| "failed to encrypt remote configuration")?;
+        let wrapped = encryption::wrap_encrypted_value(ciphertext);
+        serde_json::to_string_pretty(&wrapped)?
+    } else {
+        serde_json::to_string_pretty(remote)?
+    };
+    fs::write(path, contents)?;
     Ok(())
 }
 
@@ -537,6 +1472,9 @@ mod tests {
             create: false,
             delete: false,
             force: false,
+            remote_addr: None,
+            remote_port: None,
+            remote_token: None,
         };
         let result = resolve_checkout_domain(&args).expect("flag domain should resolve");
         assert_eq!(result, "herds");
@@ -550,6 +1488,9 @@ mod tests {
             create: false,
             delete: false,
             force: false,
+            remote_addr: None,
+            remote_port: None,
+            remote_token: None,
         };
         let result = resolve_checkout_domain(&args).expect("positional domain should resolve");
         assert_eq!(result, "herds_01");
@@ -563,6 +1504,9 @@ mod tests {
             create: false,
             delete: false,
             force: false,
+            remote_addr: None,
+            remote_port: None,
+            remote_token: None,
         };
         assert!(resolve_checkout_domain(&args).is_err());
     }
@@ -590,6 +1534,9 @@ mod tests {
             create: false,
             delete: false,
             force: false,
+            remote_addr: None,
+            remote_port: None,
+            remote_token: None,
         };
 
         let err = checkout(Some(config_path.clone()), args)
@@ -628,9 +1575,11 @@ mod tests {
             create: true,
             delete: false,
             force: false,
+            remote_addr: None,
+            remote_port: None,
+            remote_token: None,
         };
-        checkout(Some(config_path.clone()), create_args)
-            .expect("domain creation should succeed");
+        checkout(Some(config_path.clone()), create_args).expect("domain creation should succeed");
 
         let default_args = DomainCheckoutArgs {
             flag_domain: Some(DEFAULT_DOMAIN_NAME.to_string()),
@@ -638,6 +1587,9 @@ mod tests {
             create: false,
             delete: false,
             force: false,
+            remote_addr: None,
+            remote_port: None,
+            remote_token: None,
         };
         checkout(Some(config_path.clone()), default_args)
             .expect("switching to default domain should succeed");
@@ -648,6 +1600,9 @@ mod tests {
             create: false,
             delete: false,
             force: false,
+            remote_addr: None,
+            remote_port: None,
+            remote_token: None,
         };
         checkout(Some(config_path.clone()), switch_args)
             .expect("switching to an existing domain should succeed");

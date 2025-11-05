@@ -12,6 +12,8 @@ struct ControlRequest {
     selectAggregate @7 :SelectAggregateRequest;
     createAggregate @8 :CreateAggregateRequest;
     setAggregateArchive @9 :SetAggregateArchiveRequest;
+    listSchemas @10 :ListSchemasRequest;
+    replaceSchemas @11 :ReplaceSchemasRequest;
   }
 }
 
@@ -27,6 +29,8 @@ struct ControlResponse {
     error @7 :ControlError;
     createAggregate @8 :CreateAggregateResponse;
     setAggregateArchive @9 :SetAggregateArchiveResponse;
+    listSchemas @10 :ListSchemasResponse;
+    replaceSchemas @11 :ReplaceSchemasResponse;
   }
 }
 
@@ -159,6 +163,23 @@ struct SetAggregateArchiveRequest {
 
 struct SetAggregateArchiveResponse {
   aggregateJson @0 :Text;
+}
+
+struct ListSchemasRequest {
+  token @0 :Text;
+}
+
+struct ListSchemasResponse {
+  schemasJson @0 :Text;
+}
+
+struct ReplaceSchemasRequest {
+  token @0 :Text;
+  schemasJson @1 :Text;
+}
+
+struct ReplaceSchemasResponse {
+  replaced @0 :UInt32;
 }
 
 struct AggregateSort {

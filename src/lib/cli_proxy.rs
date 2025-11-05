@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     io::Cursor,
     path::{Path, PathBuf},
@@ -34,6 +35,7 @@ use crate::{
     observability,
     plugin::PluginManager,
     replication_noise::{perform_server_handshake, read_encrypted_frame, write_encrypted_frame},
+    schema::AggregateSchema,
     service::{
         AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
         normalize_optional_comment,
@@ -69,6 +71,8 @@ enum ControlReply {
     SetAggregateArchive {
         aggregate_json: Option<String>,
     },
+    ListSchemas(String),
+    ReplaceSchemas(u32),
 }
 
 enum ControlCommand {
@@ -137,6 +141,13 @@ enum ControlCommand {
         archived: bool,
         comment: Option<String>,
     },
+    ListSchemas {
+        token: String,
+    },
+    ReplaceSchemas {
+        token: String,
+        schemas_json: String,
+    },
 }
 
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
@@ -179,6 +190,8 @@ fn control_command_name(command: &ControlCommand) -> &'static str {
         ControlCommand::SelectAggregate { .. } => "select_aggregate",
         ControlCommand::CreateAggregate { .. } => "create_aggregate",
         ControlCommand::SetAggregateArchive { .. } => "set_aggregate_archive",
+        ControlCommand::ListSchemas { .. } => "list_schemas",
+        ControlCommand::ReplaceSchemas { .. } => "replace_schemas",
     }
 }
 
@@ -638,6 +651,14 @@ where
                                     builder.set_aggregate_json("");
                                 }
                             }
+                            ControlReply::ListSchemas(json) => {
+                                let mut builder = payload.init_list_schemas();
+                                builder.set_schemas_json(&json);
+                            }
+                            ControlReply::ReplaceSchemas(replaced) => {
+                                let mut builder = payload.init_replace_schemas();
+                                builder.set_replaced(replaced);
+                            }
                         }
                     }
                     Err(err) => {
@@ -998,6 +1019,24 @@ fn parse_control_command(
                 comment,
             })
         }
+        payload::ListSchemas(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            Ok(ControlCommand::ListSchemas { token })
+        }
+        payload::ReplaceSchemas(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let schemas_json = read_control_text(req.get_schemas_json(), "schemas_json")?;
+            Ok(ControlCommand::ReplaceSchemas {
+                token,
+                schemas_json,
+            })
+        }
     }
 }
 
@@ -1278,6 +1317,43 @@ async fn execute_control_command(
             Ok(ControlReply::SetAggregateArchive {
                 aggregate_json: json,
             })
+        }
+        ControlCommand::ListSchemas { token } => {
+            let tokens = core.tokens();
+            let schemas = core.schemas();
+            let token_clone = token.clone();
+            let json = spawn_blocking(move || {
+                tokens
+                    .authorize_action(&token_clone, "schema.read", None)
+                    .and_then(|_| {
+                        let snapshot = schemas.snapshot();
+                        serde_json::to_string(&snapshot)
+                            .map_err(|err| EventError::Serialization(err.to_string()))
+                    })
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("list schemas task failed: {err}")))??;
+            Ok(ControlReply::ListSchemas(json))
+        }
+        ControlCommand::ReplaceSchemas {
+            token,
+            schemas_json,
+        } => {
+            let tokens = core.tokens();
+            let schemas = core.schemas();
+            let token_clone = token.clone();
+            let json = schemas_json.clone();
+            let replaced = spawn_blocking(move || -> std::result::Result<u32, EventError> {
+                tokens.authorize_action(&token_clone, "schema.write", None)?;
+                let map: BTreeMap<String, AggregateSchema> = serde_json::from_str(&json)
+                    .map_err(|err| EventError::Serialization(err.to_string()))?;
+                let count = map.len() as u32;
+                schemas.replace_all(map)?;
+                Ok(count)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("replace schemas task failed: {err}")))??;
+            Ok(ControlReply::ReplaceSchemas(replaced))
         }
     }
 }

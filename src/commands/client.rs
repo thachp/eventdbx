@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::Write,
     net::{IpAddr, SocketAddr, TcpStream},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -15,11 +16,13 @@ use eventdbx::replication_noise::{
 use eventdbx::{
     config::Config,
     control_capnp::{control_hello, control_hello_response, control_request, control_response},
+    schema::AggregateSchema,
     store::{AggregateState, EventRecord},
 };
-use serde_json::Value;
+use serde_json::{self, Value};
 
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
+const DEFAULT_PAGE_SIZE: usize = 256;
 
 #[derive(Clone)]
 pub struct ServerClient {
@@ -31,6 +34,12 @@ impl ServerClient {
         let connect_addr = normalize_connect_addr(&config.socket.bind_addr);
 
         Ok(Self { connect_addr })
+    }
+
+    pub fn with_addr<S: Into<String>>(connect_addr: S) -> Self {
+        Self {
+            connect_addr: connect_addr.into(),
+        }
     }
 
     pub fn create_aggregate(
@@ -168,6 +177,393 @@ impl ServerClient {
             patch,
             metadata,
             note,
+        )
+    }
+
+    pub fn get_aggregate(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Option<AggregateState>> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut get = payload_builder.init_get_aggregate();
+                get.set_token(token);
+                get.set_aggregate_type(aggregate_type);
+                get.set_aggregate_id(aggregate_id);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode get_aggregate response payload")?
+                {
+                    payload::GetAggregate(Ok(result)) => {
+                        if !result.get_found() {
+                            return Ok(None);
+                        }
+                        let json = read_text(result.get_aggregate_json(), "aggregate_json")?;
+                        if json.trim().is_empty() {
+                            Ok(None)
+                        } else {
+                            let state: AggregateState = serde_json::from_str(&json)
+                                .context("failed to parse get_aggregate response payload")?;
+                            Ok(Some(state))
+                        }
+                    }
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn list_aggregates(
+        &self,
+        token: &str,
+        filter: Option<&str>,
+        include_archived: bool,
+        archived_only: bool,
+    ) -> Result<Vec<AggregateState>> {
+        let mut skip = 0usize;
+        let mut results = Vec::new();
+        loop {
+            let page = self.list_aggregates_page(
+                token,
+                skip,
+                DEFAULT_PAGE_SIZE,
+                filter,
+                include_archived,
+                archived_only,
+            )?;
+            let count = page.len();
+            if count == 0 {
+                break;
+            }
+            skip += count;
+            results.extend(page);
+            if count < DEFAULT_PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(results)
+    }
+
+    fn list_aggregates_page(
+        &self,
+        token: &str,
+        skip: usize,
+        take: usize,
+        filter: Option<&str>,
+        include_archived: bool,
+        archived_only: bool,
+    ) -> Result<Vec<AggregateState>> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut list = payload_builder.init_list_aggregates();
+                list.set_token(token);
+                list.set_skip(skip as u64);
+                list.set_has_take(true);
+                list.set_take(take as u64);
+                list.set_include_archived(include_archived);
+                list.set_archived_only(archived_only);
+                if let Some(filter) = filter {
+                    list.set_has_filter(true);
+                    list.set_filter(filter);
+                } else {
+                    list.set_has_filter(false);
+                }
+                list.set_has_sort(false);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode list_aggregates response payload")?
+                {
+                    payload::ListAggregates(Ok(result)) => {
+                        let json = read_text(result.get_aggregates_json(), "aggregates_json")?;
+                        if json.trim().is_empty() {
+                            Ok(Vec::new())
+                        } else {
+                            let aggregates: Vec<AggregateState> = serde_json::from_str(&json)
+                                .context("failed to parse list_aggregates payload")?;
+                            Ok(aggregates)
+                        }
+                    }
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn list_events(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Vec<EventRecord>> {
+        let mut skip = 0usize;
+        let mut results = Vec::new();
+        loop {
+            let page = self.list_events_page(
+                token,
+                aggregate_type,
+                aggregate_id,
+                skip,
+                DEFAULT_PAGE_SIZE,
+            )?;
+            let count = page.len();
+            if count == 0 {
+                break;
+            }
+            skip += count;
+            results.extend(page);
+            if count < DEFAULT_PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(results)
+    }
+
+    fn list_events_page(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        skip: usize,
+        take: usize,
+    ) -> Result<Vec<EventRecord>> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut list = payload_builder.init_list_events();
+                list.set_token(token);
+                list.set_aggregate_type(aggregate_type);
+                list.set_aggregate_id(aggregate_id);
+                list.set_skip(skip as u64);
+                list.set_has_take(true);
+                list.set_take(take as u64);
+                list.set_has_filter(false);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode list_events response payload")?
+                {
+                    payload::ListEvents(Ok(result)) => {
+                        let json = read_text(result.get_events_json(), "events_json")?;
+                        if json.trim().is_empty() {
+                            Ok(Vec::new())
+                        } else {
+                            let events: Vec<EventRecord> = serde_json::from_str(&json)
+                                .context("failed to parse list_events payload")?;
+                            Ok(events)
+                        }
+                    }
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        if code == "aggregate_not_found" {
+                            return Ok(Vec::new());
+                        }
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn set_aggregate_archive(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        archived: bool,
+    ) -> Result<()> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut set = payload_builder.init_set_aggregate_archive();
+                set.set_token(token);
+                set.set_aggregate_type(aggregate_type);
+                set.set_aggregate_id(aggregate_id);
+                set.set_archived(archived);
+                set.set_has_comment(false);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode set_aggregate_archive response payload")?
+                {
+                    payload::SetAggregateArchive(Ok(_)) => Ok(()),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn list_schemas(&self, token: &str) -> Result<BTreeMap<String, AggregateSchema>> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut list = payload_builder.init_list_schemas();
+                list.set_token(token);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode list_schemas response payload")?
+                {
+                    payload::ListSchemas(Ok(result)) => {
+                        let json = read_text(result.get_schemas_json(), "schemas_json")?;
+                        if json.trim().is_empty() {
+                            Ok(BTreeMap::new())
+                        } else {
+                            let schemas = serde_json::from_str(&json)
+                                .context("failed to parse list_schemas payload")?;
+                            Ok(schemas)
+                        }
+                    }
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn replace_schemas(
+        &self,
+        token: &str,
+        schemas: &BTreeMap<String, AggregateSchema>,
+    ) -> Result<()> {
+        let payload_json = serde_json::to_string(schemas)
+            .context("failed to serialize schema snapshot for remote replace")?;
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut replace = payload_builder.init_replace_schemas();
+                replace.set_token(token);
+                replace.set_schemas_json(&payload_json);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode replace_schemas response payload")?
+                {
+                    payload::ReplaceSchemas(Ok(_)) => Ok(()),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
         )
     }
 }
