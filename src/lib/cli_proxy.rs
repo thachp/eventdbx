@@ -34,13 +34,16 @@ use crate::{
     filter::{self, FilterExpr},
     observability,
     plugin::PluginManager,
-    replication_noise::{perform_server_handshake, read_encrypted_frame, write_encrypted_frame},
+    replication_noise::{
+        MAX_NOISE_FRAME_PAYLOAD, perform_server_handshake, read_encrypted_frame,
+        write_encrypted_frame,
+    },
     schema::AggregateSchema,
     service::{
         AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
         normalize_optional_comment,
     },
-    store::{AggregateQueryScope, AggregateSort, AggregateSortField},
+    store::{AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState, EventRecord},
 };
 
 #[derive(Debug, Clone)]
@@ -51,12 +54,18 @@ pub struct CliCommandResult {
 }
 
 enum ControlReply {
-    ListAggregates(String),
+    ListAggregates {
+        aggregates: Vec<AggregateState>,
+    },
     GetAggregate {
         found: bool,
         aggregate_json: Option<String>,
     },
-    ListEvents(String),
+    ListEvents {
+        aggregate_type: String,
+        aggregate_id: String,
+        events: Vec<EventRecord>,
+    },
     AppendEvent {
         event_json: Option<String>,
     },
@@ -151,6 +160,7 @@ enum ControlCommand {
 }
 
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
+const CONTROL_RESPONSE_HEADROOM: usize = 4 * 1024;
 
 enum FirstMessage {
     Cli(capnp::message::Reader<OwnedSegments>),
@@ -591,9 +601,25 @@ where
                     Ok(reply) => {
                         let payload = response.reborrow().init_payload();
                         match reply {
-                            ControlReply::ListAggregates(json) => {
+                            ControlReply::ListAggregates { aggregates } => {
+                                let encoded = encode_json_list_response(
+                                    request_id,
+                                    &aggregates,
+                                    |payload, json| {
+                                        let mut builder = payload.init_list_aggregates();
+                                        builder.set_aggregates_json(json);
+                                    },
+                                )?;
+                                if encoded.included < aggregates.len() {
+                                    debug!(
+                                        target: "cli_proxy",
+                                        requested = aggregates.len(),
+                                        included = encoded.included,
+                                        "truncated list_aggregates response to satisfy Noise frame limit"
+                                    );
+                                }
                                 let mut builder = payload.init_list_aggregates();
-                                builder.set_aggregates_json(&json);
+                                builder.set_aggregates_json(&encoded.json);
                             }
                             ControlReply::GetAggregate {
                                 found,
@@ -607,9 +633,31 @@ where
                                     builder.set_aggregate_json("");
                                 }
                             }
-                            ControlReply::ListEvents(json) => {
+                            ControlReply::ListEvents {
+                                aggregate_type,
+                                aggregate_id,
+                                events,
+                            } => {
+                                let encoded = encode_json_list_response(
+                                    request_id,
+                                    &events,
+                                    |payload, json| {
+                                        let mut builder = payload.init_list_events();
+                                        builder.set_events_json(json);
+                                    },
+                                )?;
+                                if encoded.included < events.len() {
+                                    debug!(
+                                        target: "cli_proxy",
+                                        aggregate_type = %aggregate_type,
+                                        aggregate_id = %aggregate_id,
+                                        requested = events.len(),
+                                        included = encoded.included,
+                                        "truncated list_events response to satisfy Noise frame limit"
+                                    );
+                                }
                                 let mut builder = payload.init_list_events();
-                                builder.set_events_json(&json);
+                                builder.set_events_json(&encoded.json);
                             }
                             ControlReply::AppendEvent { event_json } => {
                                 let mut builder = payload.init_append_event();
@@ -1083,8 +1131,7 @@ async fn execute_control_command(
             .await
             .map_err(|err| EventError::Storage(format!("list aggregates task failed: {err}")))?;
             let aggregates = aggregates?;
-            let json = serde_json::to_string(&aggregates)?;
-            Ok(ControlReply::ListAggregates(json))
+            Ok(ControlReply::ListAggregates { aggregates })
         }
         ControlCommand::GetAggregate {
             token,
@@ -1128,8 +1175,11 @@ async fn execute_control_command(
             .await
             .map_err(|err| EventError::Storage(format!("list events task failed: {err}")))??;
 
-            let json = serde_json::to_string(&events)?;
-            Ok(ControlReply::ListEvents(json))
+            Ok(ControlReply::ListEvents {
+                aggregate_type,
+                aggregate_id,
+                events,
+            })
         }
         ControlCommand::AppendEvent {
             token,
@@ -1356,6 +1406,103 @@ async fn execute_control_command(
             Ok(ControlReply::ReplaceSchemas(replaced))
         }
     }
+}
+
+struct EncodedJsonList {
+    json: String,
+    included: usize,
+}
+
+fn encode_json_list_response<T, F>(
+    request_id: u64,
+    items: &[T],
+    mut set_payload: F,
+) -> std::result::Result<EncodedJsonList, EventError>
+where
+    T: serde::Serialize,
+    F: FnMut(control_response::payload::Builder<'_>, &str),
+{
+    let max_payload_len = MAX_NOISE_FRAME_PAYLOAD.saturating_sub(CONTROL_RESPONSE_HEADROOM);
+    if max_payload_len == 0 {
+        return Err(EventError::Serialization(
+            "control frame limit too small to encode responses".to_string(),
+        ));
+    }
+
+    if items.is_empty() {
+        let empty_json = "[]".to_string();
+        ensure_response_size_with_payload(
+            request_id,
+            &empty_json,
+            max_payload_len,
+            &mut set_payload,
+        )?;
+        return Ok(EncodedJsonList {
+            json: empty_json,
+            included: 0,
+        });
+    }
+
+    let mut low = 1usize;
+    let mut high = items.len();
+    let mut best: Option<(usize, String)> = None;
+
+    while low <= high {
+        let mid = (low + high) / 2;
+        let json = serde_json::to_string(&items[..mid])?;
+        match ensure_response_size_with_payload(
+            request_id,
+            &json,
+            max_payload_len,
+            &mut set_payload,
+        ) {
+            Ok(()) => {
+                best = Some((mid, json));
+                low = mid + 1;
+            }
+            Err(err) => {
+                if mid == 1 {
+                    return Err(err);
+                }
+                high = mid - 1;
+            }
+        }
+    }
+
+    match best {
+        Some((included, json)) => Ok(EncodedJsonList { json, included }),
+        None => Ok(EncodedJsonList {
+            json: "[]".to_string(),
+            included: 0,
+        }),
+    }
+}
+
+fn ensure_response_size_with_payload<F>(
+    request_id: u64,
+    json: &str,
+    max_payload_len: usize,
+    set_payload: &mut F,
+) -> std::result::Result<(), EventError>
+where
+    F: FnMut(control_response::payload::Builder<'_>, &str),
+{
+    let mut message = capnp::message::Builder::new_default();
+    {
+        let mut response = message.init_root::<control_response::Builder>();
+        response.set_id(request_id);
+        let payload = response.reborrow().init_payload();
+        set_payload(payload, json);
+    }
+    let words = write_message_to_words(&message);
+    let byte_len = words.len() * 8;
+    if byte_len > max_payload_len {
+        return Err(EventError::Serialization(format!(
+            "control response exceeds frame limit ({} bytes)",
+            MAX_NOISE_FRAME_PAYLOAD
+        )));
+    }
+    Ok(())
 }
 
 async fn handle_append_event_command(

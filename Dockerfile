@@ -1,6 +1,38 @@
 # syntax=docker/dockerfile:1.7
 
-FROM debian:bookworm-slim
+ARG BUILDER_IMAGE=rustlang/rust:nightly
+ARG RUNTIME_IMAGE=debian:testing-slim
+ARG RUNTIME_PACKAGES="ca-certificates curl tzdata libstdc++6 libsnappy1v5 liblz4-1 libzstd1 zlib1g libbz2-1.0 xz-utils"
+ARG BUILD_PACKAGES="build-essential clang cmake pkg-config libsnappy-dev liblz4-dev libzstd-dev libbz2-dev zlib1g-dev capnproto"
+
+FROM ${BUILDER_IMAGE} as builder
+
+ARG BUILD_PACKAGES
+ARG RUNTIME_PACKAGES
+
+WORKDIR /app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    $BUILD_PACKAGES \
+    $RUNTIME_PACKAGES \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY proto ./proto
+
+RUN cargo fetch --locked
+
+COPY src ./src
+
+RUN cargo build --release --locked
+
+RUN find target/release -maxdepth 1 -type f -executable -print -exec strip {} \; || true
+
+ARG RUNTIME_IMAGE=debian:testing-slim
+FROM ${RUNTIME_IMAGE}
+
+ARG RUNTIME_PACKAGES
 
 LABEL org.opencontainers.image.source="https://github.com/thachp/eventdbx" \
       org.opencontainers.image.description="EventDBX server and CLI" \
@@ -15,27 +47,11 @@ ENV HOME=${EVENTDBX_DATA_DIR}
 #   EVENTDBX_AUTH_PUBLIC_KEY – matching Ed25519 public key distributed to verifiers
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    tzdata \
-    libstdc++6 \
-    libsnappy1v5 \
-    liblz4-1 \
-    libzstd1 \
-    zlib1g \
-    libbz2-1.0 \
-    xz-utils \
+ && apt-get install -y --no-install-recommends $RUNTIME_PACKAGES \
  && rm -rf /var/lib/apt/lists/*
 
-# Install the published EventDBX binary, then upgrade to the latest available release.
-RUN set -eux; \
-    curl --proto '=https' --tlsv1.2 -LsSf \
-      https://github.com/thachp/eventdbx/releases/download/v3.10.3/eventdbx-installer.sh \
-      | sh; \
-    install -Dm755 "$HOME/.cargo/bin/dbx" /usr/local/bin/dbx; \
-    dbx upgrade; \
-    rm -rf "$HOME/.cargo"
+COPY --from=builder --chmod=755 /app/target/release/dbx /usr/local/bin/dbx
+
 RUN useradd --system --home "${EVENTDBX_DATA_DIR}" --shell /usr/sbin/nologin eventdbx \
  && mkdir -p "${EVENTDBX_DATA_DIR}" "${EVENTDBX_DATA_DIR}/.eventdbx/logs" /var/log/eventdbx \
  && chown -R eventdbx:eventdbx "${EVENTDBX_DATA_DIR}" /var/log/eventdbx

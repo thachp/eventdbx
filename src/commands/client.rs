@@ -261,9 +261,6 @@ impl ServerClient {
             }
             skip += count;
             results.extend(page);
-            if count < DEFAULT_PAGE_SIZE {
-                break;
-            }
         }
         Ok(results)
     }
@@ -357,9 +354,6 @@ impl ServerClient {
             }
             skip += count;
             results.extend(page);
-            if count < DEFAULT_PAGE_SIZE {
-                break;
-            }
         }
         Ok(results)
     }
