@@ -2,6 +2,11 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    thread,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -20,6 +25,7 @@ use eventdbx::{
     config::{Config, DEFAULT_DOMAIN_NAME, DEFAULT_SOCKET_PORT, load_or_default},
     encryption::{self, Encryptor},
     error::EventError,
+    merkle::{compute_merkle_root, empty_root},
     schema::{AggregateSchema, SchemaManager},
     store::{AggregateQueryScope, AggregateState, EventStore},
     validation::{ensure_aggregate_id, ensure_snake_case},
@@ -143,6 +149,10 @@ pub struct DomainSyncArgs {
     /// Aggregate identifier to limit the operation to (requires --aggregate)
     #[arg(long = "id", value_name = "AGGREGATE_ID", requires = "aggregate")]
     pub aggregate_id: Option<String>,
+
+    /// Number of aggregates to process concurrently (defaults to CPU count)
+    #[arg(long = "concurrency", value_name = "THREADS", value_parser = clap::value_parser!(usize))]
+    pub concurrency: Option<usize>,
 }
 
 pub fn push(config_path: Option<PathBuf>, command: PushCommand) -> Result<()> {
@@ -378,191 +388,146 @@ fn push_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
 
     ensure_domain_stopped(&domain_config)?;
 
-    let store = EventStore::open_read_only(
-        domain_config.event_store_path(),
-        domain_config.encryption_key()?,
-    )?;
+    let event_store_path = domain_config.event_store_path();
+    if !event_store_path.is_dir() || !event_store_path.join("CURRENT").is_file() {
+        println!(
+            "Local domain '{}' has no event data to push (event store not initialised at {}).",
+            domain,
+            event_store_path.display()
+        );
+        println!(
+            "Run `dbx start` once with domain '{}' active to initialise the store before pushing.",
+            domain
+        );
+        return Ok(());
+    }
 
-    let aggregates = collect_local_aggregates(
-        &store,
+    let store = Arc::new(EventStore::open_read_only(
+        event_store_path,
+        domain_config.encryption_key()?,
+    )?);
+
+    let aggregate_list = collect_local_aggregates(
+        store.as_ref(),
         args.aggregate.as_deref(),
         args.aggregate_id.as_deref(),
     )?;
-    if aggregates.is_empty() {
+    if aggregate_list.is_empty() {
         println!("No aggregates matched the specified criteria.");
         return Ok(());
     }
 
+    let total_aggregates = aggregate_list.len();
+    let aggregates = Arc::new(aggregate_list);
+
     let remote = load_remote_endpoint_for_domain(&config, &domain)?;
-    let client = ServerClient::with_addr(remote.connect_addr.clone());
+    let concurrency = resolve_concurrency(args.concurrency, total_aggregates);
 
-    let total_aggregates = aggregates.len();
-    let mut events_pushed = 0usize;
-    let mut aggregates_updated = 0usize;
-    let mut archive_updates = 0usize;
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let failure_flag = Arc::new(AtomicBool::new(false));
+    let output_lock = Arc::new(Mutex::new(()));
+    let events_counter = Arc::new(AtomicUsize::new(0));
+    let aggregates_counter = Arc::new(AtomicUsize::new(0));
+    let archive_counter = Arc::new(AtomicUsize::new(0));
 
-    for (index, aggregate) in aggregates.iter().enumerate() {
-        let aggregate_type = &aggregate.aggregate_type;
-        let aggregate_id = &aggregate.aggregate_id;
-        println!(
-            "Pushing aggregate {}/{}: {}::{}",
-            index + 1,
-            total_aggregates,
-            aggregate_type,
-            aggregate_id
-        );
-        let local_events = store
-            .list_events(aggregate_type, aggregate_id)
-            .with_context(|| {
-                format!(
-                    "failed to load local events for aggregate '{}::{}'",
-                    aggregate_type, aggregate_id
-                )
-            })?;
-        if local_events.is_empty() {
-            println!("  no local events; skipping");
-            continue;
-        }
+    let mut handles = Vec::with_capacity(concurrency);
+    for _ in 0..concurrency {
+        let store = Arc::clone(&store);
+        let aggregates = Arc::clone(&aggregates);
+        let token = remote.token.clone();
+        let connect_addr = remote.connect_addr.clone();
+        let next_index = Arc::clone(&next_index);
+        let failure_flag = Arc::clone(&failure_flag);
+        let output_lock = Arc::clone(&output_lock);
+        let events_counter = Arc::clone(&events_counter);
+        let aggregates_counter = Arc::clone(&aggregates_counter);
+        let archive_counter = Arc::clone(&archive_counter);
+        let total = total_aggregates;
 
-        let remote_state = client
-            .get_aggregate(&remote.token, aggregate_type, aggregate_id)
-            .with_context(|| {
-                format!(
-                    "failed to fetch remote aggregate '{}::{}'",
-                    aggregate_type, aggregate_id
-                )
-            })?;
-
-        let remote_events = if remote_state.is_some() {
-            client
-                .list_events(&remote.token, aggregate_type, aggregate_id)
-                .with_context(|| {
-                    format!(
-                        "failed to fetch remote events for '{}::{}'",
-                        aggregate_type, aggregate_id
-                    )
-                })?
-        } else {
-            Vec::new()
-        };
-
-        let total_events = local_events.len();
-        let new_events_total = total_events.saturating_sub(remote_events.len());
-
-        if remote_events.len() > local_events.len() {
-            bail!(
-                "remote aggregate '{}::{}' has {} event(s) but local copy has {}; refusing to overwrite",
-                aggregate_type,
-                aggregate_id,
-                remote_events.len(),
-                local_events.len()
-            );
-        }
-
-        for (index, remote_event) in remote_events.iter().enumerate() {
-            if remote_event.hash != local_events[index].hash {
-                bail!(
-                    "remote aggregate '{}::{}' diverged at version {}",
-                    aggregate_type,
-                    aggregate_id,
-                    index + 1
-                );
-            }
-        }
-
-        let mut remote_has_aggregate = remote_state.is_some();
-        let mut remote_version = remote_events.len();
-        let mut wrote_events = 0usize;
-
-        for (offset, event) in local_events.iter().skip(remote_events.len()).enumerate() {
-            if !remote_has_aggregate {
-                client
-                    .create_aggregate(
-                        &remote.token,
-                        aggregate_type,
-                        aggregate_id,
-                        &event.event_type,
-                        &event.payload,
-                        event.extensions.as_ref(),
-                        event.metadata.note.as_deref(),
-                    )
-                    .with_context(|| {
-                        format!(
-                            "failed to create remote aggregate '{}::{}'",
-                            aggregate_type, aggregate_id
-                        )
-                    })?;
-                remote_has_aggregate = true;
-                println!(
-                    "  created aggregate; pushing {} event(s)",
-                    new_events_total.max(1)
-                );
-            } else {
-                client
-                    .append_event(
-                        &remote.token,
-                        aggregate_type,
-                        aggregate_id,
-                        &event.event_type,
-                        Some(&event.payload),
-                        event.extensions.as_ref(),
-                        event.metadata.note.as_deref(),
-                    )
-                    .with_context(|| {
-                        format!(
-                            "failed to append event version {} for '{}::{}' on remote endpoint",
-                            remote_version + 1,
-                            aggregate_type,
-                            aggregate_id
-                        )
-                    })?;
-            }
-            remote_version += 1;
-            wrote_events += 1;
-            println!(
-                "    pushed event {}/{} (version {})",
-                offset + 1,
-                new_events_total,
-                event.version
-            );
-        }
-
-        let remote_archived = remote_state
-            .as_ref()
-            .map(|state| state.archived)
-            .unwrap_or(false);
-        if aggregate.archived != remote_archived {
-            client
-                .set_aggregate_archive(
-                    &remote.token,
-                    aggregate_type,
-                    aggregate_id,
-                    aggregate.archived,
-                )
-                .with_context(|| {
-                    format!(
-                        "failed to update archive status for '{}::{}' on remote endpoint",
-                        aggregate_type, aggregate_id
-                    )
-                })?;
-            archive_updates += 1;
-            println!(
-                "  updated archive status to {}",
-                if aggregate.archived {
-                    "archived"
-                } else {
-                    "active"
+        handles.push(thread::spawn(move || -> Result<()> {
+            let client = ServerClient::with_addr(connect_addr);
+            loop {
+                if failure_flag.load(Ordering::Relaxed) {
+                    break;
                 }
-            );
-        }
-
-        if wrote_events > 0 || aggregate.archived != remote_archived {
-            aggregates_updated += 1;
-        } else {
-            println!("  aggregate already synchronised");
-        }
-        events_pushed += wrote_events;
+                let idx = next_index.fetch_add(1, Ordering::Relaxed);
+                if idx >= aggregates.len() {
+                    break;
+                }
+                let aggregate = &aggregates[idx];
+                let mut logs = Vec::new();
+                match process_push_aggregate(
+                    &mut logs,
+                    store.as_ref(),
+                    &client,
+                    token.as_str(),
+                    aggregate,
+                    idx,
+                    total,
+                ) {
+                    Ok(stats) => {
+                        {
+                            let _guard = output_lock.lock().unwrap();
+                            for line in logs {
+                                println!("{}", line);
+                            }
+                        }
+                        if stats.events_pushed > 0 {
+                            events_counter.fetch_add(stats.events_pushed, Ordering::Relaxed);
+                        }
+                        if stats.aggregate_updated {
+                            aggregates_counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if stats.archive_updated {
+                            archive_counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Err(err) => {
+                        {
+                            let _guard = output_lock.lock().unwrap();
+                            for line in logs {
+                                println!("{}", line);
+                            }
+                        }
+                        failure_flag.store(true, Ordering::Relaxed);
+                        return Err(err);
+                    }
+                }
+            }
+            Ok(())
+        }));
     }
+
+    let mut first_err: Option<anyhow::Error> = None;
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
+            }
+            Err(panic) => {
+                let message = if let Some(msg) = panic.downcast_ref::<&str>() {
+                    msg.to_string()
+                } else if let Some(msg) = panic.downcast_ref::<String>() {
+                    msg.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                if first_err.is_none() {
+                    first_err = Some(anyhow!("push worker panicked: {}", message));
+                }
+            }
+        }
+    }
+    if let Some(err) = first_err {
+        return Err(err);
+    }
+
+    let events_pushed = events_counter.load(Ordering::Relaxed);
+    let aggregates_updated = aggregates_counter.load(Ordering::Relaxed);
+    let archive_updates = archive_counter.load(Ordering::Relaxed);
 
     if aggregates_updated == 0 && archive_updates == 0 && events_pushed == 0 {
         println!(
@@ -589,6 +554,203 @@ fn push_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
     Ok(())
 }
 
+struct PushAggregateStats {
+    events_pushed: usize,
+    aggregate_updated: bool,
+    archive_updated: bool,
+}
+
+fn process_push_aggregate(
+    logs: &mut Vec<String>,
+    store: &EventStore,
+    client: &ServerClient,
+    token: &str,
+    aggregate: &AggregateState,
+    index: usize,
+    total: usize,
+) -> Result<PushAggregateStats> {
+    let aggregate_type = &aggregate.aggregate_type;
+    let aggregate_id = &aggregate.aggregate_id;
+
+    logs.push(format!(
+        "Pushing aggregate {}/{}: {}::{}",
+        index + 1,
+        total,
+        aggregate_type,
+        aggregate_id
+    ));
+
+    let remote_state = client
+        .get_aggregate(token, aggregate_type, aggregate_id)
+        .with_context(|| {
+            format!(
+                "failed to fetch remote aggregate '{}::{}'",
+                aggregate_type, aggregate_id
+            )
+        })?;
+
+    let local_version = aggregate.version;
+    if local_version == 0 {
+        logs.push("  no local events; skipping".to_string());
+        return Ok(PushAggregateStats {
+            events_pushed: 0,
+            aggregate_updated: false,
+            archive_updated: false,
+        });
+    }
+
+    let remote_version = remote_state
+        .as_ref()
+        .map(|state| state.version)
+        .unwrap_or(0);
+    if remote_version > local_version {
+        bail!(
+            "remote aggregate '{}::{}' has {} event(s) but local copy has {}; refusing to overwrite",
+            aggregate_type,
+            aggregate_id,
+            remote_version,
+            local_version
+        );
+    }
+
+    if remote_version > 0 {
+        let local_root = store
+            .merkle_root_at(aggregate_type, aggregate_id, remote_version)
+            .with_context(|| {
+                format!(
+                    "failed to compute local merkle root at version {} for '{}::{}'",
+                    remote_version, aggregate_type, aggregate_id
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow!(
+                    "local aggregate metadata missing for '{}::{}' when computing merkle root",
+                    aggregate_type,
+                    aggregate_id
+                )
+            })?;
+        let remote_root = remote_state
+            .as_ref()
+            .map(|state| state.merkle_root.clone())
+            .unwrap_or_else(|| empty_root());
+        if local_root != remote_root {
+            bail!(
+                "remote aggregate '{}::{}' diverged at version {}",
+                aggregate_type,
+                aggregate_id,
+                remote_version
+            );
+        }
+    }
+
+    let new_events_total = (local_version - remote_version) as usize;
+    let mut new_events = Vec::with_capacity(new_events_total);
+    for version in (remote_version + 1)..=local_version {
+        let event = store
+            .event_by_version(aggregate_type, aggregate_id, version)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "local event version {} missing for '{}::{}'",
+                    version,
+                    aggregate_type,
+                    aggregate_id
+                )
+            })?;
+        new_events.push(event);
+    }
+
+    let mut remote_has_aggregate = remote_state.is_some();
+    let mut wrote_events = 0usize;
+
+    if !new_events.is_empty() && !remote_has_aggregate {
+        logs.push(format!(
+            "  created aggregate; pushing {} event(s)",
+            new_events.len()
+        ));
+    }
+
+    for (offset, event) in new_events.iter().enumerate() {
+        if !remote_has_aggregate {
+            client
+                .create_aggregate(
+                    token,
+                    aggregate_type,
+                    aggregate_id,
+                    &event.event_type,
+                    &event.payload,
+                    event.extensions.as_ref(),
+                    event.metadata.note.as_deref(),
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to create remote aggregate '{}::{}'",
+                        aggregate_type, aggregate_id
+                    )
+                })?;
+            remote_has_aggregate = true;
+        } else {
+            client
+                .append_event(
+                    token,
+                    aggregate_type,
+                    aggregate_id,
+                    &event.event_type,
+                    Some(&event.payload),
+                    event.extensions.as_ref(),
+                    event.metadata.note.as_deref(),
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to append event version {} for '{}::{}' on remote endpoint",
+                        event.version, aggregate_type, aggregate_id
+                    )
+                })?;
+        }
+        wrote_events += 1;
+        logs.push(format!(
+            "    pushed event {}/{} (version {})",
+            offset + 1,
+            new_events_total,
+            event.version
+        ));
+    }
+
+    let remote_archived = remote_state
+        .as_ref()
+        .map(|state| state.archived)
+        .unwrap_or(false);
+    let mut archive_updated = false;
+    if aggregate.archived != remote_archived {
+        client
+            .set_aggregate_archive(token, aggregate_type, aggregate_id, aggregate.archived)
+            .with_context(|| {
+                format!(
+                    "failed to update archive status for '{}::{}' on remote endpoint",
+                    aggregate_type, aggregate_id
+                )
+            })?;
+        archive_updated = true;
+        logs.push(format!(
+            "  updated archive status to {}",
+            if aggregate.archived {
+                "archived"
+            } else {
+                "active"
+            }
+        ));
+    }
+
+    if wrote_events == 0 && !archive_updated {
+        logs.push("  aggregate already synchronised".to_string());
+    }
+
+    Ok(PushAggregateStats {
+        events_pushed: wrote_events,
+        aggregate_updated: wrote_events > 0 || archive_updated,
+        archive_updated,
+    })
+}
+
 fn pull_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()> {
     let domain = normalize_domain_name(&args.domain)?;
     let (config, _) = load_or_default(config_path)?;
@@ -597,13 +759,13 @@ fn pull_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
     let remote = load_remote_endpoint_for_domain(&config, &domain)?;
     let client = ServerClient::with_addr(remote.connect_addr.clone());
 
-    let remote_aggregates = collect_remote_aggregates(
+    let remote_aggregates_list = collect_remote_aggregates(
         &client,
         &remote.token,
         args.aggregate.as_deref(),
         args.aggregate_id.as_deref(),
     )?;
-    if remote_aggregates.is_empty() {
+    if remote_aggregates_list.is_empty() {
         println!("Remote domain has no aggregates matching the specified criteria.");
         return Ok(());
     }
@@ -613,130 +775,121 @@ fn pull_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
 
     ensure_domain_stopped(&domain_config)?;
 
-    let store = EventStore::open(
+    let store = Arc::new(EventStore::open(
         domain_config.event_store_path(),
         domain_config.encryption_key()?,
         domain_config.snowflake_worker_id,
-    )?;
+    )?);
 
-    let total_remote = remote_aggregates.len();
-    let mut events_imported = 0usize;
-    let mut aggregates_modified = 0usize;
-    let mut archive_updates = 0usize;
+    let total_remote = remote_aggregates_list.len();
+    let remote_aggregates = Arc::new(remote_aggregates_list);
+    let concurrency = resolve_concurrency(args.concurrency, total_remote);
 
-    for (index, remote_state) in remote_aggregates.into_iter().enumerate() {
-        let aggregate_type = &remote_state.aggregate_type;
-        let aggregate_id = &remote_state.aggregate_id;
-        println!(
-            "Pulling aggregate {}/{}: {}::{}",
-            index + 1,
-            total_remote,
-            aggregate_type,
-            aggregate_id
-        );
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let failure_flag = Arc::new(AtomicBool::new(false));
+    let output_lock = Arc::new(Mutex::new(()));
+    let events_counter = Arc::new(AtomicUsize::new(0));
+    let aggregates_counter = Arc::new(AtomicUsize::new(0));
+    let archive_counter = Arc::new(AtomicUsize::new(0));
 
-        let remote_events = client
-            .list_events(&remote.token, aggregate_type, aggregate_id)
-            .with_context(|| {
-                format!(
-                    "failed to fetch remote events for '{}::{}'",
-                    aggregate_type, aggregate_id
-                )
-            })?;
+    let mut handles = Vec::with_capacity(concurrency);
+    for _ in 0..concurrency {
+        let store = Arc::clone(&store);
+        let remote_aggregates = Arc::clone(&remote_aggregates);
+        let token = remote.token.clone();
+        let connect_addr = remote.connect_addr.clone();
+        let next_index = Arc::clone(&next_index);
+        let failure_flag = Arc::clone(&failure_flag);
+        let output_lock = Arc::clone(&output_lock);
+        let events_counter = Arc::clone(&events_counter);
+        let aggregates_counter = Arc::clone(&aggregates_counter);
+        let archive_counter = Arc::clone(&archive_counter);
+        let total = total_remote;
 
-        let local_events = match store.list_events(aggregate_type, aggregate_id) {
-            Ok(events) => events,
-            Err(EventError::AggregateNotFound) => Vec::new(),
-            Err(err) => return Err(err.into()),
-        };
-
-        let total_remote_events = remote_events.len();
-        let new_events_total = total_remote_events.saturating_sub(local_events.len());
-
-        if local_events.len() > remote_events.len() {
-            bail!(
-                "local aggregate '{}::{}' is ahead of remote ({} events vs {}); refusing to overwrite",
-                aggregate_type,
-                aggregate_id,
-                local_events.len(),
-                remote_events.len()
-            );
-        }
-
-        for (index, local_event) in local_events.iter().enumerate() {
-            if remote_events[index].hash != local_event.hash {
-                bail!(
-                    "local aggregate '{}::{}' diverged from remote at version {}",
-                    aggregate_type,
-                    aggregate_id,
-                    index + 1
-                );
+        handles.push(thread::spawn(move || -> Result<()> {
+            let client = ServerClient::with_addr(connect_addr);
+            loop {
+                if failure_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                let idx = next_index.fetch_add(1, Ordering::Relaxed);
+                if idx >= remote_aggregates.len() {
+                    break;
+                }
+                let remote_state = &remote_aggregates[idx];
+                let mut logs = Vec::new();
+                match process_pull_aggregate(
+                    &mut logs,
+                    store.as_ref(),
+                    &client,
+                    token.as_str(),
+                    remote_state,
+                    idx,
+                    total,
+                ) {
+                    Ok(stats) => {
+                        {
+                            let _guard = output_lock.lock().unwrap();
+                            for line in logs {
+                                println!("{}", line);
+                            }
+                        }
+                        if stats.events_imported > 0 {
+                            events_counter.fetch_add(stats.events_imported, Ordering::Relaxed);
+                        }
+                        if stats.aggregate_modified {
+                            aggregates_counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if stats.archive_updated {
+                            archive_counter.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Err(err) => {
+                        {
+                            let _guard = output_lock.lock().unwrap();
+                            for line in logs {
+                                println!("{}", line);
+                            }
+                        }
+                        failure_flag.store(true, Ordering::Relaxed);
+                        return Err(err);
+                    }
+                }
             }
-        }
+            Ok(())
+        }));
+    }
 
-        let mut imported = 0usize;
-        for (offset, event) in remote_events.iter().skip(local_events.len()).enumerate() {
-            store
-                .append_imported_event(event.clone())
-                .with_context(|| {
-                    format!(
-                        "failed to import remote event version {} for '{}::{}'",
-                        event.version, aggregate_type, aggregate_id
-                    )
-                })?;
-            imported += 1;
-            println!(
-                "    imported event {}/{} (version {})",
-                offset + 1,
-                new_events_total,
-                event.version
-            );
-        }
-
-        if remote_state.archived {
-            let local_archived = match store.get_aggregate_state(aggregate_type, aggregate_id) {
-                Ok(state) => state.archived,
-                Err(EventError::AggregateNotFound) => false,
-                Err(err) => return Err(err.into()),
-            };
-            if !local_archived {
-                store
-                    .set_archive(aggregate_type, aggregate_id, true, None)
-                    .with_context(|| {
-                        format!(
-                            "failed to archive aggregate '{}::{}' locally",
-                            aggregate_type, aggregate_id
-                        )
-                    })?;
-                archive_updates += 1;
-                println!("  updated archive status to archived");
+    let mut first_err: Option<anyhow::Error> = None;
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                if first_err.is_none() {
+                    first_err = Some(err);
+                }
             }
-        } else if let Ok(state) = store.get_aggregate_state(aggregate_type, aggregate_id) {
-            if state.archived {
-                store
-                    .set_archive(aggregate_type, aggregate_id, false, None)
-                    .with_context(|| {
-                        format!(
-                            "failed to unarchive aggregate '{}::{}' locally",
-                            aggregate_type, aggregate_id
-                        )
-                    })?;
-                archive_updates += 1;
-                println!("  updated archive status to active");
-            }
-        }
-
-        if imported > 0 {
-            aggregates_modified += 1;
-        } else if !remote_state.archived {
-            if let Ok(state) = store.get_aggregate_state(aggregate_type, aggregate_id) {
-                if !state.archived {
-                    println!("  aggregate already synchronised");
+            Err(panic) => {
+                let message = if let Some(msg) = panic.downcast_ref::<&str>() {
+                    msg.to_string()
+                } else if let Some(msg) = panic.downcast_ref::<String>() {
+                    msg.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                if first_err.is_none() {
+                    first_err = Some(anyhow!("pull worker panicked: {}", message));
                 }
             }
         }
-        events_imported += imported;
     }
+    if let Some(err) = first_err {
+        return Err(err);
+    }
+
+    let events_imported = events_counter.load(Ordering::Relaxed);
+    let aggregates_modified = aggregates_counter.load(Ordering::Relaxed);
+    let archive_updates = archive_counter.load(Ordering::Relaxed);
 
     if aggregates_modified == 0 && archive_updates == 0 {
         println!(
@@ -761,6 +914,182 @@ fn pull_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
         }
     }
     Ok(())
+}
+
+struct PullAggregateStats {
+    events_imported: usize,
+    aggregate_modified: bool,
+    archive_updated: bool,
+}
+
+fn process_pull_aggregate(
+    logs: &mut Vec<String>,
+    store: &EventStore,
+    client: &ServerClient,
+    token: &str,
+    remote_state: &AggregateState,
+    index: usize,
+    total: usize,
+) -> Result<PullAggregateStats> {
+    let aggregate_type = remote_state.aggregate_type.as_str();
+    let aggregate_id = remote_state.aggregate_id.as_str();
+
+    logs.push(format!(
+        "Pulling aggregate {}/{}: {}::{}",
+        index + 1,
+        total,
+        aggregate_type,
+        aggregate_id
+    ));
+
+    let remote_version = remote_state.version;
+    let remote_root = remote_state.merkle_root.clone();
+
+    let local_version = match store.aggregate_version(aggregate_type, aggregate_id) {
+        Ok(Some(version)) => version,
+        Ok(None) => 0,
+        Err(err) => return Err(err.into()),
+    };
+
+    if local_version > remote_version {
+        bail!(
+            "local aggregate '{}::{}' is ahead of remote ({} events vs {}); refusing to overwrite",
+            aggregate_type,
+            aggregate_id,
+            local_version,
+            remote_version
+        );
+    }
+
+    let mut combined_hashes = if local_version > 0 {
+        store
+            .event_hashes(aggregate_type, aggregate_id)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "local aggregate metadata missing for '{}::{}'",
+                    aggregate_type,
+                    aggregate_id
+                )
+            })?
+    } else {
+        Vec::new()
+    };
+
+    if combined_hashes.len() != local_version as usize {
+        bail!(
+            "local aggregate '{}::{}' has inconsistent metadata (expected {} hashes, found {})",
+            aggregate_type,
+            aggregate_id,
+            local_version,
+            combined_hashes.len()
+        );
+    }
+
+    let new_events_total = (remote_version - local_version) as usize;
+    let new_events = if new_events_total > 0 {
+        client
+            .list_events_since(token, aggregate_type, aggregate_id, local_version)
+            .with_context(|| {
+                format!(
+                    "failed to fetch remote events for '{}::{}' starting at version {}",
+                    aggregate_type,
+                    aggregate_id,
+                    local_version + 1
+                )
+            })?
+    } else {
+        Vec::new()
+    };
+
+    if new_events.len() != new_events_total {
+        bail!(
+            "remote aggregate '{}::{}' returned {} new event(s) but expected {} to reach version {}",
+            aggregate_type,
+            aggregate_id,
+            new_events.len(),
+            new_events_total,
+            remote_version
+        );
+    }
+
+    combined_hashes.extend(new_events.iter().map(|event| event.hash.clone()));
+    let expected_root = compute_merkle_root(&combined_hashes);
+    if expected_root != remote_root {
+        bail!(
+            "remote aggregate '{}::{}' diverged (expected merkle root {}, found {})",
+            aggregate_type,
+            aggregate_id,
+            expected_root,
+            remote_root
+        );
+    }
+
+    let mut imported = 0usize;
+    for (offset, event) in new_events.iter().enumerate() {
+        store
+            .append_imported_event(event.clone())
+            .with_context(|| {
+                format!(
+                    "failed to import remote event version {} for '{}::{}'",
+                    event.version, aggregate_type, aggregate_id
+                )
+            })?;
+        imported += 1;
+        logs.push(format!(
+            "    imported event {}/{} (version {})",
+            offset + 1,
+            new_events_total,
+            event.version
+        ));
+    }
+
+    let mut archive_updated = false;
+    if remote_state.archived {
+        let local_archived = match store.get_aggregate_state(aggregate_type, aggregate_id) {
+            Ok(state) => state.archived,
+            Err(EventError::AggregateNotFound) => false,
+            Err(err) => return Err(err.into()),
+        };
+        if !local_archived {
+            store
+                .set_archive(aggregate_type, aggregate_id, true, None)
+                .with_context(|| {
+                    format!(
+                        "failed to archive aggregate '{}::{}' locally",
+                        aggregate_type, aggregate_id
+                    )
+                })?;
+            archive_updated = true;
+            logs.push("  updated archive status to archived".to_string());
+        }
+    } else if let Ok(state) = store.get_aggregate_state(aggregate_type, aggregate_id) {
+        if state.archived {
+            store
+                .set_archive(aggregate_type, aggregate_id, false, None)
+                .with_context(|| {
+                    format!(
+                        "failed to unarchive aggregate '{}::{}' locally",
+                        aggregate_type, aggregate_id
+                    )
+                })?;
+            archive_updated = true;
+            logs.push("  updated archive status to active".to_string());
+        }
+    }
+
+    if imported == 0 && !remote_state.archived {
+        if let Ok(state) = store.get_aggregate_state(aggregate_type, aggregate_id) {
+            if !state.archived {
+                logs.push("  aggregate already synchronised".to_string());
+            }
+        }
+    }
+
+    Ok(PullAggregateStats {
+        events_imported: imported,
+        aggregate_modified: imported > 0,
+        archive_updated,
+    })
 }
 
 fn push_schema(config_path: Option<PathBuf>, args: SchemaSyncArgs) -> Result<()> {
@@ -953,6 +1282,15 @@ fn collect_remote_aggregates(
         (None, Some(_)) => bail!("--id requires --aggregate"),
         (None, None) => client.list_aggregates(token, None, true, false),
     }
+}
+
+fn resolve_concurrency(requested: Option<usize>, total_tasks: usize) -> usize {
+    let default = thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    let desired = requested.unwrap_or(default).max(1);
+    let limit = total_tasks.max(1);
+    desired.min(limit)
 }
 
 fn build_aggregate_filter_expr(aggregate: &str) -> Result<String> {

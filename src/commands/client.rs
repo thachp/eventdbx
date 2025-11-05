@@ -332,6 +332,7 @@ impl ServerClient {
         )
     }
 
+    #[allow(dead_code)]
     pub fn list_events(
         &self,
         token: &str,
@@ -339,6 +340,33 @@ impl ServerClient {
         aggregate_id: &str,
     ) -> Result<Vec<EventRecord>> {
         let mut skip = 0usize;
+        let mut results = Vec::new();
+        loop {
+            let page = self.list_events_page(
+                token,
+                aggregate_type,
+                aggregate_id,
+                skip,
+                DEFAULT_PAGE_SIZE,
+            )?;
+            let count = page.len();
+            if count == 0 {
+                break;
+            }
+            skip += count;
+            results.extend(page);
+        }
+        Ok(results)
+    }
+
+    pub fn list_events_since(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        start_version: u64,
+    ) -> Result<Vec<EventRecord>> {
+        let mut skip = start_version as usize;
         let mut results = Vec::new();
         loop {
             let page = self.list_events_page(
