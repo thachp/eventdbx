@@ -1,8 +1,9 @@
 [package]
 name = "eventdbx"
 description = "A memory-safe, event-sourced, nosql, write-side database system."
-version = "3.10.8"
+version = "3.10.9"
 edition = "2024"
+homepage = "https://github.com/thachp/eventdbx"
 repository = "https://github.com/thachp/eventdbx"
 keywords = [
   "immutable",
@@ -109,6 +110,3 @@ windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_
 [profile.dist]
 inherits = "release"
 lto = "thin"
-
-[package]
-homepage = "https://github.com/thachp/eventdbx"
