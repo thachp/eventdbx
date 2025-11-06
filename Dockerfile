@@ -29,7 +29,7 @@ RUN cargo build --release --locked
 
 RUN find target/release -maxdepth 1 -type f -executable -print -exec strip {} \; || true
 
-ARG RUNTIME_IMAGE=debian:stable-20251103-slim
+ARG RUNTIME_IMAGE=debian:stable-slim
 FROM ${RUNTIME_IMAGE}
 
 ARG RUNTIME_PACKAGES
