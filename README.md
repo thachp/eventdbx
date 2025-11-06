@@ -17,8 +17,8 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 1. **Start the server**
 
    ```bash
-   npx dbx start --foreground
-   #Optional: npm install eventdbx -g, if you need global install
+   npm install eventdbx -g
+   dbx start --foreground
    ```
 
    - Omit `--foreground` to daemonise the process.
