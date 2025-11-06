@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG BUILDER_IMAGE=rustlang/rust:nightly
-ARG RUNTIME_IMAGE=debian:testing-slim
+ARG RUNTIME_IMAGE=debian:stable-slim
 ARG RUNTIME_PACKAGES="ca-certificates curl tzdata libstdc++6 libsnappy1v5 liblz4-1 libzstd1 zlib1g libbz2-1.0 xz-utils"
 ARG BUILD_PACKAGES="build-essential clang cmake pkg-config libsnappy-dev liblz4-dev libzstd-dev libbz2-dev zlib1g-dev capnproto"
 
@@ -29,7 +29,7 @@ RUN cargo build --release --locked
 
 RUN find target/release -maxdepth 1 -type f -executable -print -exec strip {} \; || true
 
-ARG RUNTIME_IMAGE=debian:testing-slim
+ARG RUNTIME_IMAGE=debian:stable-slim
 FROM ${RUNTIME_IMAGE}
 
 ARG RUNTIME_PACKAGES
