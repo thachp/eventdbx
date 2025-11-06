@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use anyhow::{Context, Result};
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use tempfile::tempdir;
 
 struct HelpCase {
@@ -246,7 +246,7 @@ fn cli_help_regressions() -> Result<()> {
 
 fn run_help(path: &[&str]) -> Result<String> {
     let temp_log = tempdir()?;
-    let mut cmd = Command::cargo_bin("dbx")?;
+    let mut cmd = cargo_bin_cmd!("dbx");
     cmd.args(path);
     cmd.arg("--help");
     cmd.env("EVENTDBX_LOG_DIR", temp_log.path());

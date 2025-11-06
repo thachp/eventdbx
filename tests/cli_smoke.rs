@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use assert_cmd::Command;
+use assert_cmd::{cargo::cargo_bin_cmd, Command};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -74,7 +74,7 @@ impl CliTest {
     }
 
     fn command(&self) -> Result<Command> {
-        let mut cmd = Command::cargo_bin("dbx")?;
+        let mut cmd = cargo_bin_cmd!("dbx");
         cmd.env("HOME", &self.home);
         cmd.env("EVENTDBX_LOG_DIR", &self.log_dir);
         cmd.env("DBX_NO_UPGRADE_CHECK", "1");
