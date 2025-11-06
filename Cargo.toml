@@ -109,3 +109,6 @@ windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[package]
+homepage = "https://github.com/thachp/eventdbx"
