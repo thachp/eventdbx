@@ -10,47 +10,22 @@ The companion plugin framework turns those events into durable jobs and delivers
 
 ## Getting Started
 
-Follow the steps below to spin up EventDBX locally. The commands assume you installed the CLI globally; if you're contributing to the project, clone the repository and run them from the repo root instead.
+Follow the steps below to spin up EventDBX locally. You can run every command with `npx` (no global install required); if you're contributing to the project, clone the repository and work from the repo root instead.
 
 The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the primary command is now `dbx`.
 
-1. **Install the CLI**
+1. **Start the server**
 
    ```bash
-   # Install prebuilt binaries via shell script
-   curl --proto '=https' --tlsv1.2 -LsSf https://github.com/thachp/eventdbx/releases/download/v3.6.5/eventdbx-installer.sh | sh
-   ```
-
-   ```bash
-   # Install prebuilt binaries via powershell script
-   powershell -ExecutionPolicy Bypass -c "irm https://github.com/thachp/eventdbx/releases/download/v3.6.5/eventdbx-installer.ps1 | iex"
-   ```
-
-2. **Start the server**
-
-   ```bash
-   dbx start --foreground
+   npx dbx start --foreground
+   #Optional: npm install eventdbx -g, if you need global install
    ```
 
    - Omit `--foreground` to daemonise the process.
    - Use `--data-dir <path>` to override the default `$HOME/.eventdbx` directory.
+   - Restriction (schema enforcement) defaults to `default`; switch to `--restrict=off` for permissive prototyping or `--restrict=strict` to require declared schemas on every write.
 
-- Restriction (schema enforcement) defaults to `default`; switch to `--restrict=off` for permissive prototyping or `--restrict=strict` to require declared schemas on every write.
-
-- Public REST/GraphQL/gRPC surfaces now live in the [dbx_plugins workspace](https://github.com/thachp/dbx_plugins). Install the `rest`, `graphql`, or `grpc` plugin alongside the daemon to expose those endpoints. The built-in server only retains the admin API and control socket.
-
-  ```bash
-  # install the restful api plugin
-  dbx plugin install rest
-
-  # config the api to not receive events stream
-  dbx plugin config process rest --emit-events false
-
-  # start the rest endpoint, default port is 8080
-  dbx plugin start rest
-  ```
-
-3. **Switch domains (optional)**
+2. **Switch domains (optional)**
 
    ```bash
    dbx checkout -d herds
@@ -58,13 +33,14 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 
    - New installs default to the `default` domain, which stores data directly under the configured `data_dir`.
    - `dbx checkout -d <domain>` (or `dbx checkout <domain>`) changes the active domain and creates isolated storage in `<data_dir>/domains/<domain>` so you can group aggregates and plugins per bounded context.
+   - This is useful when you're working on two different projects and need to switch between domain contexts.
    - Domain names are case-insensitive, must begin with a letter or number, and may include dashes or underscores. Re-running the command for the current domain is a no-op.
 
-4. **Define a schema (recommended when running in restricted mode)**
+3. **Define a schema (recommended when running in restricted mode)**
 
    ```bash
-   dbx schema create patient \
-     --events patient_added,patient_updated \
+   dbx schema create person \
+     --events person_created,person_updated \
      --snapshot-threshold 100
    ```
 
@@ -110,26 +86,28 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    - `column_types` declare data types, validation formats, and rule blocks per field. Rules can enforce length, numeric ranges, regexes, or cross-field matches.
    - `events.<event>.fields` restrict the properties an event may set; leaving the list empty keeps the event permissive.
    - `field_locks` and `hidden_fields` control which fields can be updated or returned in aggregate detail calls.
+   - `locked: true` freezes the schema to prevent further event writes until it is unlocked.
 
-- `locked: true` freezes the schema to prevent further event writes until it is unlocked.
+4. **Issue a token for CLI access**
 
-5. **Issue a token for CLI access**
+   ```bash
+   dbx token generate --group admin --user jane --expiration 3600
+   ```
 
-```bash
-dbx token generate --group admin --user jane --expiration 3600
-```
+5. **Append an event**
 
-6. **Append an event**
    - When the server is running the CLI proxies writes through the control socket automatically. Pass a token with `--token` or set `EVENTDBX_TOKEN` to reuse your own credentials; otherwise the CLI mints a short-lived token for the call.
+
      ```bash
-     dbx aggregate apply person p-002 patient-added \
+     dbx aggregate apply person p-002 person_updated \
        --field name="Jane Doe" \
        --field status=active
      ```
+
    - If the server is stopped, the same CLI command writes to the local RocksDB store directly.
    - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort created_at:desc --take 5` or drill into the payload of a specific event via `dbx events <snowflake_id> --json`.
 
-7. **Replicate a domain (optional)**
+6. **Replicate a domain (optional)**
 
    ```bash
    dbx checkout -d default --remote 10.0.0.42:6363 --token "$(cat ~/.eventdbx/replica.token)"
@@ -179,11 +157,11 @@ docker run \
   thachp/eventdbx:tagname
 ```
 
-###
+### Connect with TypeScript
 
 ```typescript
-// Connect with EventDBX using libraries in your language of choice.
-// Only Javascript / Typescript is supported. Ie, pnpm install eventdbxjs
+// Use the JavaScript/TypeScript client (install via `pnpm add eventdbxjs`).
+// Other languages can interact through plugins or HTTP bridges.
 
 import { createClient } from 'eventdbxjs';
 
@@ -381,11 +359,11 @@ curl -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
 
 Key routes:
 
-| Method & Path        | Description                                                                                                  |
-| -------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `GET /admin/tokens`  | List issued tokens; `POST` issues a new token, `/revoke` and `/refresh` manage lifecycle.                    |
-| `GET /admin/schemas` | Fetch declared schemas or append new ones with `POST`.                                                       |
-| `GET /admin/plugins` | Inspect plugin configuration and toggle instances with `/enable` or `/disable`.                              |
+| Method & Path        | Description                                                                               |
+| -------------------- | ----------------------------------------------------------------------------------------- |
+| `GET /admin/tokens`  | List issued tokens; `POST` issues a new token, `/revoke` and `/refresh` manage lifecycle. |
+| `GET /admin/schemas` | Fetch declared schemas or append new ones with `POST`.                                    |
+| `GET /admin/plugins` | Inspect plugin configuration and toggle instances with `/enable` or `/disable`.           |
 
 Disable access any time with `dbx config --admin-enabled false` or issue a new root token and revoke the old one via `dbx token revoke`.
 
