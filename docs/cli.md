@@ -6,7 +6,7 @@ nav_id: cli
 
 # CLI Reference
 
-The `dbx` binary manages servers, schemas, tokens, plugins, and backups. Every command accepts `--config <path>` when you need to point at a non-default configuration file. The CLI programs the *write* side of EventDBX and orchestrates the plugin pipeline that pushes jobs to read-side services.
+The `dbx` binary manages servers, schemas, tokens, plugins, and backups. Every command accepts `--config <path>` when you need to point at a non-default configuration file. The CLI programs the _write_ side of EventDBX and orchestrates the plugin pipeline that pushes jobs to read-side services.
 
 ## Global options
 
@@ -83,9 +83,46 @@ Staging (`--stage`) records events to `~/.eventdbx/staged_events.json` until you
 - `dbx queue clear`
 - `dbx queue retry [--event-id <job-id>]`
 
-EventDBX’s core store owns the *write* side of CQRS; plugins serve the *read* side by consuming jobs from the queue and projecting them into downstream systems (search, analytics, notification hubs, and more). Jobs are persisted in RocksDB so delivery survives restarts, and each plugin can request only the data it needs—event documents, materialised state, schemas, or combinations thereof.
+EventDBX’s core store owns the _write_ side of CQRS; plugins serve the _read_ side by consuming jobs from the queue and projecting them into downstream systems (search, analytics, notification hubs, and more). Jobs are persisted in RocksDB so delivery survives restarts, and each plugin can request only the data it needs—event documents, materialised state, schemas, or combinations thereof.
 
 See the [Plugin architecture]({{ '/plugins/' | relative_url }}) guide for deeper details, payload modes, and extension patterns.
+
+## Replication
+
+EventDBX can replicate an entire domain (or selected aggregates) between two nodes. Remote settings are stored per domain in `remote.json` under the domain’s data directory, encrypted when a DEK is configured.
+
+1. Point the active domain at a remote control socket and token:
+
+   ```bash
+   dbx checkout -d example --remote replica.external:6363 --token "<remote token>"
+   ```
+
+   Re-run the command with `--remote` or `--token` to rotate either value. Use `--port` when the socket listens on a non-default port.
+
+2. Push schemas before pushing data so the destination validates events the same way:
+
+   ```bash
+   dbx push schema example
+   ```
+
+3. Synchronise domain events, optionally limiting the scope:
+
+   ```bash
+   dbx push example --concurrency 8
+   dbx push example --aggregate invoice
+   dbx push example --aggregate ledger --id ledger-001
+   ```
+
+   The command aborts if the remote already has more events for any aggregate, preventing unintended history rewrites.
+
+4. Pull remote changes back into the local domain once the remote has advanced:
+
+   ```bash
+   dbx pull example
+   dbx pull example --aggregate ledger
+   ```
+
+   Every pull verifies aggregate version counts and Merkle roots before importing events. Add `--concurrency <threads>` to tune throughput on large domains.
 
 ## Maintenance
 
