@@ -23,7 +23,13 @@ use crate::commands::{
 };
 
 #[derive(Parser)]
-#[command(author, version, about = "EventDBX server CLI")]
+#[command(
+    author,
+    version,
+    about = "EventDBX server CLI",
+    long_about = None,
+    disable_version_flag = true
+)]
 struct Cli {
     /// Path to the configuration file. Defaults to ~/.eventdbx/config.toml
     #[arg(long)]
@@ -102,6 +108,9 @@ enum Commands {
     InternalPluginWorker(PluginWorkerArgs),
     #[command(external_subcommand)]
     External(Vec<String>),
+    /// Print version information
+    #[command(name = "--version", hide = true)]
+    Version,
 }
 
 #[tokio::main]
@@ -151,6 +160,9 @@ async fn main() -> Result<()> {
                     anyhow::bail!("unknown command");
                 }
             }
+        }
+        Commands::Version => {
+            println!("eventdbx version {}", env!("CARGO_PKG_VERSION"));
         }
     }
 

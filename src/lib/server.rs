@@ -10,10 +10,10 @@ use axum::{
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{net::TcpListener, sync::RwLock as AsyncRwLock};
 use tower_http::trace::TraceLayer;
-use tracing::{info, warn};
+use tracing::info;
 
 use super::{
-    admin, cli_proxy,
+    cli_proxy,
     config::Config,
     error::{EventError, Result},
     observability,
@@ -25,12 +25,7 @@ use super::{
 
 static CLI_PROXY_ADDR: OnceLock<Arc<AsyncRwLock<String>>> = OnceLock::new();
 
-#[derive(Clone)]
-pub(crate) struct AppState {
-    core: CoreContext,
-    _config_path: Arc<PathBuf>,
-}
-
+#[allow(dead_code)]
 pub(crate) async fn run_cli_command(args: Vec<String>) -> Result<cli_proxy::CliCommandResult> {
     let addr_lock = CLI_PROXY_ADDR
         .get()
@@ -67,6 +62,7 @@ pub(crate) async fn run_cli_command(args: Vec<String>) -> Result<cli_proxy::CliC
     Ok(result)
 }
 
+#[allow(dead_code)]
 fn normalize_cli_connect_addr(bind_addr: &str) -> String {
     if let Ok(addr) = bind_addr.parse::<SocketAddr>() {
         match addr.ip() {
@@ -79,22 +75,13 @@ fn normalize_cli_connect_addr(bind_addr: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) async fn run_cli_json<T>(args: Vec<String>) -> Result<T>
 where
     T: DeserializeOwned,
 {
     let result = run_cli_command(args).await?;
     serde_json::from_str(&result.stdout).map_err(|err| EventError::Serialization(err.to_string()))
-}
-
-impl AppState {
-    pub(crate) fn tokens(&self) -> Arc<TokenManager> {
-        self.core.tokens()
-    }
-
-    pub(crate) fn schemas(&self) -> Arc<SchemaManager> {
-        self.core.schemas()
-    }
 }
 
 pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
@@ -129,11 +116,6 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         config_snapshot.page_limit,
     );
 
-    let state = AppState {
-        core: core.clone(),
-        _config_path: Arc::clone(&config_path),
-    };
-
     let cli_bind_addr = config_snapshot.socket.bind_addr.clone();
     let addr_store =
         Arc::clone(CLI_PROXY_ADDR.get_or_init(|| Arc::new(AsyncRwLock::new(String::new()))));
@@ -151,44 +133,9 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     .await
     .map_err(|err| EventError::Config(format!("failed to start CLI proxy: {err}")))?;
 
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(observability::metrics_handler));
-
-    let admin_config = config_snapshot.admin.clone();
-    let mut admin_handle = None;
-    if admin_config.enabled {
-        let admin_router = admin::build_router(state.clone(), admin_config.clone());
-        if let Some(port) = admin_config.port {
-            let bind_addr = format!("{}:{}", admin_config.bind_addr, port);
-            let admin_addr: SocketAddr = bind_addr.parse().map_err(|err| {
-                EventError::Config(format!(
-                    "invalid admin bind address {}:{} - {}",
-                    admin_config.bind_addr, port, err
-                ))
-            })?;
-            let listener = TcpListener::bind(admin_addr).await.map_err(|err| {
-                EventError::Config(format!(
-                    "failed to bind admin API listener on {}: {}",
-                    admin_addr, err
-                ))
-            })?;
-            info!("Starting admin API server on {}", admin_addr);
-            let admin_app = admin_router.clone().layer(TraceLayer::new_for_http());
-            admin_handle = Some(tokio::spawn(async move {
-                if let Err(err) = axum::serve(listener, admin_app)
-                    .with_graceful_shutdown(shutdown_signal())
-                    .await
-                {
-                    warn!("admin API server failed: {}", err);
-                } else {
-                    info!("admin API server stopped");
-                }
-            }));
-        } else {
-            app = app.merge(admin_router);
-        }
-    }
 
     let app = app
         .layer(from_fn(observability::track_http_metrics))
@@ -206,9 +153,6 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         .await
         .map_err(|err| EventError::Storage(err.to_string()));
 
-    if let Some(handle) = admin_handle {
-        handle.abort();
-    }
     cli_proxy_handle.abort();
 
     result?;
@@ -225,6 +169,7 @@ struct HealthResponse<'a> {
     status: &'a str,
 }
 
+#[allow(dead_code)]
 pub(crate) fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     let value = headers.get("authorization")?;
     let value = value.to_str().ok()?;

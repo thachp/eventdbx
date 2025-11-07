@@ -34,18 +34,7 @@ EventDBX keeps every change as an immutable event so you can replay history, aud
 
    The daemon owns the write-side RocksDB store and exposes a Cap'n Proto control socket on `6363`. Read surfaces (REST, GraphQL, gRPC, search, etc.) run as plugins in the [dbx_plugins workspace](https://github.com/thachp/dbx_plugins); deploy the ones you need alongside the server.
 
-3. **Configure the Admin API (optional)**
-
-```bash
-dbx config \
-  --admin-enabled true \
-  --admin-bind 127.0.0.1 \
-  --admin-port 7070
-```
-
-Requests to `/admin/...` must include an `Authorization: Bearer <token>` header with a token that has wildcard access (see `~/.eventdbx/cli.token` or mint one via `dbx token generate --group ops --user admin --action '*.*' --resource '*'`). Rotate credentials regularly by issuing a replacement token and revoking the old one.
-
-4. **Append your first event**
+3. **Append your first event**
 
    ```bash
    dbx aggregate create patient p-001 \
@@ -61,4 +50,4 @@ Requests to `/admin/...` must include an `Authorization: Bearer <token>` header 
 - [Getting started]({{ '/getting-started/' | relative_url }}) walks through schema setup, tokens, and common workflows.
 - [CLI reference]({{ '/cli/' | relative_url }}) details every subcommand with practical examples.
 - [Plugin architecture]({{ '/plugins/' | relative_url }}) explains how the job queue works and how to build new read-side connectors.
-- [API reference]({{ '/apis/' | relative_url }}) covers REST, GraphQL, gRPC, and the Admin API routes.
+- [API reference]({{ '/apis/' | relative_url }}) covers REST, GraphQL, and gRPC routes exposed by companion plugins.

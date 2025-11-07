@@ -31,9 +31,9 @@ Key flags:
 
 ## Configuration
 
-- `dbx config [--port <u16>] [--data-dir <path>] [--cache-threshold <usize>] [--dek <base64>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>] [--snapshot-threshold <u64>] [--clear-snapshot-threshold] [--admin-enabled <true|false>] [--admin-bind <addr>] [--admin-port <u16>]`
+- `dbx config [--port <u16>] [--data-dir <path>] [--cache-threshold <usize>] [--dek <base64>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>] [--snapshot-threshold <u64>] [--clear-snapshot-threshold]`
 
-Run without flags to print the current configuration. The first invocation must supply `--dek` (32 bytes of base64). Admin endpoints reuse JWT bearer tokens; enable them with `--admin-enabled true` and call them with a token that carries wildcard privileges (for example, the bootstrap token at `~/.eventdbx/cli.token` or a dedicated token minted via `dbx token generate --group ops --user admin --action '*.*' --resource '*'`).
+Run without flags to print the current configuration. The first invocation must supply `--dek` (32 bytes of base64).
 
 ## Tokens
 
@@ -146,18 +146,3 @@ EventDBX can replicate an entire domain (or selected aggregates) between two nod
 - `dbx upgrade list [--limit <n>] [--json]`
 
 `dbx upgrade` now caches every downloaded release in `~/.eventdbx/versions/<target>/<tag>/`, allowing you to install multiple versions side-by-side and activate them later with `dbx upgrade use`. The `installed` subcommand lists cached versions, and `list` marks installed entries with `[installed]` and the active version with `[active]`. Use `--no-switch` to keep the current binary in place after downloading, and `--print-only` to preview the actions without making changes.
-
-## Shortcuts for the Admin API
-
-Once you enable the Admin API, authenticate with a root bearer token (for example, the bootstrap token at `~/.eventdbx/cli.token`) and script administrative changes with tools like `curl`:
-
-```bash
-curl -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
-  http://127.0.0.1:7171/admin/tokens
-curl -X POST -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
-  -H "Content-Type: application/json" \
-  -d '{"aggregate":"patient","events":["patient-added","patient-updated"]}' \
-  http://127.0.0.1:7171/admin/schemas
-```
-
-Refer back to the [API reference]({{ '/apis/' | relative_url }}) for endpoint details and payload formats.
