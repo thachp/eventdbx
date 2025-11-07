@@ -1,7 +1,7 @@
 [package]
 name = "eventdbx"
 description = "A memory-safe, event-sourced, nosql, write-side database system."
-version = "3.11.10"
+version = "3.11.12"
 edition = "2024"
 homepage = "https://github.com/thachp/eventdbx"
 repository = "https://github.com/thachp/eventdbx"
