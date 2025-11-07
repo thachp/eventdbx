@@ -1,0 +1,51 @@
+{
+  "name": "eventdbx",
+  "version": "3.12.0",
+  "description": "A memory-safe, event-sourced, nosql, write-side database system.",
+  "license": "MIT",
+  "homepage": "https://github.com/thachp/eventdbx#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thachp/eventdbx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thachp/eventdbx/issues"
+  },
+  "author": "Patrick Thach <thachp@gmail.com>",
+  "keywords": [
+    "eventdbx",
+    "event-sourcing",
+    "database",
+    "cqrs",
+    "cli"
+  ],
+  "bin": {
+    "dbx": "./bin/dbx.js",
+    "eventdbx": "./bin/dbx.js"
+  },
+  "scripts": {
+    "postinstall": "node ./scripts/install.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/install.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "preferGlobal": true,
+  "publishConfig": {
+    "access": "public"
+  }
+}

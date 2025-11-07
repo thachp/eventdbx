@@ -1,13 +1,13 @@
+use serde_json::to_string;
 use tracing::{Level, debug, error, info, trace, warn};
 
 use crate::{
     config::LogPluginConfig,
     error::{EventError, Result},
-    schema::AggregateSchema,
-    store::{AggregateState, EventRecord},
+    store::EventRecord,
 };
 
-use super::Plugin;
+use super::{Plugin, PluginDelivery};
 
 pub(super) struct LogPlugin {
     config: LogPluginConfig,
@@ -69,15 +69,36 @@ impl Plugin for LogPlugin {
         "log"
     }
 
-    fn notify_event(
-        &self,
-        record: &EventRecord,
-        _state: &AggregateState,
-        _schema: Option<&AggregateSchema>,
-    ) -> Result<()> {
+    fn notify_event(&self, delivery: PluginDelivery<'_>) -> Result<()> {
         let level = self.level()?;
-        let message = self.format_message(record);
-        self.log(level, message);
+        let mut emitted = false;
+        if let Some(record) = delivery.record {
+            let message = self.format_message(record);
+            self.log(level, message);
+            emitted = true;
+        }
+        if let Some(state) = delivery.state {
+            let message = format!(
+                "aggregate={} id={} state={}",
+                state.aggregate_type,
+                state.aggregate_id,
+                to_string(&state.state).unwrap_or_default()
+            );
+            self.log(level, message);
+            emitted = true;
+        }
+        if let Some(schema) = delivery.schema {
+            let message = format!(
+                "schema={} payload={}",
+                schema.aggregate,
+                to_string(schema).unwrap_or_default()
+            );
+            self.log(level, message);
+            emitted = true;
+        }
+        if !emitted {
+            self.log(level, "plugin job contained no data".to_string());
+        }
         Ok(())
     }
 }

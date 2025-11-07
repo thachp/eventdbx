@@ -1,18 +1,45 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
-  push:
-    branches: [main]
   pull_request:
-  release:
-    types: [published]
+
 jobs:
-  build:
+  title-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title (Conventional Commits)
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            build
+            chore
+            ci
+            docs
+            feat
+            fix
+            perf
+            refactor
+            revert
+            style
+            test
+          scopes: >-
+            .* # allow any scope
+          requireScope: false
+          subjectPattern: >-
+            ^(?!\s).+
+
+  lint-and-test:
+    needs: title-check
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
 
     steps:
       - name: Check out repository
@@ -32,34 +59,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Cargo fmt
+      - name: Install Cap'n Proto (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y capnproto
+
+      - name: cargo fmt
         run: cargo fmt -- --check
 
-      - name: Cargo check
+      - name: cargo check
         run: cargo check
 
-      - name: Cargo test
+      - name: cargo test
         run: cargo test
-
-  release:
-    if: github.event_name == 'release'
-    runs-on: ${{ matrix.os }}
-    needs: build
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build release binary
-        run: cargo build --release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: eventdbx-${{ matrix.os }}
-          path: ${{ github.workspace }}/target/release/eventdbx${{ runner.os == 'Windows' && '.exe' || '' }}

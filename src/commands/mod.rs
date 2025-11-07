@@ -1,6 +1,15 @@
 pub mod aggregate;
+pub mod cli_token;
+pub mod client;
 pub mod config;
+pub mod domain;
+pub mod events;
+pub mod list;
 pub mod plugin;
+pub mod queue;
 pub mod schema;
 pub mod start;
+pub mod system;
 pub mod token;
+pub mod upgrade;
+pub mod watch;

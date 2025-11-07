@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, EventError>;

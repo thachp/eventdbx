@@ -4,39 +4,175 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chrono::{DateTime, Duration, Utc};
+use rand_core::{OsRng, RngCore};
+use ring::{
+    rand::SystemRandom,
+    signature::{ED25519_PUBLIC_KEY_LEN, Ed25519KeyPair, KeyPair},
+};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
-use super::error::{EventError, Result};
+use super::{
+    encryption::Encryptor,
+    error::{EventError, Result},
+    restrict::{self, RestrictMode},
+    token::JwtManagerConfig,
+};
 
 pub const DEFAULT_PORT: u16 = 7070;
-pub const DEFAULT_MEMORY_THRESHOLD: usize = 10_000;
+pub const DEFAULT_SOCKET_PORT: u16 = 6363;
+pub const DEFAULT_CACHE_THRESHOLD: usize = 10_000;
+pub const DEFAULT_DOMAIN_NAME: &str = "default";
+
+const ENV_DATA_ENCRYPTION_KEY: &str = "EVENTDBX_DATA_ENCRYPTION_KEY";
+const ENV_AUTH_PRIVATE_KEY: &str = "EVENTDBX_AUTH_PRIVATE_KEY";
+const ENV_AUTH_PUBLIC_KEY: &str = "EVENTDBX_AUTH_PUBLIC_KEY";
+const ENV_AUTH_KEY_ID: &str = "EVENTDBX_AUTH_KEY_ID";
+fn secret_from_env(vars: &[&str]) -> Option<String> {
+    for key in vars {
+        if let Ok(value) = env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn normalize_non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default = "default_jwt_issuer")]
+    pub issuer: String,
+    #[serde(default = "default_jwt_audience")]
+    pub audience: String,
+    #[serde(default)]
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    pub key_id: Option<String>,
+    #[serde(default = "default_jwt_ttl_secs")]
+    pub default_ttl_secs: u64,
+    #[serde(default = "default_jwt_clock_skew_secs")]
+    pub clock_skew_secs: u64,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        let (private_key, public_key) = generate_jwt_keypair()
+            .unwrap_or_else(|err| panic!("failed to generate default jwt key pair: {err}"));
+        Self {
+            issuer: default_jwt_issuer(),
+            audience: default_jwt_audience(),
+            private_key: Some(private_key),
+            public_key: Some(public_key),
+            key_id: Some(format!("key-{}", Utc::now().format("%Y%m%d%H%M%S"))),
+            default_ttl_secs: default_jwt_ttl_secs(),
+            clock_skew_secs: default_jwt_clock_skew_secs(),
+        }
+    }
+}
+
+impl AuthConfig {
+    pub fn resolved_private_key(&self) -> Option<String> {
+        secret_from_env(&[ENV_AUTH_PRIVATE_KEY]).or_else(|| {
+            self.private_key
+                .as_ref()
+                .and_then(|value| normalize_non_empty(value))
+        })
+    }
+
+    pub fn resolved_public_key(&self) -> Option<String> {
+        secret_from_env(&[ENV_AUTH_PUBLIC_KEY]).or_else(|| {
+            self.public_key
+                .as_ref()
+                .and_then(|value| normalize_non_empty(value))
+        })
+    }
+
+    pub fn resolved_key_id(&self) -> Option<String> {
+        secret_from_env(&[ENV_AUTH_KEY_ID]).or_else(|| {
+            self.key_id
+                .as_ref()
+                .and_then(|value| normalize_non_empty(value))
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PluginQueueConfig {
+    #[serde(default = "default_plugin_queue_prune")]
+    pub prune: PluginQueuePruneConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginQueuePruneConfig {
+    #[serde(default = "default_queue_prune_done_ttl_secs")]
+    pub done_ttl_secs: u64,
+    #[serde(default = "default_queue_prune_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default)]
+    pub max_done_jobs: Option<usize>,
+}
+
+impl Default for PluginQueuePruneConfig {
+    fn default() -> Self {
+        Self {
+            done_ttl_secs: default_queue_prune_done_ttl_secs(),
+            interval_secs: default_queue_prune_interval_secs(),
+            max_done_jobs: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub port: u16,
     pub data_dir: PathBuf,
-    pub master_key: Option<String>,
-    pub memory_threshold: usize,
+    #[serde(default = "default_domain")]
+    pub domain: String,
+    #[serde(default = "default_cache_threshold", alias = "memory_threshold")]
+    pub cache_threshold: usize,
+    #[serde(default)]
+    pub snapshot_threshold: Option<u64>,
     pub data_encryption_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(
         default = "default_restrict",
-        deserialize_with = "deserialize_restrict"
+        deserialize_with = "deserialize_restrict_mode"
     )]
-    pub restrict: bool,
-    #[serde(default)]
+    pub restrict: RestrictMode,
+    #[serde(default, skip_serializing)]
     pub plugins: Vec<PluginDefinition>,
-    #[serde(default)]
-    pub column_types: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default = "default_list_page_size")]
     pub list_page_size: usize,
     #[serde(default = "default_page_limit")]
     pub page_limit: usize,
     #[serde(default = "default_plugin_max_attempts")]
     pub plugin_max_attempts: u32,
+    #[serde(default)]
+    pub plugin_queue: PluginQueueConfig,
+    #[serde(default)]
+    pub socket: SocketConfig,
+    #[serde(default = "default_verbose_responses")]
+    pub verbose_responses: bool,
+    #[serde(default)]
+    pub auth: AuthConfig,
+    #[serde(default = "default_snowflake_worker_id")]
+    pub snowflake_worker_id: u16,
 }
 
 impl Default for Config {
@@ -45,17 +181,22 @@ impl Default for Config {
         Self {
             port: DEFAULT_PORT,
             data_dir: default_data_dir(),
-            master_key: None,
-            memory_threshold: DEFAULT_MEMORY_THRESHOLD,
-            data_encryption_key: None,
+            domain: default_domain(),
+            cache_threshold: default_cache_threshold(),
+            snapshot_threshold: None,
+            data_encryption_key: Some(generate_data_encryption_key()),
             created_at: now,
             updated_at: now,
             restrict: default_restrict(),
             plugins: Vec::new(),
-            column_types: BTreeMap::new(),
             list_page_size: default_list_page_size(),
             page_limit: default_page_limit(),
             plugin_max_attempts: default_plugin_max_attempts(),
+            plugin_queue: PluginQueueConfig::default(),
+            socket: SocketConfig::default(),
+            verbose_responses: default_verbose_responses(),
+            auth: AuthConfig::default(),
+            snowflake_worker_id: default_snowflake_worker_id(),
         }
     }
 }
@@ -64,18 +205,20 @@ impl Default for Config {
 pub struct ConfigUpdate {
     pub port: Option<u16>,
     pub data_dir: Option<PathBuf>,
-    pub master_key: Option<String>,
-    pub memory_threshold: Option<usize>,
+    pub cache_threshold: Option<usize>,
+    pub snapshot_threshold: Option<Option<u64>>,
     pub data_encryption_key: Option<String>,
-    pub restrict: Option<bool>,
+    pub restrict: Option<RestrictMode>,
     pub list_page_size: Option<usize>,
     pub page_limit: Option<usize>,
+    pub verbose_responses: Option<bool>,
     pub plugin_max_attempts: Option<u32>,
+    pub socket: Option<SocketConfigUpdate>,
+    pub snowflake_worker_id: Option<u16>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
-    let mut path = env::current_dir().map_err(|err| EventError::Config(err.to_string()))?;
-    path.push(".eventdbx");
+    let mut path = default_config_root()?;
     path.push("config.toml");
     Ok(path)
 }
@@ -92,18 +235,51 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
 
     if config_path.exists() {
         let contents = fs::read_to_string(&config_path)?;
-        let cfg: Config = toml::from_str(&contents)?;
+        let mut cfg: Config = toml::from_str(&contents)?;
+
+        let updated = cfg.ensure_encryption_key();
+        let auth_updated = cfg.ensure_auth_keys()?;
         cfg.ensure_data_dir()?;
+        let migrated = cfg.migrate_plugins()?;
+        if updated || migrated || auth_updated {
+            cfg.save(&config_path)?;
+        }
         Ok((cfg, config_path))
     } else {
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        let _ = cfg.ensure_encryption_key();
+        cfg.ensure_auth_keys()?;
         cfg.ensure_data_dir()?;
+        let _ = cfg.migrate_plugins()?;
         cfg.save(&config_path)?;
         Ok((cfg, config_path))
     }
 }
 
 impl Config {
+    pub fn resolved_data_encryption_key(&self) -> Option<String> {
+        secret_from_env(&[ENV_DATA_ENCRYPTION_KEY]).or_else(|| {
+            self.data_encryption_key
+                .as_ref()
+                .and_then(|value| normalize_non_empty(value))
+        })
+    }
+
+    pub fn migrate_plugins(&mut self) -> Result<bool> {
+        if self.plugins.is_empty() {
+            return Ok(false);
+        }
+
+        let existing = self.load_plugins()?;
+        if existing.is_empty() {
+            self.save_plugins(&self.plugins)?;
+        }
+
+        self.plugins.clear();
+        self.updated_at = Utc::now();
+        Ok(true)
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         let contents = toml::to_string_pretty(self)?;
         fs::write(path, contents)?;
@@ -117,11 +293,11 @@ impl Config {
         if let Some(dir) = update.data_dir {
             self.data_dir = dir;
         }
-        if let Some(master_key) = update.master_key {
-            self.master_key = Some(master_key);
+        if let Some(threshold) = update.cache_threshold {
+            self.cache_threshold = threshold;
         }
-        if let Some(threshold) = update.memory_threshold {
-            self.memory_threshold = threshold;
+        if let Some(snapshot_threshold) = update.snapshot_threshold {
+            self.snapshot_threshold = snapshot_threshold;
         }
         if let Some(dek) = update.data_encryption_key {
             self.data_encryption_key = Some(dek);
@@ -135,68 +311,194 @@ impl Config {
         if let Some(page_limit) = update.page_limit {
             self.page_limit = page_limit;
         }
+        if let Some(verbose_responses) = update.verbose_responses {
+            self.verbose_responses = verbose_responses;
+        }
         if let Some(max_attempts) = update.plugin_max_attempts {
             self.plugin_max_attempts = max_attempts.max(1);
+        }
+        if let Some(worker_id) = update.snowflake_worker_id {
+            self.snowflake_worker_id = worker_id;
+        }
+        if let Some(socket) = update.socket {
+            if let Some(bind_addr) = socket.bind_addr {
+                self.socket.bind_addr = bind_addr;
+            }
         }
         self.updated_at = Utc::now();
     }
 
-    pub fn set_column_type(&mut self, aggregate: &str, field: &str, data_type: String) {
-        self.column_types
-            .entry(aggregate.to_string())
-            .or_default()
-            .insert(field.to_string(), data_type);
-    }
-
-    pub fn column_type(&self, aggregate: &str, field: &str) -> Option<&String> {
-        self.column_types
-            .get(aggregate)
-            .and_then(|fields| fields.get(field))
-    }
-
     pub fn ensure_data_dir(&self) -> Result<()> {
         fs::create_dir_all(&self.data_dir)?;
+        fs::create_dir_all(self.domain_data_dir().as_path())?;
         Ok(())
     }
 
+    pub fn active_domain(&self) -> &str {
+        &self.domain
+    }
+
+    pub fn is_default_domain(&self) -> bool {
+        self.domain == DEFAULT_DOMAIN_NAME
+    }
+
+    pub fn domains_root(&self) -> PathBuf {
+        self.data_dir.join("domains")
+    }
+
+    pub fn domain_data_dir(&self) -> PathBuf {
+        if self.is_default_domain() {
+            self.data_dir.clone()
+        } else {
+            self.domains_root().join(&self.domain)
+        }
+    }
+
+    pub fn ensure_encryption_key(&mut self) -> bool {
+        if self.resolved_data_encryption_key().is_some() {
+            return false;
+        }
+
+        let encoded = generate_data_encryption_key();
+        self.data_encryption_key = Some(encoded);
+        self.updated_at = Utc::now();
+        true
+    }
+
+    pub fn ensure_auth_keys(&mut self) -> Result<bool> {
+        if secret_from_env(&[ENV_AUTH_PRIVATE_KEY]).is_some()
+            || secret_from_env(&[ENV_AUTH_PUBLIC_KEY]).is_some()
+        {
+            return Ok(false);
+        }
+
+        let needs_private = self
+            .auth
+            .private_key
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true);
+        let needs_public = self
+            .auth
+            .public_key
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true);
+        if !needs_private && !needs_public {
+            return Ok(false);
+        }
+
+        let (private_key, public_key) = generate_jwt_keypair()?;
+        self.auth.private_key = Some(private_key);
+        self.auth.public_key = Some(public_key);
+        if self.auth.key_id.is_none() {
+            self.auth.key_id = Some(format!("key-{}", Utc::now().format("%Y%m%d%H%M%S")));
+        }
+        self.updated_at = Utc::now();
+        Ok(true)
+    }
+
     pub fn event_store_path(&self) -> PathBuf {
-        self.data_dir.join("event_store")
+        self.domain_data_dir().join("event_store")
     }
 
     pub fn tokens_path(&self) -> PathBuf {
-        self.data_dir.join("tokens.json")
+        self.domain_data_dir().join("tokens.json")
+    }
+
+    pub fn cli_token_path(&self) -> PathBuf {
+        self.domain_data_dir().join("cli.token")
+    }
+
+    pub fn jwt_revocations_path(&self) -> PathBuf {
+        self.domain_data_dir().join("jwt_revocations.json")
+    }
+
+    pub fn jwt_manager_config(&self) -> Result<JwtManagerConfig> {
+        let private_b64 = self
+            .auth
+            .resolved_private_key()
+            .ok_or_else(|| EventError::Config("jwt private key not configured".to_string()))?;
+        let private_key = STANDARD
+            .decode(private_b64.trim())
+            .map_err(|err| EventError::Config(format!("invalid jwt private key: {err}")))?;
+        if private_key.is_empty() {
+            return Err(EventError::Config(
+                "jwt private key must contain data".to_string(),
+            ));
+        }
+        let key_pair = Ed25519KeyPair::from_pkcs8(private_key.as_slice())
+            .map_err(|err| EventError::Config(format!("invalid jwt private key: {err}")))?;
+        let public_key = if let Some(public_b64) = self.auth.resolved_public_key() {
+            let decoded = STANDARD
+                .decode(public_b64.trim())
+                .map_err(|err| EventError::Config(format!("invalid jwt public key: {err}")))?;
+            if decoded.len() != ED25519_PUBLIC_KEY_LEN {
+                return Err(EventError::Config(format!(
+                    "jwt public key must decode to {} bytes (got {})",
+                    ED25519_PUBLIC_KEY_LEN,
+                    decoded.len()
+                )));
+            }
+            if key_pair.public_key().as_ref() != decoded.as_slice() {
+                return Err(EventError::Config(
+                    "jwt public key does not match private key".to_string(),
+                ));
+            }
+            decoded
+        } else {
+            key_pair.public_key().as_ref().to_vec()
+        };
+        let ttl = self.auth.default_ttl_secs.max(60);
+        let clock_skew = self.auth.clock_skew_secs.clamp(0, 300);
+        Ok(JwtManagerConfig {
+            issuer: self.auth.issuer.clone(),
+            audience: self.auth.audience.clone(),
+            private_key,
+            public_key,
+            key_id: self.auth.resolved_key_id(),
+            default_ttl: Duration::seconds(ttl as i64),
+            clock_skew: Duration::seconds(clock_skew as i64),
+        })
     }
 
     pub fn schema_store_path(&self) -> PathBuf {
-        self.data_dir.join("schemas.json")
+        self.domain_data_dir().join("schemas.json")
     }
 
     pub fn staging_path(&self) -> PathBuf {
-        self.data_dir.join("staged_events.json")
+        self.domain_data_dir().join("staged_events.json")
     }
 
     pub fn plugins_path(&self) -> PathBuf {
-        self.data_dir.join("plugins.json")
+        self.domain_data_dir().join("plugins.json")
     }
 
     pub fn plugin_queue_path(&self) -> PathBuf {
-        self.data_dir.join("plugin_queue.json")
+        self.domain_data_dir().join("plugin_queue.json")
+    }
+
+    pub fn plugin_queue_db_path(&self) -> PathBuf {
+        self.domain_data_dir().join("plugin_queue.db")
     }
 
     pub fn pid_file_path(&self) -> PathBuf {
-        self.data_dir.join("eventdbx.pid")
+        self.domain_data_dir().join("eventdbx.pid")
+    }
+
+    pub fn verbose_responses(&self) -> bool {
+        self.verbose_responses
     }
 
     pub fn is_initialized(&self) -> bool {
-        self.master_key
-            .as_ref()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-            && self
-                .data_encryption_key
-                .as_ref()
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
+        self.resolved_data_encryption_key().is_some()
+    }
+
+    pub fn encryption_key(&self) -> Result<Option<Encryptor>> {
+        match self.resolved_data_encryption_key() {
+            Some(value) => Ok(Some(Encryptor::new_from_base64(&value)?)),
+            None => Ok(None),
+        }
     }
 
     pub fn load_plugins(&self) -> Result<Vec<PluginDefinition>> {
@@ -225,15 +527,78 @@ impl Config {
     }
 }
 
-fn default_data_dir() -> PathBuf {
-    let Ok(current_dir) = env::current_dir() else {
-        return PathBuf::from(".eventdbx");
-    };
-    current_dir.join(".eventdbx")
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketConfig {
+    #[serde(default = "default_socket_bind_addr")]
+    pub bind_addr: String,
 }
 
-fn default_restrict() -> bool {
-    true
+impl Default for SocketConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: default_socket_bind_addr(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SocketConfigUpdate {
+    pub bind_addr: Option<String>,
+}
+
+fn default_config_root() -> Result<PathBuf> {
+    if let Some(home) = dirs::home_dir() {
+        Ok(home.join(".eventdbx"))
+    } else {
+        env::current_dir()
+            .map(|dir| dir.join(".eventdbx"))
+            .map_err(|err| EventError::Config(err.to_string()))
+    }
+}
+
+fn generate_data_encryption_key() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    STANDARD.encode(bytes)
+}
+
+fn default_jwt_issuer() -> String {
+    "eventdbx://self".to_string()
+}
+
+fn default_jwt_audience() -> String {
+    "eventdbx-clients".to_string()
+}
+
+fn default_jwt_ttl_secs() -> u64 {
+    3_600
+}
+
+fn default_jwt_clock_skew_secs() -> u64 {
+    30
+}
+
+fn generate_jwt_keypair() -> Result<(String, String)> {
+    let rng = SystemRandom::new();
+    let pkcs8_doc = Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|err| EventError::Config(format!("failed to generate jwt key pair: {err}")))?;
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8_doc.as_ref())
+        .map_err(|err| EventError::Config(format!("failed to parse jwt key pair: {err}")))?;
+    let private_key = STANDARD.encode(pkcs8_doc.as_ref());
+    let public_key = STANDARD.encode(key_pair.public_key().as_ref());
+    Ok((private_key, public_key))
+}
+
+fn default_data_dir() -> PathBuf {
+    default_config_root().unwrap_or_else(|_| PathBuf::from(".eventdbx"))
+}
+
+fn default_domain() -> String {
+    DEFAULT_DOMAIN_NAME.to_string()
+}
+
+fn default_restrict() -> RestrictMode {
+    RestrictMode::default()
 }
 
 fn default_list_page_size() -> usize {
@@ -248,7 +613,39 @@ fn default_plugin_max_attempts() -> u32 {
     10
 }
 
-fn deserialize_restrict<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+fn default_plugin_payload_mode() -> PluginPayloadMode {
+    PluginPayloadMode::All
+}
+
+fn default_snowflake_worker_id() -> u16 {
+    0
+}
+
+fn default_socket_bind_addr() -> String {
+    format!("0.0.0.0:{}", DEFAULT_SOCKET_PORT)
+}
+
+fn default_cache_threshold() -> usize {
+    DEFAULT_CACHE_THRESHOLD
+}
+
+fn default_plugin_queue_prune() -> PluginQueuePruneConfig {
+    PluginQueuePruneConfig::default()
+}
+
+fn default_queue_prune_done_ttl_secs() -> u64 {
+    86_400
+}
+
+fn default_queue_prune_interval_secs() -> u64 {
+    300
+}
+
+fn default_verbose_responses() -> bool {
+    true
+}
+
+fn deserialize_restrict_mode<'de, D>(deserializer: D) -> std::result::Result<RestrictMode, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -261,12 +658,10 @@ where
 
     let value = Option::<RestrictInput>::deserialize(deserializer)?;
     Ok(match value {
-        Some(RestrictInput::Bool(value)) => value,
-        Some(RestrictInput::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
-            "prod" | "restricted" | "true" | "1" | "yes" | "on" => true,
-            "dev" | "unrestricted" | "false" | "0" | "no" | "off" => false,
-            _ => default_restrict(),
-        },
+        Some(RestrictInput::Bool(value)) => restrict::legacy_bool(value),
+        Some(RestrictInput::String(value)) => {
+            restrict::parse_mode(&value).unwrap_or_else(default_restrict)
+        }
         None => default_restrict(),
     })
 }
@@ -274,31 +669,37 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginDefinition {
     pub enabled: bool,
+    #[serde(default = "default_emit_events")]
+    pub emit_events: bool,
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default = "default_plugin_payload_mode")]
+    pub payload_mode: PluginPayloadMode,
     pub config: PluginConfig,
+}
+
+fn default_emit_events() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginConfig {
-    Postgres(PostgresPluginConfig),
-    Csv(CsvPluginConfig),
     Tcp(TcpPluginConfig),
+    Capnp(CapnpPluginConfig),
     Http(HttpPluginConfig),
-    Json(JsonPluginConfig),
     Log(LogPluginConfig),
+    Process(ProcessPluginConfig),
 }
 
 impl PluginConfig {
     pub fn kind(&self) -> PluginKind {
         match self {
-            PluginConfig::Postgres(_) => PluginKind::Postgres,
-            PluginConfig::Csv(_) => PluginKind::Csv,
             PluginConfig::Tcp(_) => PluginKind::Tcp,
+            PluginConfig::Capnp(_) => PluginKind::Capnp,
             PluginConfig::Http(_) => PluginKind::Http,
-            PluginConfig::Json(_) => PluginKind::Json,
             PluginConfig::Log(_) => PluginKind::Log,
+            PluginConfig::Process(_) => PluginKind::Process,
         }
     }
 }
@@ -306,33 +707,56 @@ impl PluginConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
-    Postgres,
-    Csv,
     Tcp,
+    Capnp,
     Http,
-    Json,
     Log,
+    Process,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PostgresPluginConfig {
-    pub connection_string: String,
-    #[serde(default)]
-    pub field_mappings: BTreeMap<String, BTreeMap<String, PostgresColumnConfig>>,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginPayloadMode {
+    All,
+    EventOnly,
+    StateOnly,
+    SchemaOnly,
+    EventAndSchema,
+    ExtensionsOnly,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PostgresColumnConfig {
-    pub data_type: Option<String>,
-}
+impl PluginPayloadMode {
+    pub fn includes_event(self) -> bool {
+        matches!(
+            self,
+            PluginPayloadMode::All
+                | PluginPayloadMode::EventOnly
+                | PluginPayloadMode::EventAndSchema
+        )
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CsvPluginConfig {
-    pub output_dir: PathBuf,
+    pub fn includes_state(self) -> bool {
+        matches!(self, PluginPayloadMode::All | PluginPayloadMode::StateOnly)
+    }
+
+    pub fn includes_schema(self) -> bool {
+        matches!(
+            self,
+            PluginPayloadMode::All
+                | PluginPayloadMode::SchemaOnly
+                | PluginPayloadMode::EventAndSchema
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpPluginConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapnpPluginConfig {
     pub host: String,
     pub port: u16,
 }
@@ -347,13 +771,6 @@ pub struct HttpPluginConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonPluginConfig {
-    pub path: PathBuf,
-    #[serde(default)]
-    pub pretty: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogPluginConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
@@ -361,6 +778,92 @@ pub struct LogPluginConfig {
     pub template: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProcessPluginConfig {
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub working_dir: Option<PathBuf>,
+}
+
 fn default_log_level() -> String {
     "info".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn applies_snapshot_threshold_updates() {
+        let mut config = Config::default();
+        assert_eq!(config.snapshot_threshold, None);
+
+        config.apply_update(ConfigUpdate {
+            snapshot_threshold: Some(Some(42)),
+            ..ConfigUpdate::default()
+        });
+        assert_eq!(config.snapshot_threshold, Some(42));
+
+        config.apply_update(ConfigUpdate {
+            snapshot_threshold: Some(None),
+            ..ConfigUpdate::default()
+        });
+        assert_eq!(config.snapshot_threshold, None);
+    }
+
+    #[test]
+    fn applies_verbose_response_updates() {
+        let mut config = Config::default();
+        assert!(config.verbose_responses());
+
+        config.apply_update(ConfigUpdate {
+            verbose_responses: Some(false),
+            ..ConfigUpdate::default()
+        });
+        assert!(!config.verbose_responses());
+    }
+
+    #[derive(Deserialize)]
+    struct RestrictWrapper {
+        #[serde(
+            default = "default_restrict",
+            deserialize_with = "deserialize_restrict_mode"
+        )]
+        restrict: RestrictMode,
+    }
+
+    #[test]
+    fn restrict_mode_deserializes_from_bool() {
+        let wrapper: RestrictWrapper =
+            toml::from_str("restrict = false").expect("bool value should parse");
+        assert_eq!(wrapper.restrict, RestrictMode::Off);
+
+        let wrapper: RestrictWrapper =
+            toml::from_str("restrict = true").expect("bool value should parse");
+        assert_eq!(wrapper.restrict, RestrictMode::Default);
+    }
+
+    #[test]
+    fn restrict_mode_deserializes_from_string() {
+        let wrapper: RestrictWrapper =
+            toml::from_str("restrict = \"strict\"").expect("string value should parse");
+        assert_eq!(wrapper.restrict, RestrictMode::Strict);
+
+        let wrapper: RestrictWrapper = toml::from_str("restrict = \"unknown\"")
+            .expect("unknown value should fall back to default");
+        assert_eq!(wrapper.restrict, RestrictMode::Default);
+    }
+
+    #[test]
+    fn restrict_mode_serializes_as_lowercase_string() {
+        let mut config = Config::default();
+        config.restrict = RestrictMode::Strict;
+        let payload = toml::to_string(&config).expect("config should serialize");
+        assert!(payload.contains("restrict = \"strict\""));
+    }
 }

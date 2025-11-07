@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     io::{self, Write},
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -8,12 +9,13 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
+
+use crate::commands::cli_token;
 
 use eventdbx::{
     config::{Config, ConfigUpdate, load_or_default},
-    plugin::PluginManager,
     restrict::{self, RESTRICT_ENV},
     server,
 };
@@ -32,9 +34,15 @@ pub struct StartArgs {
     #[arg(long)]
     pub foreground: bool,
 
-    /// Require schema enforcement (use `--restrict=false` to disable)
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    pub restrict: bool,
+    /// Choose schema enforcement mode (`off`, `default`, or `strict`)
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = RestrictModeArg::Default,
+        num_args = 0..=1,
+        default_missing_value = "default"
+    )]
+    pub restrict: RestrictModeArg,
 }
 
 impl Default for StartArgs {
@@ -43,7 +51,51 @@ impl Default for StartArgs {
             port: None,
             data_dir: None,
             foreground: false,
-            restrict: restrict::from_env(),
+            restrict: RestrictModeArg::from(restrict::from_env()),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum RestrictModeArg {
+    #[value(
+        alias = "false",
+        alias = "0",
+        alias = "no",
+        alias = "none",
+        alias = "unrestricted"
+    )]
+    Off,
+    #[value(
+        alias = "true",
+        alias = "1",
+        alias = "yes",
+        alias = "on",
+        alias = "prod",
+        alias = "restricted",
+        alias = "hybrid"
+    )]
+    Default,
+    #[value(alias = "strict", alias = "all", alias = "enforced")]
+    Strict,
+}
+
+impl From<RestrictModeArg> for restrict::RestrictMode {
+    fn from(value: RestrictModeArg) -> Self {
+        match value {
+            RestrictModeArg::Off => restrict::RestrictMode::Off,
+            RestrictModeArg::Default => restrict::RestrictMode::Default,
+            RestrictModeArg::Strict => restrict::RestrictMode::Strict,
+        }
+    }
+}
+
+impl From<restrict::RestrictMode> for RestrictModeArg {
+    fn from(value: restrict::RestrictMode) -> Self {
+        match value {
+            restrict::RestrictMode::Off => RestrictModeArg::Off,
+            restrict::RestrictMode::Default => RestrictModeArg::Default,
+            restrict::RestrictMode::Strict => RestrictModeArg::Strict,
         }
     }
 }
@@ -56,7 +108,7 @@ pub struct DestroyArgs {
 }
 
 pub async fn execute(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
-    restrict::set_env(args.restrict);
+    restrict::set_env(args.restrict.into());
     if args.foreground {
         start_foreground(config_path, args).await
     } else {
@@ -67,7 +119,7 @@ pub async fn execute(config_path: Option<PathBuf>, args: StartArgs) -> Result<()
 
 pub async fn run_internal(config_path: Option<PathBuf>) -> Result<()> {
     let args = StartArgs::default();
-    restrict::set_env(args.restrict);
+    restrict::set_env(args.restrict.into());
     start_foreground(config_path, args).await
 }
 
@@ -123,32 +175,40 @@ pub fn stop(config_path: Option<PathBuf>) -> Result<()> {
 pub fn status(config_path: Option<PathBuf>) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let pid_path = config.pid_file_path();
+    let domain = config.active_domain().to_string();
 
     match read_pid_record(&pid_path)? {
         Some(record) => {
             let pid = record.pid;
             if process_is_running(pid) {
+                let socket_port =
+                    resolve_socket_port(&config.socket.bind_addr).unwrap_or(config.port);
                 if let Some(started_at) = record.started_at {
                     println!(
-                        "EventDBX server is running on port {} (pid {}) — restrict={} — up for {} (since {})",
-                        config.port,
+                        "EventDBX server is running on port {} (pid {}) — restrict={} — domain={} — up for {} (since {})",
+                        socket_port,
                         pid,
                         config.restrict,
+                        domain,
                         describe_uptime(started_at),
                         started_at.to_rfc3339()
                     );
                 } else {
                     println!(
-                        "EventDBX server is running on port {} (pid {}) — restrict={}",
-                        config.port, pid, config.restrict
+                        "EventDBX server is running on port {} (pid {}) — restrict={} — domain={}",
+                        socket_port, pid, config.restrict, domain
                     );
                 }
             } else {
                 let _ = fs::remove_file(&pid_path);
                 println!("EventDBX server is not running (removed stale pid file).");
+                println!("Active domain: {}", domain);
             }
         }
-        None => println!("EventDBX server is not running."),
+        None => {
+            println!("EventDBX server is not running.");
+            println!("Active domain: {}", domain);
+        }
     }
 
     Ok(())
@@ -192,15 +252,19 @@ pub fn destroy(config_path: Option<PathBuf>, args: DestroyArgs) -> Result<()> {
 }
 
 async fn start_foreground(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
-    let (config, _) = load_and_update_config(config_path, &args)?;
-    let plugins = PluginManager::from_config(&config)?;
-    server::run(config, plugins).await?;
+    let (config, path) = load_and_update_config(config_path, &args)?;
+    eprintln!(
+        "configuration loaded; starting server (pid={})",
+        std::process::id()
+    );
+    server::run(config, path).await?;
     Ok(())
 }
 
 fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     let (config, path) = load_and_update_config(config_path, &args)?;
     let pid_path = config.pid_file_path();
+    let restrict_mode: restrict::RestrictMode = args.restrict.into();
 
     if let Some(existing) = read_pid_record(&pid_path)? {
         if process_is_running(existing.pid) {
@@ -218,11 +282,33 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     command.stdin(Stdio::null());
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());
-    command.env(RESTRICT_ENV, restrict::as_str(args.restrict));
+    command.env(RESTRICT_ENV, restrict_mode.as_str());
 
-    let child = command.spawn()?;
+    let mut child = command.spawn()?;
     let pid = child.id();
-    drop(child);
+
+    let wait_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let message = if let Some(code) = status.code() {
+                format!(
+                    "EventDBX server failed to start (process exited with status {code}). \
+                     Re-run with `eventdbx start --foreground` for details."
+                )
+            } else {
+                "EventDBX server failed to start (process terminated unexpectedly). \
+                 Re-run with `eventdbx start --foreground` for details."
+                    .to_string()
+            };
+            return Err(anyhow!(message));
+        }
+
+        if Instant::now() >= wait_deadline {
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
 
     let started_at = chrono::Utc::now();
     let record = PidRecord {
@@ -230,12 +316,17 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
         started_at: Some(started_at),
     };
     write_pid_record(&pid_path, &record)?;
+
+    drop(child);
+
+    let socket_port = resolve_socket_port(&config.socket.bind_addr).unwrap_or(config.port);
+
     println!(
         "EventDBX server is running on port {} (pid {}) since {} (restrict={})",
-        config.port,
+        socket_port,
         pid,
         started_at.to_rfc3339(),
-        args.restrict
+        restrict_mode
     );
     Ok(())
 }
@@ -247,6 +338,7 @@ fn load_and_update_config(
     let (mut config, path) = load_or_default(config_path)?;
     apply_start_overrides(&mut config, args);
     config.ensure_data_dir()?;
+    cli_token::ensure_bootstrap_token(&config)?;
     config.save(&path)?;
     Ok((config, path))
 }
@@ -255,13 +347,16 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
     config.apply_update(ConfigUpdate {
         port: args.port,
         data_dir: args.data_dir.clone(),
-        master_key: None,
-        memory_threshold: None,
+        cache_threshold: None,
+        snapshot_threshold: None,
         data_encryption_key: None,
-        restrict: Some(args.restrict),
+        restrict: Some(args.restrict.into()),
         list_page_size: None,
         page_limit: None,
+        verbose_responses: None,
         plugin_max_attempts: None,
+        socket: None,
+        snowflake_worker_id: None,
     });
 }
 
@@ -409,6 +504,18 @@ fn force_kill_process(pid: u32) -> Result<()> {
             }
         }
     }
+}
+
+fn resolve_socket_port(bind_addr: &str) -> Option<u16> {
+    bind_addr
+        .parse::<SocketAddr>()
+        .map(|addr| addr.port())
+        .ok()
+        .or_else(|| {
+            bind_addr
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.trim().parse::<u16>().ok())
+        })
 }
 
 fn describe_uptime(started_at: chrono::DateTime<chrono::Utc>) -> String {

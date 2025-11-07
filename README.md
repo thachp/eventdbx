@@ -1,82 +1,208 @@
 # EventDBX
 
-You'll likely enjoy this database system. Worry less about how you structure your data and focus more on your business logic.
+You’ll appreciate this database system. EventDBX is extremely fast, and it lets you spend less time designing schemas and more time writing the code that drives your application.
 
 ## Overview
 
-EventDBX is an event-sourced, key-value, write-side database system designed to provide immutable, append-only storage for events across various domains. It is ideal for applications requiring detailed audit trails for compliance, complex business processes involving states, and high data integrity levels.
+EventDBX is an event-sourced, NoSQL write-side database designed to provide immutable, append-only storage for events across various domains. It is ideal for applications requiring detailed audit trails for compliance, complex business processes involving states, and high data integrity levels. The core engine focuses on the _write_ side of CQRS—capturing and validating events, persisting aggregate state, and ensuring integrity with Merkle trees.
+
+The companion plugin framework turns those events into durable jobs and delivers them to other services, letting external systems specialise in the _read_ side. Whether you need to hydrate a search index, stream to analytics, feed caches, or trigger workflows, plugins let you extend EventDBX without altering the write path. Each plugin chooses the payload shape it needs (event-only, state-only, schema-only, or combinations) while the queue guarantees delivery and backoff.
 
 ## Getting Started
 
-Follow the steps below to spin up EventDBX locally. All commands are expected to run from the repository root unless stated otherwise.
+Follow the steps below to spin up EventDBX locally. You can run every command with `npx` (no global install required); if you're contributing to the project, clone the repository and work from the repo root instead.
 
-1. **Install prerequisites**
+The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the primary command is now `dbx`.
 
-   - Rust toolchain (edition 2024) via [`rustup`](https://rustup.rs/)
-   - `rocksdb` is vendored through the Rust crate, so no extra native packages are required.
-
-2. **Clone and build**
+1. **Start the server**
 
    ```bash
-   git clone https://github.com/thachp/eventdbx.git
-   cd eventdbx
-   cargo build
-   ```
-
-3. **(Optional) Run checks**
-
-   ```bash
-   cargo fmt -- --check
-   cargo check
-   cargo test    # if you add tests locally
-   ```
-
-4. **Create the initial configuration**
-   The first configuration must include both a master key and a data-encryption key. These values can be any non-empty strings in development.
-
-   ```bash
-   cargo run -- config --master-key dev-master --dek dev-dek
-   ```
-
-5. **Start the server**
-
-   ```bash
-   cargo run -- start --foreground
+   npm install eventdbx -g
+   dbx start --foreground
    ```
 
    - Omit `--foreground` to daemonise the process.
-   - Use `--data-dir <path>` to override the default `./.eventdbx` directory.
-   - Restriction (schema enforcement) is enabled by default; disable it with `--restrict=false` if you need a permissive environment.
+   - Use `--data-dir <path>` to override the default `$HOME/.eventdbx` directory.
+   - Restriction (schema enforcement) defaults to `default`; switch to `--restrict=off` for permissive prototyping or `--restrict=strict` to require declared schemas on every write.
 
-6. **Define a schema (recommended when running in restricted mode)**
+2. **Switch domains (optional)**
 
    ```bash
-   cargo run -- schema create \
-     --aggregate patient \
-     --events patient-added,patient-updated \
+   dbx checkout -d herds
+   ```
+
+   - New installs default to the `default` domain, which stores data directly under the configured `data_dir`.
+   - `dbx checkout -d <domain>` (or `dbx checkout <domain>`) changes the active domain and creates isolated storage in `<data_dir>/domains/<domain>` so you can group aggregates and plugins per bounded context.
+   - This is useful when you're working on two different projects and need to switch between domain contexts.
+   - Domain names are case-insensitive, must begin with a letter or number, and may include dashes or underscores. Re-running the command for the current domain is a no-op.
+
+3. **Define a schema (recommended when running in restricted mode)**
+
+   ```bash
+   dbx schema create person \
+     --events person_created,person_updated \
      --snapshot-threshold 100
    ```
 
-7. **Issue a token for CLI access**
+   Omit `--snapshot-threshold` to inherit the default configured in `config.toml` (if any).
+
+   EventDBX stores schemas in `~/.eventdbx/data/schemas.json` (or the `data_dir` you configured). Inspect the full definition at any time with `dbx schema <aggregate>`; the command prints the JSON the server enforces. For example, a `person` aggregate that validates email format and enforces name lengths can be declared as:
 
    ```bash
-   cargo run -- token generate \
-     --group admin \
-     --user jane \
-     --expiration 3600
+   dbx schema create person --events person_created,person_updated
+   dbx schema person
    ```
 
-8. **Append an event**
-   ```bash
-   cargo run -- aggregate apply \
-     --aggregate patient \
-     --aggregate-id p-001 \
-     --event patient-added \
-     --field name="Jane Doe" \
-     --field status=active
+   ```json
+   {
+     "person": {
+       "aggregate": "person",
+       "snapshot_threshold": null,
+       "locked": false,
+       "field_locks": [],
+       "hidden": false,
+       "hidden_fields": [],
+       "column_types": {
+         "email": { "type": "text", "required": true, "format": "email" },
+         "name": {
+           "type": "text",
+           "rules": { "length": { "min": "1", "max": "64" } }
+         }
+       },
+       "events": {
+         "person_created": {
+           "fields": ["first_name", "last_name"]
+         },
+         "person_updated": {
+           "fields": []
+         }
+       },
+       "created_at": "2025-10-26T22:25:24.028129Z",
+       "updated_at": "2025-10-26T22:27:25.967615Z"
+     }
+   }
    ```
+
+   - `column_types` declare data types, validation formats, and rule blocks per field. Rules can enforce length, numeric ranges, regexes, or cross-field matches.
+   - `events.<event>.fields` restrict the properties an event may set; leaving the list empty keeps the event permissive.
+   - `field_locks` and `hidden_fields` control which fields can be updated or returned in aggregate detail calls.
+   - `locked: true` freezes the schema to prevent further event writes until it is unlocked.
+
+4. **Issue a token for CLI access**
+
+   ```bash
+   dbx token generate --group admin --user jane --expiration 3600
+   ```
+
+5. **Append an event**
+
+   - When the server is running the CLI proxies writes through the control socket automatically. Pass a token with `--token` or set `EVENTDBX_TOKEN` to reuse your own credentials; otherwise the CLI mints a short-lived token for the call.
+
+     ```bash
+     dbx aggregate apply person p-002 person_updated \
+       --field name="Jane Doe" \
+       --field status=active
+     ```
+
+   - If the server is stopped, the same CLI command writes to the local RocksDB store directly.
+   - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort created_at:desc --take 5` or drill into the payload of a specific event via `dbx events <snowflake_id> --json`.
+
+6. **Replicate a domain (optional)**
+
+   ```bash
+   dbx checkout -d remote1 --remote 10.0.0.42:6363 --token "$(cat ~/.eventdbx/replica.token)"
+   ```
+
+   - `dbx checkout` stores remote settings per domain (`remote.json` under the domain data directory). You can re-run the command with just `--remote` or `--token` to rotate either value.
+   - Push schemas first so the destination validates incoming events with the same rules:
+
+     ```bash
+     dbx push schema remote1
+     ```
+
+   - Mirror domain data to the remote. Limit the sync to a specific aggregate type or identifier when you need a targeted replication:
+
+     ```bash
+     dbx push remote1
+     dbx push remote1 --aggregate invoice
+     dbx push remote1 --aggregate ledger --id ledger-001
+     ```
+
+   - Pull data back down when the remote captured new events. The pull command performs the same integrity checks (version counts, Merkle root parity) before importing:
+
+     ```bash
+     dbx pull remote1
+     dbx pull remote1 --aggregate invoice
+     ```
+
+   Pushing or pulling aborts if either side has diverging history for an aggregate. Use the `--concurrency <threads>` flag to tune throughput when replicating large domains.
+
+   - Automate replication with the built-in scheduler:
+
+     ```bash
+     dbx watch remote1 --mode push --interval 120 --background
+     dbx watch remote1 --mode bidirectional --aggregate ledger --run-once
+     dbx watch remote1 --skip-if-active
+     dbx watch status remote1
+     ```
+
+     `watch` loops forever (or until `--run-once`), triggering a push, pull, or bidirectional cycle every `--interval` seconds. Pass `--background` to daemonize, `--skip-if-active` to avoid overlapping runs when another watcher is working on the same domain, and inspect persisted state at any time with `dbx watch status <domain>` (use `--all` for a summary of every watcher).
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
+
+## Run with Docker
+
+### Use the published image
+
+```bash
+# Pull the latest published release
+docker pull thachp/eventdbx:tagname
+
+# Start the daemon with persistent storage and required ports
+docker run \
+  --name eventdbx \
+  --detach \
+  --publish 7070:7070 \
+  --publish 6363:6363 \
+  --volume "$PWD/data:/var/lib/eventdbx" \
+  thachp/eventdbx:tagname
+```
+
+### Connect with TypeScript
+
+```typescript
+// Use the JavaScript/TypeScript client (install via `pnpm add eventdbxjs`).
+// Other languages can interact through plugins or HTTP bridges.
+
+import { createClient } from 'eventdbxjs';
+
+const client = createClient({
+  ip: process.env.EVENTDBX_HOST,
+  port: Number(process.env.EVENTDBX_PORT) || 6363,
+  token: process.env.EVENTDBX_TOKEN,
+  verbose: true, // should match verbose_responses = false on the server config file
+});
+
+await client.connect();
+
+// create an aggregate
+const snapshot = await client.create('person', 'p-110', 'person_registered', {
+  payload: { name: 'Jane Doe', status: 'active' },
+  metadata: { '@source': 'seed-script' },
+  note: 'seed aggregate',
+});
+console.log('created aggregate version', snapshot.version);
+
+// apply an event
+await client.apply('person', 'p-110', 'person_contact_added', {
+  payload: { name: 'Jane Doe', status: 'active' },
+  metadata: { note: 'seed data' },
+});
+
+// return a list of events of a p-110
+const history = await client.events('person', 'p-110');
+console.log('event count:', history.length);
+```
 
 ## Features
 
@@ -85,102 +211,196 @@ You now have a working EventDBX instance with an initial aggregate. Explore the 
 - **Event Sourcing and Replay**: EventDBX is built on the principle of event sourcing, storing all changes to the data as a sequence of events. This allows for the complete replay of events to reconstruct the database's state at any point in time, thereby enhancing data recovery and audit capabilities. Unlike traditional databases that execute update statements to modify data, this system is event-driven. Aggregate state changes are defined in the event object, allowing these events to be replayed at any time to reconstruct the aggregate's current state.
 - **Merkle Tree Integration**: Each aggregate in EventDBX is associated with a Merkle tree of events, enabling verification of data integrity. The Merkle tree structure ensures that any data tampering can be detected, offering an additional security layer against data corruption.
 - **Built-in Audit Trails**: EventDBX automatically maintains a comprehensive audit trail of all transactions, a feature invaluable for meeting compliance and regulatory requirements. It provides transparent and tamper-evident records. During audits, administrators can issue specific tokens to auditors to access and review specific aggregate instances and all relevant events associated with those instances.
-- **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes. Unlike systems where a single application user account performs CRUD operations, EventDBX mandates that each user of the application obtains their own access token with a specific time horizon. For example, a doctor will receive their own access token, linked to their identifier (IAM-managed outside EventDBX), generated by the system for each event they handle, rather than having a single application user manage all CRUD operations. This ensures the system can accurately track that it was the doctor who made changes to an aggregate state, not the application.
-- **Powered by RocksDB and Rust**: At its core, EventualDB utilizes RocksDB for storage, taking advantage of its high performance and efficiency. The system is developed in Rust, known for its safety, efficiency, and concurrency capabilities, ensuring that EventualDB is both rapid and dependable.
+- **Extensible Read Models via Plugins**: Every event that lands in the write-side store can be dispatched to external systems through the plugin job queue. Configure plugins to receive only the slices they care about (event, state snapshot, schema), and let specialized services—search, analytics, personalization, alerting—build optimized read models without touching the write path.
+- **Remote Replication**: Push or pull domain data between configured remotes with integrity checks on aggregate versions and Merkle roots, keeping replicas aligned without rewriting history. Automate recurring syncs with `dbx watch` (looping scheduler with `--interval`, `--run-once`, and optional `--background`).
+- **Built-in Observability**: A Prometheus-compatible `/metrics` endpoint reports HTTP traffic and plugin queue health so you can wire EventDBX into Grafana, Datadog, or any other monitoring stack out of the box.
+- **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. Tokens are signed with an Ed25519 key pair stored under `[auth]` in `config.toml`; keep `private_key` secret and distribute `public_key` to services that need to validate them. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes.
+- **Encrypted Payloads & Secrets at Rest**: Event payloads, aggregate snapshots, and `tokens.json` are encrypted transparently when a DEK is configured. Metadata such as aggregate identifiers, versions, and Merkle roots remain readable so plugins and integrity checks keep working without additional configuration.
+- **Schema validation**: Enforce aggregate contracts with builtin formats (`email`, `url`, `wgs_84`, and more), rule blocks for length, range, regex, required fields, and nested `properties`, plus strict/relaxed enforcement modes.
+- **Powered by RocksDB and Rust**: At its core, EventDBX utilizes RocksDB for storage, taking advantage of its high performance and efficiency. The system is developed in Rust, known for its safety, efficiency, and concurrency capabilities, ensuring that it is both rapid and dependable.
+
+## Restriction Modes
+
+EventDBX can run in three validation modes, tuned for different phases of development:
+
+- **Off** (`--restrict=off` or `--restrict=false`): Ideal for prototyping and rapid application development. Event payloads bypass schema validation entirely, letting you iterate quickly without pre-registering aggregates, tables, or column types.
+- **Default** (`--restrict=default` or `--restrict=true`): Validates events whenever a schema exists but allows aggregates without a declared schema. This matches prior behaviour and suits teams rolling out schema enforcement incrementally.
+- **Strict** (`--restrict=strict`): Requires every aggregate to have a schema before events can be appended. Missing schemas fail fast with a clear error so production environments stay aligned with their contracts.
 
 ## Command-Line Reference
 
-EventDBX ships a single `eventdbx` binary. Every command accepts an optional `--config <path>` to point at an alternate configuration file.
+EventDBX ships a single `dbx` binary. Every command accepts an optional `--config <path>` to point at an alternate configuration file.
 
 ### Server lifecycle
 
-- `eventdbx start [--port <u16>] [--data-dir <path>] [--foreground] [--restrict | --restrict=false]`  
-  Launches the server. Schema validation is enforced by default; pass `--restrict=false` to run in permissive mode.
-- `eventdbx stop`  
+- `dbx start [--port <u16>] [--data-dir <path>] [--foreground] [--restrict[=<off|default|strict>]]`  
+  Launches the server. The default mode validates when schemas exist; set `--restrict=off` to bypass validation or `--restrict=strict` to require schemas up front.
+- `dbx stop`  
   Stops the running daemon referenced by the PID file.
-- `eventdbx status`  
+- `dbx status`  
   Prints the current port, PID, uptime, and whether restriction is enabled.
-- `eventdbx restart [start options…]`  
+- `dbx restart [start options…]`  
   Stops the existing daemon (if any) and restarts it with the provided options.
-- `eventdbx destroy [--yes]`  
+- `dbx destroy [--yes]`  
   Removes the PID file, data directory, and configuration file after confirmation (or immediately with `--yes`).
+- `dbx checkout -d <domain>`  
+  Switches the active domain context for the CLI. Uses the `default` domain by default and creates per-domain data roots under `<data_dir>/domains/<domain>`.
+- `dbx merge --from <domain> [--into <domain>] [--overwrite-schemas]`  
+  Copies events (and their derived state) plus schema definitions from the source domain into the target domain (defaults to the active domain). Conflicting schemas require `--overwrite-schemas`; existing aggregates in the target abort the merge to prevent data loss.
 
 ### Configuration
 
-- `eventdbx config [--port <u16>] [--data-dir <path>] [--master-key <secret>] [--dek <secret>] [--memory-threshold <usize>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>]`  
-  Persists configuration updates. The first invocation must include both `--master-key` and `--dek`. `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000, alias `--event-page-limit`), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10).
+- `dbx config [--port <u16>] [--data-dir <path>] [--cache-threshold <usize>] [--dek <base64>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>] [--snapshot-threshold <u64>] [--clear-snapshot-threshold]`  
+  Persists configuration updates. Run without flags to print the current settings. The first invocation must include a data encryption key via `--dek` (32 bytes of base64). `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10).
 
 ### Tokens
 
-- `eventdbx token generate --group <name> --user <name> [--expiration <secs>] [--limit <writes>] [--keep-alive]`  
+- `dbx token generate --group <name> --user <name> [--expiration <secs>] [--limit <writes>] [--keep-alive]`  
   Issues a new token tied to a Unix-style group and user.
-- `eventdbx token list`  
+- `dbx token list`  
   Lists all tokens with status, expiry, and remaining writes.
-- `eventdbx token revoke --token <value>`  
+- `dbx token revoke --token <value>`  
   Revokes a token immediately.
-- `eventdbx token refresh --token <value> [--expiration <secs>] [--limit <writes>]`  
+- `dbx token refresh --token <value> [--expiration <secs>] [--limit <writes>]`  
   Extends the lifetime or write allowance of an existing token.
 
 ### Schemas
 
-- `eventdbx schema create --aggregate <name> --events <event1,event2,...> [--snapshot-threshold <u64>]`
-- `eventdbx schema add --aggregate <name> --events <event1,event2,...>`
-- `eventdbx schema remove --aggregate <name> --event <name>`
-- `eventdbx schema list`
+- `dbx schema create <name> --events <event1,event2,...> [--snapshot-threshold <u64>]`
+- `dbx schema add <name> --events <event1,event2,...>`
+- `dbx schema remove <name> <event>`
+- `dbx schema annotate <name> <event> [--note <text>] [--clear]`
+- `dbx schema list`
 
-Schemas are stored on disk; when the server runs with restriction enabled, incoming events must satisfy the recorded schema.
+Schemas are stored on disk; when restriction is `default` or `strict`, incoming events must satisfy the recorded schema (and `strict` additionally requires every aggregate to declare one).
 
 ### Aggregates
 
-- `eventdbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--stage]`  
+- `dbx aggregate create --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--metadata <json>] [--note <text>] [--token <value>] [--json]`
+- `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> --field KEY=VALUE... [--payload <json>] [--stage] [--token <value>] [--note <text>]`  
   Appends an event immediately—use `--stage` to queue it for a later commit.
-- `eventdbx aggregate list [--skip <n>] [--take <n>] [--stage]`  
+- `dbx aggregate patch --aggregate <type> --aggregate-id <id> --event <name> --patch <json> [--stage] [--token <value>] [--metadata <json>] [--note <text>]`  
+  Applies an RFC 6902 JSON Patch to the current state and persists the delta as a new event.
+- `dbx aggregate list [--skip <n>] [--take <n>] [--stage]`  
   Lists aggregates with version, Merkle root, and archive status; pass `--stage` to display queued events instead.
-- `eventdbx aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
-- `eventdbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
-- `eventdbx aggregate verify --aggregate <type> --aggregate-id <id>`
-- `eventdbx aggregate snapshot --aggregate <type> --aggregate-id <id> [--comment <text>]`
-- `eventdbx aggregate archive --aggregate <type> --aggregate-id <id> [--comment <text>]`
-- `eventdbx aggregate restore --aggregate <type> --aggregate-id <id> [--comment <text>]`
-- `eventdbx aggregate remove --aggregate <type> --aggregate-id <id>`    Removes an aggregate that has no events (version still 0).
-- `eventdbx aggregate commit`  
+- `dbx aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
+- `dbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
+- `dbx aggregate verify --aggregate <type> --aggregate-id <id>`
+- `dbx aggregate snapshot --aggregate <type> --aggregate-id <id> [--comment <text>]`
+- `dbx aggregate archive --aggregate <type> --aggregate-id <id> [--comment <text>]`
+- `dbx aggregate restore --aggregate <type> --aggregate-id <id> [--comment <text>]`
+- `dbx aggregate remove --aggregate <type> --aggregate-id <id>` Removes an aggregate that has no events (version still 0).
+- `dbx aggregate commit`  
   Flushes all staged events in a single atomic transaction.
 
-Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply --stage` to add entries to this queue, inspect them with `aggregate list --stage`, and persist the entire batch with `aggregate commit`. Events are validated against the active schema (when restriction is enabled) during both staging and commit. The commit operation writes every pending event in one RocksDB batch, guaranteeing all-or-nothing persistence.
+### Events
+
+- `dbx events [--aggregate <type>] [--aggregate-id <id>] [--skip <n>] [--take <n>] [--filter <expr>] [--sort <field[:order],...>] [--json] [--include-archived|--archived-only]`  
+  Streams events with optional aggregate scoping, SQL-like filters (e.g. `payload.status = "open" AND metadata.note LIKE "retry%"`), and multi-key sorting. Prefix fields with `payload.`, `metadata.`, or `extensions.` to target nested JSON; `created_at`, `event_id`, `version`, and other top-level keys are also available.
+- `dbx events --event <snowflake_id> [--json]`  
+  Displays a single event by Snowflake identifier, including payload, metadata, and extensions. You can also omit `--event` when the first positional argument is a valid Snowflake id.
+- `dbx aggregate export [<type>] [--all] --output <path> [--format csv|json] [--zip] [--pretty]`  
+  Writes the current aggregate state (no metadata) as CSV or JSON. Exports default to one file per aggregate type; pass `--zip` to bundle the output into an archive.
+
+`--payload` lets you provide the full event document explicitly; use `dbx aggregate patch` when you need to apply an RFC 6902 JSON Patch server-side.
+
+#### Aggregate Operation Costs
+
+Every aggregate command ultimately turns into a small set of RocksDB reads or writes. Ballpark complexities:
+
+- `aggregate list`: iterates over the requested page of aggregates. Runtime is O(k) in the page size (default `list_page_size`).
+- `aggregate get`: one state lookup (O(log N)) plus optional event scanning when you request `--include-events` or `--version` (adds O(Eₐ) for that aggregate’s events) and lightweight JSON parsing of the returned map.
+- `aggregate select`: uses the same state lookup as `get` (O(log N)) and walks each requested dot path in-memory; no additional RocksDB reads are taken, so cost is dominated by the selected payload size.
+- `aggregate apply`: validates the payload, merges it into the materialized state, and appends the event in a single batch write. Time is proportional to the payload size being processed.
+- `aggregate patch`: reads the current state (same cost as `get`), applies the JSON Patch document, then appends the result—effectively O(payload + patch_ops).
+- `aggregate replay` / `aggregate list --include-events`: scans the requested slice of the event stream for that aggregate (O(Eₐ)).
+- `aggregate verify`: recomputes the Merkle root for the aggregate’s events (O(Eₐ)).
+
+In practice those costs are dominated by payload size and the number of events you ask the CLI to stream; hot aggregates tend to stay in the RocksDB block cache, keeping per-operation latency close to constant.
+
+| Operation          | Time complexity          | Notes                                                            |
+| ------------------ | ------------------------ | ---------------------------------------------------------------- |
+| `aggregate list`   | O(k)                     | `k` is the requested page size (defaults to `list_page_size`).   |
+| `aggregate get`    | O(log N + Eₐ + P)        | Single state read plus optional event scan and JSON parsing.     |
+| `aggregate select` | O(log N + P_selected)    | Same state read as `get`; dot-path traversal happens in memory.  |
+| `aggregate apply`  | O(P)                     | Payload validation + merge + append in one RocksDB batch.        |
+| `aggregate patch`  | O(log N + P + patch_ops) | Reads state, applies JSON Patch, then appends the patch payload. |
+| `aggregate replay` | O(Eₐ)                    | Linear in the number of events streamed.                         |
+| `aggregate verify` | O(Eₐ)                    | Recomputes the Merkle root across the aggregate’s events.        |
+
+Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply --stage` to add entries to this queue, inspect them with `aggregate list --stage`, and persist the entire batch with `aggregate commit`. Events are validated against the active schema whenever restriction is `default` or `strict`; the strict mode also insists that a schema exists before anything can be staged. The commit operation writes every pending event in one RocksDB batch, guaranteeing all-or-nothing persistence.
 
 ### Plugins
 
-- `eventdbx plugin map --aggregate <name> --field <field> --datatype <type>`  
-  Records the base column type for a field; add `--plugin postgres [--plugin-name <label>]` to override the Postgres mapping only.
-- `eventdbx plugin config postgres --connection <connection-string> [--name <label>] [--disable]`
-- `eventdbx plugin config csv --name <label> --output-dir <dir> [--disable]`
-- `eventdbx plugin config tcp --name <label> --host <hostname> --port <u16> [--disable]`
-- `eventdbx plugin config http --name <label> --endpoint <host|url> [--https] [--header KEY=VALUE]... [--disable]`
-- `eventdbx plugin config json --name <label> --path <file> [--pretty] [--disable]`
-- `eventdbx plugin config log --name <label> --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--disable]`
-- `eventdbx plugin enable <label>`
-- `eventdbx plugin disable <label>`
-- `eventdbx plugin remove <label>`
-- `eventdbx plugin test`
-- `eventdbx plugin list`
-- `eventdbx plugin queue`
-- `eventdbx plugin replay <plugin-name> <aggregate> [<aggregate_id>]`
+- `dbx plugin install <plugin> <version> --source <path|url> [--bin <file>] [--checksum <sha256>] [--force]`
+- `dbx plugin config tcp --name <label> --host <hostname> --port <u16> [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
+- `dbx plugin config http --name <label> --endpoint <host|url> [--https] [--header KEY=VALUE]... [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
+- `dbx plugin config log --name <label> --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
+- `dbx plugin config process --name <instance> --plugin <id> --version <semver> [--arg <value>]... [--env KEY=VALUE]... [--working-dir <path>] [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
+- `dbx plugin config capnp --name <label> --host <hostname> --port <u16> [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
+- `dbx plugin enable <label>`
+- `dbx plugin disable <label>`
+- `dbx plugin remove <label>`
+- `dbx plugin test`
+- `dbx plugin list`
+- `dbx queue`
+- `dbx queue clear`
+- `dbx queue retry [--event-id <job-id>]`
+- `dbx plugin replay <plugin-name> <aggregate> [<aggregate_id>]`
 
-Plugins fire after every committed event to keep external systems in sync. Each plugin sends or records different data:
+Plugins consume jobs from a durable RocksDB-backed queue. EventDBX enqueues a job for every aggregate mutation, and each plugin can opt into the data it needs—event payloads, materialized state, schemas, or combinations thereof. Clearing dead entries prompts for confirmation to avoid accidental removal. Manual retries run the failed jobs immediately; use `--event-id` to target a specific entry.
 
-Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications.
-Use `eventdbx plugin queue` to inspect pending/dead event IDs.
+### Upgrades
+
+- `dbx upgrade [<version>|latest] [--no-switch] [--print-only]`  
+  Downloads the selected release into `~/.eventdbx/versions/<target>/<tag>/` and switches the active `dbx` binary unless `--no-switch` is supplied. The CLI looks up releases from GitHub, so you can use `latest` or supply a tag like `v1.13.2` (omitting the leading `v` also works). Versions lower than `v1.13.2` are rejected because upgrades are unsupported before that release. Use `--print-only` to preview the download and activation steps without performing them. Shortcut syntax `dbx upgrade@<version>` resolves through the same lookup.
+- `dbx upgrade use <version> [--print-only]`  
+  Switches to an installed release without re-downloading it so you can hop between versions like `nvm`. The command references the locally cached binary; on Windows the switch must still be completed manually by replacing the executable.
+- `dbx upgrade installed [--json]`  
+  Lists every cached CLI release and marks the one currently active. Use `--json` for machine-readable output that includes the detected target triple.
+- `dbx upgrade --suppress <version>`  
+  Suppresses the upgrade reminder for the provided release tag. Combine it with `latest` to ignore the current release until a newer one ships. Use `dbx upgrade --clear-suppress` to re-enable reminders for all releases.
+- `dbx upgrade list [--limit <n>] [--json]`  
+  Queries the GitHub releases API and prints the most recent versions. Installed releases are annotated with `[installed]` and the active release with `[active]`. The default limit is 20; use `--json` for a machine-readable list, and call `dbx upgrade@list` for the same shortcut.
+
+> The CLI checks for new releases on startup and prints a reminder when a newer version is available. Set `DBX_NO_UPGRADE_CHECK=1` to bypass the check for automation scenarios.
+
+### Maintenance
+
+- `dbx backup --output <path> [--force]`  
+  Creates a compressed archive with the entire EventDBX data directory and configuration. Stop the server before running a backup to avoid partial snapshots.
+- `dbx restore --input <path> [--data-dir <path>] [--force]`  
+  Restores data from a backup archive. Use `--data-dir` to override the stored location, and `--force` to overwrite non-empty destinations. The server must be stopped before restoring.
+
+Plugins fire after every committed event to keep external systems in sync. Remaining plugins deliver events through different channels:
+
+- **TCP** – Writes a single-line JSON `EventRecord` to the configured socket.
+- **HTTP** – POSTs the `EventRecord` JSON to an endpoint with optional headers; add `--https` during configuration to force HTTPS when the endpoint lacks a scheme.
+- **Log** – Emits a formatted line via `tracing` at the configured level. By default: `aggregate=<type> id=<id> event=<event>`.
+- **Process** – Launches an installed plugin binary as a supervised subprocess and streams events to it over Cap'n Proto. Use this for first-party plugins from the [`dbx_plugins`](https://github.com/thachp/dbx_plugins) workspace or your own extensions.
+
+Process plugins are distributed as zip/tar bundles. Install them with `dbx plugin install <plugin> <version> --source <path-or-url>`—the bundle is unpacked to `~/.eventdbx/plugins/<plugin>/<version>/<target>/`, where `<target>` matches the current OS/architecture (for example, `x86_64-apple-darwin`). Official bundles live in the `dbx_plugins` releases; pass the asset URL to `--source` or point it at a local build while developing. After installation, bind the binary to an instance:
+
+```bash
+dbx plugin config process \
+  --name search \
+  --plugin dbx_search \
+  --version 1.0.0 \
+  --arg "--listen=0.0.0.0:8081" \
+  --env SEARCH_CLUSTER=https://example.com
+
+dbx plugin enable search
+```
+
+EventDBX supervises the subprocess, restarts it on failure, and delivers every `EventRecord`/aggregate snapshot over the stream. Plugins that run as independent services can continue to use the TCP/HTTP emitters instead.
+
+Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications. Use `dbx queue` to inspect pending/dead event IDs.
 
 Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instance requires a unique `--name` so you can update, enable, disable, remove, or replay it later. `plugin enable` validates connectivity (creating directories, touching files, or checking network access) before marking the plugin active. Remove a plugin only after disabling it with `plugin disable <name>`. `plugin replay` resends stored events for a single aggregate instance—or every instance of a type—through the selected plugin.
 
-- **Postgres**: Upserts aggregate state into a Postgres table, expanding columns based on schema mappings or `plugin map --plugin postgres` overrides.
-- **CSV**: Appends state snapshots into `<aggregate>.csv`, expanding columns as new fields appear.
-- **TCP**: Writes a single-line JSON `EventRecord` to the configured socket.
-- **HTTP**: POSTs the `EventRecord` JSON to the endpoint with optional headers; add `--https` during configuration to force HTTPS when the endpoint lacks a scheme.
-- **JSON**: Appends the `EventRecord` JSON (pretty if requested) to the given file.
-- **Log**: Emits a formatted line via `tracing` at the configured level. By default: `aggregate=<type> id=<id> event=<event>`.
+Need point-in-time snapshots instead of streaming plugins? Use `dbx aggregate export` to capture aggregate state as CSV or JSON on demand.
 
-Example TCP/HTTP/JSON payload (`EventRecord`):
+Example HTTP/TCP payload (`EventRecord`):
 
 ```json
 {
@@ -191,8 +411,13 @@ Example TCP/HTTP/JSON payload (`EventRecord`):
     "status": "inactive",
     "comment": "Archived via API"
   },
+  "extensions": {
+    "@analytics": {
+      "correlation_id": "rest-1234"
+    }
+  },
   "metadata": {
-    "event_id": "45c3013e-9b95-4ed0-9af9-1a465f81d3cf",
+    "event_id": "1234567890123",
     "created_at": "2024-12-01T17:22:43.512345Z",
     "issued_by": {
       "group": "admin",
@@ -205,73 +430,51 @@ Example TCP/HTTP/JSON payload (`EventRecord`):
 }
 ```
 
-## REST API
+> **Heads-up for plugin authors**  
+> The [dbx_plugins](https://github.com/thachp/dbx_plugins) surfaces now receive `event_id` values as Snowflake strings and may optionally see an `extensions` object alongside `payload`. Update custom handlers to treat `metadata.event_id` as a stringified Snowflake and to ignore or consume the new `extensions` envelope as needed.
 
-The server exposes a small HTTP API (served on port `7070` by default). All endpoints require a bearer token unless otherwise noted.
+## Column definitions
 
-| Method & Path                                                               | Description                                                         |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| `GET /health`                                                               | Liveness probe (unauthenticated).                                   |
-| `GET /v1/aggregates`                                                        | Lists aggregates; supports `skip`/`take` query parameters.          |
-| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}`                        | Returns the current state for a specific aggregate.                 |
-| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/events`                 | Lists events for an aggregate; supports `skip`/`take` pagination.   |
-| `POST /v1/events`                                                           | Appends an event; aggregate identifiers are provided in the body.   |
-| `GET /v1/aggregates/{aggregate_type}/{aggregate_id}/verify`                 | Computes and returns the Merkle root for integrity verification.    |
+Each entry in the `column_types` map declares both a storage type and the rules EventDBX enforces. Supported types:
 
-Paginated responses cap `take` at the configurable `page_limit` (default `1000`). Adjust it with `eventdbx config --page-limit <n>` if you need larger pages.
+| Type                       | Accepted input                                                 | Notes                                                                                                   |
+| -------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `integer`                  | JSON numbers or strings that parse to a signed 64-bit integer  | Rejects values outside the i64 range.                                                                   |
+| `float`                    | JSON numbers or numeric strings                                | Stored as `f64`; scientific notation is accepted.                                                       |
+| `decimal(precision,scale)` | JSON numbers or strings                                        | Enforces total digits ≤ precision and fractional digits ≤ scale.                                        |
+| `boolean`                  | JSON booleans, `0` / `1`, or `"true"`, `"false"`, `"1"`, `"0"` | Values are normalised to `true` / `false`.                                                              |
+| `text`                     | UTF-8 strings                                                  | Use `length`, `contains`, or `regex` rules for additional constraints.                                  |
+| `timestamp`                | RFC 3339 timestamps as strings                                 | Normalised to UTC.                                                                                      |
+| `date`                     | `YYYY-MM-DD` strings                                           | Parsed as a calendar date without a timezone.                                                           |
+| `json`                     | Any JSON value                                                 | No per-field validation is applied; use when you want to store free-form payloads.                      |
+| `binary`                   | Base64-encoded strings                                         | Decoded to raw bytes before validation; `length` counts bytes after decoding.                           |
+| `object`                   | JSON objects                                                   | Enable nested validation via the `properties` rule (see below). Extra keys not listed remain untouched. |
 
-All authenticated requests must include `Authorization: Bearer <token>` with a token issued via the CLI.
+Rules are optional and can be combined when the target type supports them:
 
-### cURL examples
+- `required`: the field must be present in every event payload.
+- `contains` / `does_not_contain`: case-sensitive substring checks for `text` fields.
+- `regex`: one or more regular expressions that `text` fields must satisfy.
+- `format`: built-in string validators; choose `email`, `url`, `credit_card`, `country_code` (ISO&nbsp;3166-1 alpha-2), `iso_8601` (RFC&nbsp;3339 timestamp), `wgs_84` (latitude/longitude in decimal degrees), `camel_case`, `snake_case`, `kebab_case`, `pascal_case`, or `upper_case_snake_case`.
+- `length`: `{ "min": <usize>, "max": <usize> }` bounds the length of `text` (characters) or `binary` (decoded bytes).
+- `range`: `{ "min": <value>, "max": <value> }` for numeric and temporal types (`integer`, `float`, `decimal`, `timestamp`, `date`). Boundary values must parse to the column’s type.
+- `properties`: nested `column_types` definitions for `object` columns, enabling recursion with the same rule set as top-level fields.
 
-```bash
-# Post a JSON event (global endpoint)
-curl \
-  -X POST \
-  -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "aggregate_type": "patient",
-        "aggregate_id": "p-001",
-        "event_type": "patient-updated",
-        "payload": {
-          "status": "inactive",
-          "meta": {"source": "api"}
-        }
-      }' \
-  http://localhost:7070/v1/events
+## Performance Testing
 
-# Retrieve the first 10 events for an aggregate (supports `skip`/`take` up to `page_limit`)
-curl \
-  -H "Authorization: Bearer TOKEN" \
-  "http://localhost:7070/v1/aggregates/patient/p-001/events?skip=0&take=10"
+Performance benchmarks and workload scenarios live in the [eventdbx-perf repository](https://github.com/thachp/eventdbx-perf). Clone that project to review the current load profiles, adjust parameters, or submit new variations as you evaluate throughput and latency trade-offs.
 
+All tests executed on the same host using Docker-based databases, single-thread client, datasets up to 10 M records.
+Latency ≈ mean operation time; throughput = operations per second (converted from ns → µs).
 
-# Health check
-curl http://localhost:7070/health
+| Engine              | Typical Throughput (ops/s) | Typical Latency (µs) |       Scaling Trend        | Summary & Observation                                                                                                                                                  |
+| :------------------ | :------------------------: | :------------------: | :------------------------: | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **EventDBX**        |     **1 400 – 2 000**      |    **0.5 – 0.8**     |   **Flat (1 K → 10 M)**    | RocksDB-based append-only core with hot-aggregate caching keeps performance nearly constant. Excels at write-heavy, event-sourced workloads with verifiable integrity. |
+| **PostgreSQL 15**   |       1 000 – 1 900        |      0.6 – 1.0       | Stable / slightly variable | Strong transactional baseline; planner + WAL sync add moderate overhead. Excellent for mixed OLTP queries but heavier per-event cost.                                  |
+| **MongoDB 7**       |        400 – 1 000         |      1.5 – 2.5       | Gradual decline with size  | Flexible JSON-document store with moderate efficiency. Serialization and journaling add overhead; roughly half of EventDBX throughput.                                 |
+| **SQL Server 2022** |          50 – 180          |        5 – 20        |   Drops quickly > 100 K    | High latency and lowest throughput; B-tree structure and lock coordination dominate under load. Best suited for transactional consistency, not high-velocity writes.   |
 
-# List aggregates (replace TOKEN with an active value)
-curl \
-  -H "Authorization: Bearer TOKEN" \
-  http://localhost:7070/v1/aggregates
-
-# Append an event (global endpoint)
-curl \
-  -X POST \
-  -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "aggregate_type": "patient",
-        "aggregate_id": "p-001",
-        "event_type": "patient-updated",
-        "payload": {
-          "status": "inactive",
-          "comment": "Archived via API"
-        }
-      }' \
-  http://localhost:7070/v1/events
-
-```
+EventDBX delivers the highest sustained throughput and lowest latency, outperforming PostgreSQL by ~2×, MongoDB by ~3×, and SQL Server by >10×—while maintaining sub-microsecond response times even at multi-million-record scale.
 
 ## Contributing
 
@@ -294,4 +497,9 @@ curl \
 
 ## License
 
-EventDBX is licensed under the [MIT](https://github.com/thachp/eventdbx/blob/HEAD/apps/system/) License.
+---
+
+© 2025 Patrick Thach and contributors
+
+EventDBX is open source software licensed under the [MIT License](./LICENSE).  
+See the LICENSE file in the repository for details.
