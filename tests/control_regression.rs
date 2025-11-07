@@ -143,7 +143,8 @@ async fn control_capnp_regression_flows() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(0);
             list.set_has_take(false);
             list.set_has_sort(false);
@@ -274,7 +275,8 @@ async fn control_capnp_regression_flows() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_sort(false);
@@ -317,7 +319,8 @@ async fn control_capnp_regression_flows() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_sort(false);
@@ -452,7 +455,8 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_token(&token_value);
             list.set_aggregate_type("order");
             list.set_aggregate_id("order-1");
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(25);
             list.set_has_take(true);
         },
@@ -887,7 +891,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             list.set_token(&token_value);
             list.set_aggregate_type("order");
             list.set_aggregate_id("order-1");
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(25);
             list.set_has_take(true);
         },
@@ -1090,7 +1095,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_filter(false);
@@ -1136,7 +1142,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_filter(false);
@@ -1228,7 +1235,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_filter(false);

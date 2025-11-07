@@ -281,7 +281,7 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
   Appends an event immediately—use `--stage` to queue it for a later commit.
 - `dbx aggregate patch --aggregate <type> --aggregate-id <id> --event <name> --patch <json> [--stage] [--token <value>] [--metadata <json>] [--note <text>]`  
   Applies an RFC 6902 JSON Patch to the current state and persists the delta as a new event.
-- `dbx aggregate list [--skip <n>] [--take <n>] [--stage]`  
+- `dbx aggregate list [--cursor <token>] [--take <n>] [--stage]`  
   Lists aggregates with version, Merkle root, and archive status; pass `--stage` to display queued events instead.
 - `dbx aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
 - `dbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
@@ -293,9 +293,11 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 - `dbx aggregate commit`  
   Flushes all staged events in a single atomic transaction.
 
+Cursor pagination tokens are human-readable: active aggregates encode as `a:<aggregate_type>:<aggregate_id>` (`r:` for archived), and event cursors append the event version (`a:<aggregate_type>:<aggregate_id>:<version>`). Grab the last row from a page, form its token, and pass it via `--cursor` to resume listing.
+
 ### Events
 
-- `dbx events [--aggregate <type>] [--aggregate-id <id>] [--skip <n>] [--take <n>] [--filter <expr>] [--sort <field[:order],...>] [--json] [--include-archived|--archived-only]`  
+- `dbx events [--aggregate <type>] [--aggregate-id <id>] [--cursor <token>] [--take <n>] [--filter <expr>] [--sort <field[:order],...>] [--json] [--include-archived|--archived-only]`  
   Streams events with optional aggregate scoping, SQL-like filters (e.g. `payload.status = "open" AND metadata.note LIKE "retry%"`), and multi-key sorting. Prefix fields with `payload.`, `metadata.`, or `extensions.` to target nested JSON; `created_at`, `event_id`, `version`, and other top-level keys are also available.
 - `dbx events --event <snowflake_id> [--json]`  
   Displays a single event by Snowflake identifier, including payload, metadata, and extensions. You can also omit `--event` when the first positional argument is a valid Snowflake id.

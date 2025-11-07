@@ -35,6 +35,8 @@ pub enum EventError {
     InvalidSchema(String),
     #[error("schema violation: {0}")]
     SchemaViolation(String),
+    #[error("invalid cursor: {0}")]
+    InvalidCursor(String),
     #[error("storage error: {0}")]
     Storage(String),
     #[error("io error: {0}")]
@@ -76,6 +78,7 @@ impl IntoResponse for EventError {
             Self::AggregateNotFound | Self::SchemaNotFound => StatusCode::NOT_FOUND,
             Self::SchemaExists => StatusCode::CONFLICT,
             Self::SchemaViolation(_) => StatusCode::BAD_REQUEST,
+            Self::InvalidCursor(_) => StatusCode::BAD_REQUEST,
             Self::Storage(_) | Self::Serialization(_) | Self::Io(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

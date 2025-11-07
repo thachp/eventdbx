@@ -55,7 +55,7 @@ Run without flags to print the current configuration. The first invocation must 
 - `dbx aggregate create --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--metadata <json>] [--note <text>] [--json]`
 - `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--stage]`
 - `dbx aggregate patch --aggregate <type> --aggregate-id <id> --event <name> --patch <json> [--stage] [--metadata <json>] [--note <text>]`
-- `dbx aggregate list [--skip <n>] [--take <n>] [--stage]`
+- `dbx aggregate list [--cursor <token>] [--take <n>] [--stage]`
 - `dbx aggregate get --aggregate <type> --aggregate-id <id> [--include-events]`
 - `dbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
 - `dbx aggregate verify --aggregate <type> --aggregate-id <id>`
@@ -66,6 +66,8 @@ Run without flags to print the current configuration. The first invocation must 
 - `dbx aggregate export [<type>] [--all] --output <path> [--format csv|json] [--zip] [--pretty]`
 
 Staging (`--stage`) records events to `~/.eventdbx/staged_events.json` until you call `dbx aggregate commit`.
+
+Cursor pagination uses opaque-but-readable tokens. Active aggregates encode as `a:<aggregate_type>:<aggregate_id>` (archived entries use `r:`) and events append the version (`a:<aggregate_type>:<aggregate_id>:<version>`). Capture the last item from a page and feed its token back via `--cursor` to resume listing.
 
 ## Plugins & queues
 
