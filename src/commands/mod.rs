@@ -12,3 +12,4 @@ pub mod start;
 pub mod system;
 pub mod token;
 pub mod upgrade;
+pub mod watch;

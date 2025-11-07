@@ -565,7 +565,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 state.state = target_state;
                 state.merkle_root = merkle_root;
             }
-                        
+
             let mut output = serde_json::json!({
                 "aggregate_type": state.aggregate_type,
                 "aggregate_id": state.aggregate_id,

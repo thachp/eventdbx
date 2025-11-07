@@ -19,6 +19,7 @@ use crate::commands::{
     system::{BackupArgs, RestoreArgs},
     token::TokenCommands,
     upgrade::UpgradeArgs,
+    watch::WatchArgs,
 };
 
 #[derive(Parser)]
@@ -72,6 +73,8 @@ enum Commands {
         #[command(subcommand)]
         command: SchemaCommands,
     },
+    /// Run automated replication cycles
+    Watch(WatchArgs),
     /// Manage plugins
     Plugin {
         #[command(subcommand)]
@@ -128,6 +131,7 @@ async fn main() -> Result<()> {
         Commands::Config(args) => commands::config::execute(config, args)?,
         Commands::Token { command } => commands::token::execute(config, command)?,
         Commands::Schema { command } => commands::schema::execute(config, command)?,
+        Commands::Watch(args) => commands::watch::execute(config, args)?,
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
         Commands::Events(args) => commands::events::list(config, args)?,
         Commands::Queue(args) => commands::queue::execute(config, args)?,

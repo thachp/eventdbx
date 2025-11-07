@@ -124,6 +124,17 @@ EventDBX can replicate an entire domain (or selected aggregates) between two nod
 
    Every pull verifies aggregate version counts and Merkle roots before importing events. Add `--concurrency <threads>` to tune throughput on large domains.
 
+5. Automate those pulses when needed:
+
+   ```bash
+   dbx watch example --mode bidirectional --aggregate ledger --run-once
+   dbx watch example --mode push --interval 120 --background
+   dbx watch example --skip-if-active
+   dbx watch status example
+   ```
+
+   `watch` repeats the requested direction every `--interval` seconds (default 300). Add `--run-once` to exit after one cycle, `--background` to run in the background, `--skip-if-active` to avoid overlapping cycles when another watcher is still working on that domain, and `watch status <domain>` (or `--all`) to inspect persisted state whenever you need a health check.
+
 ## Maintenance
 
 - `dbx backup --output <path> [--force]`

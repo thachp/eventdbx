@@ -110,32 +110,43 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 6. **Replicate a domain (optional)**
 
    ```bash
-   dbx checkout -d default --remote 10.0.0.42:6363 --token "$(cat ~/.eventdbx/replica.token)"
+   dbx checkout -d remote1 --remote 10.0.0.42:6363 --token "$(cat ~/.eventdbx/replica.token)"
    ```
 
    - `dbx checkout` stores remote settings per domain (`remote.json` under the domain data directory). You can re-run the command with just `--remote` or `--token` to rotate either value.
    - Push schemas first so the destination validates incoming events with the same rules:
 
      ```bash
-     dbx push schema default
+     dbx push schema remote1
      ```
 
    - Mirror domain data to the remote. Limit the sync to a specific aggregate type or identifier when you need a targeted replication:
 
      ```bash
-     dbx push default
-     dbx push default --aggregate invoice
-     dbx push default --aggregate ledger --id ledger-001
+     dbx push remote1
+     dbx push remote1 --aggregate invoice
+     dbx push remote1 --aggregate ledger --id ledger-001
      ```
 
    - Pull data back down when the remote captured new events. The pull command performs the same integrity checks (version counts, Merkle root parity) before importing:
 
      ```bash
-     dbx pull default
-     dbx pull default --aggregate invoice
+     dbx pull remote1
+     dbx pull remote1 --aggregate invoice
      ```
 
    Pushing or pulling aborts if either side has diverging history for an aggregate. Use the `--concurrency <threads>` flag to tune throughput when replicating large domains.
+
+   - Automate replication with the built-in scheduler:
+
+     ```bash
+     dbx watch remote1 --mode push --interval 120 --background
+     dbx watch remote1 --mode bidirectional --aggregate ledger --run-once
+     dbx watch remote1 --skip-if-active
+     dbx watch status remote1
+     ```
+
+     `watch` loops forever (or until `--run-once`), triggering a push, pull, or bidirectional cycle every `--interval` seconds. Pass `--background` to daemonize, `--skip-if-active` to avoid overlapping runs when another watcher is working on the same domain, and inspect persisted state at any time with `dbx watch status <domain>` (use `--all` for a summary of every watcher).
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
 
@@ -201,7 +212,7 @@ console.log('event count:', history.length);
 - **Merkle Tree Integration**: Each aggregate in EventDBX is associated with a Merkle tree of events, enabling verification of data integrity. The Merkle tree structure ensures that any data tampering can be detected, offering an additional security layer against data corruption.
 - **Built-in Audit Trails**: EventDBX automatically maintains a comprehensive audit trail of all transactions, a feature invaluable for meeting compliance and regulatory requirements. It provides transparent and tamper-evident records. During audits, administrators can issue specific tokens to auditors to access and review specific aggregate instances and all relevant events associated with those instances.
 - **Extensible Read Models via Plugins**: Every event that lands in the write-side store can be dispatched to external systems through the plugin job queue. Configure plugins to receive only the slices they care about (event, state snapshot, schema), and let specialized services—search, analytics, personalization, alerting—build optimized read models without touching the write path.
-- **Remote Replication**: Push or pull domain data between configured remotes with integrity checks on aggregate versions and Merkle roots, keeping replicas aligned without rewriting history.
+- **Remote Replication**: Push or pull domain data between configured remotes with integrity checks on aggregate versions and Merkle roots, keeping replicas aligned without rewriting history. Automate recurring syncs with `dbx watch` (looping scheduler with `--interval`, `--run-once`, and optional `--background`).
 - **Built-in Observability**: A Prometheus-compatible `/metrics` endpoint reports HTTP traffic and plugin queue health so you can wire EventDBX into Grafana, Datadog, or any other monitoring stack out of the box.
 - **Security with Token-Based Authorization**: EventDBX implements token-based authorization to manage database access. Tokens are signed with an Ed25519 key pair stored under `[auth]` in `config.toml`; keep `private_key` secret and distribute `public_key` to services that need to validate them. This approach allows for precise control over who can access and modify data, protecting against unauthorized changes.
 - **Encrypted Payloads & Secrets at Rest**: Event payloads, aggregate snapshots, and `tokens.json` are encrypted transparently when a DEK is configured. Metadata such as aggregate identifiers, versions, and Merkle roots remain readable so plugins and integrity checks keep working without additional configuration.
