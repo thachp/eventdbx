@@ -61,11 +61,11 @@ pub struct WatchRunArgs {
     pub run_once: bool,
 
     /// Fork into the background (detach STDIO)
-    #[arg(long = "background", default_value_t = true)]
+    #[arg(long = "background", default_value_t = false)]
     pub background: bool,
 
     /// Skip the cycle if a previous watch is still running
-    #[arg(long = "skip-if-active", default_value_t = true)]
+    #[arg(long = "skip-if-active", default_value_t = false)]
     pub skip_if_active: bool,
 }
 
@@ -237,8 +237,17 @@ fn spawn_background(
     state_path: &Path,
     domain: &str,
 ) -> Result<()> {
+    if env::var("DBX_WATCH_BACKGROUND").is_ok() {
+        println!(
+            "[watch] refusing to background domain '{}' because it is already detached.",
+            domain
+        );
+        return Ok(());
+    }
+
     let exe = env::current_exe().context("failed to resolve current executable")?;
     let mut command = Command::new(exe);
+    command.env("DBX_WATCH_BACKGROUND", "1");
 
     if let Some(config) = config_path.as_ref() {
         command.arg("--config").arg(config);
@@ -251,6 +260,7 @@ fn spawn_background(
     }
     command.arg("--mode").arg(args.mode.to_string());
     command.arg("--interval").arg(interval_secs.to_string());
+    command.arg("--background=false");
     if args.run_once {
         command.arg("--run-once");
     }
@@ -263,7 +273,9 @@ fn spawn_background(
     {
         unsafe {
             command.pre_exec(|| {
-                libc::setsid();
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
                 Ok(())
             });
         }
