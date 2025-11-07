@@ -1,6 +1,6 @@
 {
   "name": "eventdbx",
-  "version": "3.10.10",
+  "version": "3.11.10",
   "description": "A memory-safe, event-sourced, nosql, write-side database system.",
   "license": "MIT",
   "homepage": "https://github.com/thachp/eventdbx#readme",
