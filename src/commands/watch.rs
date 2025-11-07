@@ -61,8 +61,12 @@ pub struct WatchRunArgs {
     pub run_once: bool,
 
     /// Fork into the background (detach STDIO)
-    #[arg(long = "background", default_value_t = false)]
+    #[arg(long = "background", default_value_t = true)]
     pub background: bool,
+
+    /// Skip the cycle if a previous watch is still running
+    #[arg(long = "skip-if-active", default_value_t = true)]
+    pub skip_if_active: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -139,6 +143,19 @@ fn run_watch_entry(config_path: Option<PathBuf>, args: WatchRunArgs) -> Result<(
     let (config, _) = load_or_default(config_path.clone())?;
     let interval_secs = args.interval_secs.max(1);
     let state_path = watch_state_path(&config, &domain);
+
+    if args.skip_if_active {
+        if let Some(existing) = read_watch_state(&state_path)? {
+            if existing.pid.is_some() && existing.stopped_at.is_none() {
+                println!(
+                    "[watch] skipping domain '{}' because an active watcher is still running (pid {}).",
+                    domain,
+                    existing.pid.unwrap()
+                );
+                return Ok(());
+            }
+        }
+    }
 
     if args.background {
         spawn_background(config_path, &args, interval_secs, &state_path, &domain)

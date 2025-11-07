@@ -129,10 +129,11 @@ EventDBX can replicate an entire domain (or selected aggregates) between two nod
    ```bash
    dbx watch example --mode bidirectional --aggregate ledger --run-once
    dbx watch example --mode push --interval 120 --background
+   dbx watch example --skip-if-active
    dbx watch status example
    ```
 
-   `watch` repeats the requested direction every `--interval` seconds (default 300). Add `--run-once` to exit after one cycle, `--background` to fork the scheduler into a detached process, and `watch status <domain>` (or `--all`) to inspect persisted state whenever you need a health check.
+   `watch` repeats the requested direction every `--interval` seconds (default 300). The command runs in the background and skips when another watcher for the same domain is still active by default; add `--background=false` to keep it in the foreground, `--run-once` to exit after one cycle, and `watch status <domain>` (or `--all`) to inspect persisted state whenever you need a health check.
 
 ## Maintenance
 

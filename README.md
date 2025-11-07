@@ -142,10 +142,11 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
      ```bash
      dbx watch remote1 --mode push --interval 120 --background
      dbx watch remote1 --mode bidirectional --aggregate ledger --run-once
+     dbx watch remote1 --skip-if-active
      dbx watch status remote1
      ```
 
-     `watch` loops forever (or until `--run-once`), triggering a push, pull, or bidirectional cycle every `--interval` seconds. Add `--background` to fork the loop and detach from the current terminal, or inspect persisted state at any time with `dbx watch status <domain>` (use `--all` for a summary of every watcher).
+     `watch` loops forever (or until `--run-once`), triggering a push, pull, or bidirectional cycle every `--interval` seconds. It runs in the background and skips when another watcher is already active by default; add `--background=false` to keep it in the foreground, and inspect persisted state at any time with `dbx watch status <domain>` (use `--all` for a summary of every watcher).
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
 
