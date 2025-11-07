@@ -6,7 +6,7 @@ nav_id: guides
 
 # Getting Started
 
-This guide spins up EventDBX on your workstation, covers the minimal configuration (encryption plus the Admin API), and walks through staging and committing events.
+This guide spins up EventDBX on your workstation, covers the minimal configuration (encryption and domains), and walks through staging and committing events.
 
 ## 1. Install the CLI
 
@@ -39,19 +39,6 @@ dbx config --snowflake-worker-id 7
 ```
 
 Valid values range from 0–1023.
-
-### Optional: enable the Admin API
-
-Enable the `/admin` surface for automation:
-
-```bash
-dbx config \
-  --admin-enabled true \
-  --admin-bind 127.0.0.1 \
-  --admin-port 7171
-```
-
-All Admin API calls must send a bearer token with full privileges. The CLI writes one to `~/.eventdbx/cli.token` on first start—share it with automation or issue a dedicated wildcard token with `dbx token generate --group ops --user admin --action '*.*' --resource '*'` and revoke it when you rotate credentials.
 
 ## 3. Start the server
 
@@ -165,5 +152,5 @@ Plugins expose REST/GraphQL/gRPC endpoints for external readers. Check the plugi
 
 ## Next steps
 
-- Explore the full [CLI reference]({{ '/cli/' | relative_url }}) for backups, plugins, and admin tooling.
-- Review the [API reference]({{ '/apis/' | relative_url }}) for REST, GraphQL, gRPC, and the new Admin API endpoints.
+- Explore the full [CLI reference]({{ '/cli/' | relative_url }}) for backups, plugins, and other operational tooling.
+- Review the [API reference]({{ '/apis/' | relative_url }}) for REST, GraphQL, and gRPC endpoints provided by the companion plugins.

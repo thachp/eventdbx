@@ -1,12 +1,12 @@
 ---
 title: API Reference
-description: Integrate EventDBX via REST, GraphQL, gRPC, and the Admin API.
+description: Integrate EventDBX via REST, GraphQL, and gRPC.
 nav_id: apis
 ---
 
 # API Reference
 
-EventDBX exposes multiple surfaces so you can choose the right tool for each integration. Tokens issued by the CLI are accepted everywhere unless specifically noted. REST/GraphQL/gRPC are now provided by companion binaries in the [dbx_plugins](https://github.com/thachp/dbx_plugins) workspace; the core daemon retains the admin API and control channel.
+EventDBX exposes multiple surfaces so you can choose the right tool for each integration. Tokens issued by the CLI are accepted everywhere unless specifically noted. REST/GraphQL/gRPC are now provided by companion binaries in the [dbx_plugins](https://github.com/thachp/dbx_plugins) workspace.
 
 ## REST
 
@@ -103,28 +103,3 @@ grpcurl \
 ```
 
 The service mirrors REST operations: `AppendEvent`, `ListAggregates`, `GetAggregate`, `ListEvents`, `VerifyAggregate`, and `Health`.
-
-## Admin API
-
-Enable it with:
-
-```bash
-dbx config \
-  --admin-enabled true \
-  --admin-bind 127.0.0.1 \
-  --admin-port 7070
-```
-
-Requests must include a bearer token with `*.*` privileges. Example session using the bootstrap token written to `~/.eventdbx/cli.token`:
-
-```bash
-curl -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
-  http://127.0.0.1:7070/admin/tokens
-
-curl -X POST -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"standby1","endpoint":"tcp://10.10.0.5:6363","token":"JWT"}' \
-  http://127.0.0.1:7070/admin/remotes/standby1
-```
-
-Endpoints include `/admin/tokens`, `/admin/schemas`, `/admin/remotes`, and `/admin/plugins`, all mirroring the behavior of their CLI counterparts.

@@ -39,8 +39,8 @@ while keeping the database core inside `eventdbx`.
 - Three new member crates (`plugins/rest_api`, `plugins/graphql_api`,
   `plugins/grpc_api`) depend on the control client and rehost the existing
   endpoint logic.
-- The admin REST router remains in `eventdbx` and keeps direct access to
-  `AppState` for configuration management.
+- Configuration changes now flow exclusively through the CLI and control
+  channel; no separate admin REST router is retained in `eventdbx`.
 
 ## Extraction steps
 

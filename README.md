@@ -250,8 +250,8 @@ EventDBX ships a single `dbx` binary. Every command accepts an optional `--confi
 
 ### Configuration
 
-- `dbx config [--port <u16>] [--data-dir <path>] [--cache-threshold <usize>] [--dek <base64>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>] [--snapshot-threshold <u64>] [--clear-snapshot-threshold] [--admin-enabled <true|false>] [--admin-bind <addr>] [--admin-port <u16>]`  
-  Persists configuration updates. Run without flags to print the current settings. The first invocation must include a data encryption key via `--dek` (32 bytes of base64). `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10). The Admin API relies on bearer tokens; set `--admin-enabled=false` to disable the HTTP surface entirely.
+- `dbx config [--port <u16>] [--data-dir <path>] [--cache-threshold <usize>] [--dek <base64>] [--list-page-size <usize>] [--page-limit <usize>] [--plugin-max-attempts <u32>] [--snapshot-threshold <u64>] [--clear-snapshot-threshold]`  
+  Persists configuration updates. Run without flags to print the current settings. The first invocation must include a data encryption key via `--dek` (32 bytes of base64). `--list-page-size` sets the default page size for aggregate listings (default 10), `--page-limit` caps any requested page size across list and event endpoints (default 1000), and `--plugin-max-attempts` controls how many retries are attempted before an event is marked dead (default 10).
 
 ### Tokens
 
@@ -349,34 +349,6 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `dbx plugin replay <plugin-name> <aggregate> [<aggregate_id>]`
 
 Plugins consume jobs from a durable RocksDB-backed queue. EventDBX enqueues a job for every aggregate mutation, and each plugin can opt into the data it needs—event payloads, materialized state, schemas, or combinations thereof. Clearing dead entries prompts for confirmation to avoid accidental removal. Manual retries run the failed jobs immediately; use `--event-id` to target a specific entry.
-
-### Admin API
-
-The Admin API exposes token, schema, and plugin management over HTTP so automation can operate EventDBX without shell access. It is disabled by default; enable it with:
-
-```bash
-dbx config \
-  --admin-enabled true \
-  --admin-bind 127.0.0.1 \
-  --admin-port 7171
-```
-
-Authorization uses the same JWTs as the CLI. The first server start writes a token with full privileges to `~/.eventdbx/cli.token`; reuse it (or mint a dedicated token with `dbx token generate --group ops --user admin --action '*.*' --resource '*'`) and attach it as a bearer credential:
-
-```bash
-curl -H "Authorization: Bearer $(cat ~/.eventdbx/cli.token)" \
-  http://127.0.0.1:7171/admin/tokens
-```
-
-Key routes:
-
-| Method & Path        | Description                                                                               |
-| -------------------- | ----------------------------------------------------------------------------------------- |
-| `GET /admin/tokens`  | List issued tokens; `POST` issues a new token, `/revoke` and `/refresh` manage lifecycle. |
-| `GET /admin/schemas` | Fetch declared schemas or append new ones with `POST`.                                    |
-| `GET /admin/plugins` | Inspect plugin configuration and toggle instances with `/enable` or `/disable`.           |
-
-Disable access any time with `dbx config --admin-enabled false` or issue a new root token and revoke the old one via `dbx token revoke`.
 
 ### Upgrades
 

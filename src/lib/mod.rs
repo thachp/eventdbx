@@ -1,4 +1,3 @@
-pub mod admin;
 pub mod cache;
 pub mod cli_capnp;
 pub mod cli_proxy;

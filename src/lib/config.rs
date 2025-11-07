@@ -167,8 +167,6 @@ pub struct Config {
     pub plugin_queue: PluginQueueConfig,
     #[serde(default)]
     pub socket: SocketConfig,
-    #[serde(default)]
-    pub admin: AdminApiConfig,
     #[serde(default = "default_verbose_responses")]
     pub verbose_responses: bool,
     #[serde(default)]
@@ -196,7 +194,6 @@ impl Default for Config {
             plugin_max_attempts: default_plugin_max_attempts(),
             plugin_queue: PluginQueueConfig::default(),
             socket: SocketConfig::default(),
-            admin: AdminApiConfig::default(),
             verbose_responses: default_verbose_responses(),
             auth: AuthConfig::default(),
             snowflake_worker_id: default_snowflake_worker_id(),
@@ -217,7 +214,6 @@ pub struct ConfigUpdate {
     pub verbose_responses: Option<bool>,
     pub plugin_max_attempts: Option<u32>,
     pub socket: Option<SocketConfigUpdate>,
-    pub admin: Option<AdminApiConfigUpdate>,
     pub snowflake_worker_id: Option<u16>,
 }
 
@@ -327,20 +323,6 @@ impl Config {
         if let Some(socket) = update.socket {
             if let Some(bind_addr) = socket.bind_addr {
                 self.socket.bind_addr = bind_addr;
-            }
-        }
-        if let Some(admin) = update.admin {
-            if let Some(enabled) = admin.enabled {
-                self.admin.enabled = enabled;
-            }
-            if let Some(bind_addr) = admin.bind_addr {
-                let trimmed = bind_addr.trim();
-                if !trimmed.is_empty() {
-                    self.admin.bind_addr = trimmed.to_string();
-                }
-            }
-            if let Some(port) = admin.port {
-                self.admin.port = port;
             }
         }
         self.updated_at = Utc::now();
@@ -564,36 +546,6 @@ pub struct SocketConfigUpdate {
     pub bind_addr: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AdminApiConfig {
-    #[serde(default = "default_admin_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_admin_bind_addr")]
-    pub bind_addr: String,
-    #[serde(default = "default_admin_port")]
-    pub port: Option<u16>,
-    #[serde(default, skip_serializing, alias = "master_key_hash")]
-    _deprecated_master_key_hash: Option<String>,
-}
-
-impl Default for AdminApiConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_admin_enabled(),
-            bind_addr: default_admin_bind_addr(),
-            port: default_admin_port(),
-            _deprecated_master_key_hash: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AdminApiConfigUpdate {
-    pub enabled: Option<bool>,
-    pub bind_addr: Option<String>,
-    pub port: Option<Option<u16>>,
-}
-
 fn default_config_root() -> Result<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         Ok(home.join(".eventdbx"))
@@ -687,18 +639,6 @@ fn default_queue_prune_done_ttl_secs() -> u64 {
 
 fn default_queue_prune_interval_secs() -> u64 {
     300
-}
-
-fn default_admin_enabled() -> bool {
-    false
-}
-
-fn default_admin_bind_addr() -> String {
-    "0.0.0.0".to_string()
-}
-
-fn default_admin_port() -> Option<u16> {
-    Some(7171)
 }
 
 fn default_verbose_responses() -> bool {
