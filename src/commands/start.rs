@@ -253,6 +253,9 @@ pub fn destroy(config_path: Option<PathBuf>, args: DestroyArgs) -> Result<()> {
 
 async fn start_foreground(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     let (config, path) = load_and_update_config(config_path, &args)?;
+    let pid_path = config.pid_file_path();
+    ensure_pid_slot(&pid_path)?;
+    let _pid_guard = PidFileGuard::new(&pid_path)?;
     eprintln!(
         "configuration loaded; starting server (pid={})",
         std::process::id()
@@ -266,15 +269,7 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     let pid_path = config.pid_file_path();
     let restrict_mode: restrict::RestrictMode = args.restrict.into();
 
-    if let Some(existing) = read_pid_record(&pid_path)? {
-        if process_is_running(existing.pid) {
-            return Err(anyhow!(
-                "EventDBX server already running (pid {})",
-                existing.pid
-            ));
-        }
-        fs::remove_file(&pid_path)?;
-    }
+    ensure_pid_slot(&pid_path)?;
 
     let mut command = Command::new(env::current_exe()?);
     command.arg("--config").arg(&path);
@@ -367,9 +362,46 @@ struct PidRecord {
     started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+struct PidFileGuard {
+    path: PathBuf,
+}
+
+impl PidFileGuard {
+    fn new(path: &Path) -> Result<Self> {
+        let record = PidRecord {
+            pid: std::process::id(),
+            started_at: Some(chrono::Utc::now()),
+        };
+        write_pid_record(path, &record)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for PidFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 fn write_pid_record(path: &Path, record: &PidRecord) -> Result<()> {
     let contents = serde_json::to_string(record)?;
     fs::write(path, contents)?;
+    Ok(())
+}
+
+fn ensure_pid_slot(pid_path: &Path) -> Result<()> {
+    if let Some(existing) = read_pid_record(pid_path)? {
+        if process_is_running(existing.pid) {
+            return Err(anyhow!(
+                "EventDBX server already running (pid {})",
+                existing.pid
+            ));
+        }
+        fs::remove_file(pid_path)?;
+    }
+
     Ok(())
 }
 
