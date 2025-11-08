@@ -988,7 +988,13 @@ fn process_pull_aggregate(
     let new_events_total = (remote_version - local_version) as usize;
     let new_events = if new_events_total > 0 {
         client
-            .list_events_since(token, aggregate_type, aggregate_id, local_version)
+            .list_events_since(
+                token,
+                aggregate_type,
+                aggregate_id,
+                local_version,
+                remote_state.archived,
+            )
             .with_context(|| {
                 format!(
                     "failed to fetch remote events for '{}::{}' starting at version {}",

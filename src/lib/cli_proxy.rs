@@ -4,6 +4,7 @@ use std::{
     io::Cursor,
     path::{Path, PathBuf},
     process::Stdio,
+    str::FromStr,
     sync::{Arc, RwLock},
     time::Instant,
 };
@@ -43,7 +44,10 @@ use crate::{
         AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
         normalize_optional_comment,
     },
-    store::{AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState, EventRecord},
+    store::{
+        AggregateCursor, AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState,
+        EventCursor, EventRecord,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -56,6 +60,7 @@ pub struct CliCommandResult {
 enum ControlReply {
     ListAggregates {
         aggregates: Vec<AggregateState>,
+        next_cursor: Option<String>,
     },
     GetAggregate {
         found: bool,
@@ -65,6 +70,7 @@ enum ControlReply {
         aggregate_type: String,
         aggregate_id: String,
         events: Vec<EventRecord>,
+        next_cursor: Option<String>,
     },
     AppendEvent {
         event_json: Option<String>,
@@ -87,7 +93,7 @@ enum ControlReply {
 enum ControlCommand {
     ListAggregates {
         token: String,
-        skip: usize,
+        cursor: Option<AggregateCursor>,
         take: Option<usize>,
         filter: Option<FilterExpr>,
         sort: Option<Vec<AggregateSort>>,
@@ -103,7 +109,7 @@ enum ControlCommand {
         token: String,
         aggregate_type: String,
         aggregate_id: String,
-        skip: usize,
+        cursor: Option<EventCursor>,
         take: Option<usize>,
     },
     AppendEvent {
@@ -182,6 +188,7 @@ fn control_error_code(err: &EventError) -> &'static str {
         EventError::SchemaNotFound => "schema_not_found",
         EventError::InvalidSchema(_) => "invalid_schema",
         EventError::SchemaViolation(_) => "schema_violation",
+        EventError::InvalidCursor(_) => "invalid_cursor",
         EventError::Config(_) => "config",
         EventError::Storage(_) => "storage",
         EventError::Io(_) => "io",
@@ -601,7 +608,10 @@ where
                     Ok(reply) => {
                         let payload = response.reborrow().init_payload();
                         match reply {
-                            ControlReply::ListAggregates { aggregates } => {
+                            ControlReply::ListAggregates {
+                                aggregates,
+                                next_cursor,
+                            } => {
                                 let encoded = encode_json_list_response(
                                     request_id,
                                     &aggregates,
@@ -620,6 +630,13 @@ where
                                 }
                                 let mut builder = payload.init_list_aggregates();
                                 builder.set_aggregates_json(&encoded.json);
+                                if let Some(cursor) = next_cursor.as_deref() {
+                                    builder.set_has_next_cursor(true);
+                                    builder.set_next_cursor(cursor);
+                                } else {
+                                    builder.set_has_next_cursor(false);
+                                    builder.set_next_cursor("");
+                                }
                             }
                             ControlReply::GetAggregate {
                                 found,
@@ -637,6 +654,7 @@ where
                                 aggregate_type,
                                 aggregate_id,
                                 events,
+                                next_cursor,
                             } => {
                                 let encoded = encode_json_list_response(
                                     request_id,
@@ -658,6 +676,13 @@ where
                                 }
                                 let mut builder = payload.init_list_events();
                                 builder.set_events_json(&encoded.json);
+                                if let Some(cursor) = next_cursor.as_deref() {
+                                    builder.set_has_next_cursor(true);
+                                    builder.set_next_cursor(cursor);
+                                } else {
+                                    builder.set_has_next_cursor(false);
+                                    builder.set_next_cursor("");
+                                }
                             }
                             ControlReply::AppendEvent { event_json } => {
                                 let mut builder = payload.init_append_event();
@@ -740,8 +765,17 @@ fn parse_control_command(
     {
         payload::ListAggregates(req) => {
             let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
-            let skip = usize::try_from(req.get_skip())
-                .map_err(|_| EventError::InvalidSchema("skip exceeds platform limits".into()))?;
+            let cursor = if req.get_has_cursor() {
+                let raw = read_control_text(req.get_cursor(), "cursor")?;
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(AggregateCursor::from_str(trimmed)?)
+                }
+            } else {
+                None
+            };
             let take = if req.get_has_take() {
                 Some(usize::try_from(req.get_take()).map_err(|_| {
                     EventError::InvalidSchema("take exceeds platform limits".into())
@@ -803,7 +837,7 @@ fn parse_control_command(
 
             Ok(ControlCommand::ListAggregates {
                 token,
-                skip,
+                cursor,
                 take,
                 filter,
                 sort,
@@ -829,8 +863,17 @@ fn parse_control_command(
             let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
             let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
             let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
-            let skip = usize::try_from(req.get_skip())
-                .map_err(|_| EventError::InvalidSchema("skip exceeds platform limits".into()))?;
+            let cursor = if req.get_has_cursor() {
+                let raw = read_control_text(req.get_cursor(), "cursor")?;
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(EventCursor::from_str(trimmed)?)
+                }
+            } else {
+                None
+            };
             let take = if req.get_has_take() {
                 Some(usize::try_from(req.get_take()).map_err(|_| {
                     EventError::InvalidSchema("take exceeds platform limits".into())
@@ -845,7 +888,7 @@ fn parse_control_command(
                     .to_string(),
                 aggregate_type,
                 aggregate_id,
-                skip,
+                cursor,
                 take,
             })
         }
@@ -1096,7 +1139,7 @@ async fn execute_control_command(
     match command {
         ControlCommand::ListAggregates {
             token,
-            skip,
+            cursor,
             take,
             filter,
             sort,
@@ -1123,15 +1166,20 @@ async fn execute_control_command(
                 let filter = filter;
                 let sort = sort;
                 let token = token.clone();
+                let cursor = cursor.clone();
                 move || {
                     let sort_ref = sort.as_ref().map(|keys| keys.as_slice());
-                    core.list_aggregates(&token, skip, take, filter, sort_ref, scope)
+                    let cursor_ref = cursor.as_ref();
+                    core.list_aggregates(&token, cursor_ref, take, filter, sort_ref, scope)
                 }
             })
             .await
             .map_err(|err| EventError::Storage(format!("list aggregates task failed: {err}")))?;
-            let aggregates = aggregates?;
-            Ok(ControlReply::ListAggregates { aggregates })
+            let (aggregates, next_cursor) = aggregates?;
+            Ok(ControlReply::ListAggregates {
+                aggregates,
+                next_cursor: next_cursor.map(|cursor| cursor.encode()),
+            })
         }
         ControlCommand::GetAggregate {
             token,
@@ -1162,7 +1210,7 @@ async fn execute_control_command(
             token,
             aggregate_type,
             aggregate_id,
-            skip,
+            cursor,
             take,
         } => {
             let events = spawn_blocking({
@@ -1170,15 +1218,21 @@ async fn execute_control_command(
                 let aggregate_type = aggregate_type.clone();
                 let aggregate_id = aggregate_id.clone();
                 let token = token.clone();
-                move || core.list_events(&token, &aggregate_type, &aggregate_id, skip, take)
+                let cursor = cursor.clone();
+                move || {
+                    let cursor_ref = cursor.as_ref();
+                    core.list_events(&token, &aggregate_type, &aggregate_id, cursor_ref, take)
+                }
             })
             .await
             .map_err(|err| EventError::Storage(format!("list events task failed: {err}")))??;
 
+            let (events, next_cursor) = events;
             Ok(ControlReply::ListEvents {
                 aggregate_type,
                 aggregate_id,
                 events,
+                next_cursor: next_cursor.map(|cursor| cursor.encode()),
             })
         }
         ControlCommand::AppendEvent {

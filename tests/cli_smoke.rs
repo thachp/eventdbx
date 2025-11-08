@@ -1835,22 +1835,36 @@ fn aggregate_list_supports_sorting() -> Result<()> {
     assert_eq!(version_list[1]["version"], 1);
     assert_eq!(version_list[2]["version"], 1);
 
+    let first_page = cli.run_json(&["aggregate", "list", "--json", "--take", "1"])?;
+    let first_list = first_page
+        .as_array()
+        .context("first aggregate page did not return an array")?;
+    assert_eq!(first_list.len(), 1);
+    assert_eq!(
+        first_list[0]["aggregate_id"], "invoice-1",
+        "expected invoice-1 to appear first without an explicit sort"
+    );
+    let aggregate_type = first_list[0]["aggregate_type"]
+        .as_str()
+        .context("first page missing aggregate_type")?;
+    let aggregate_id = first_list[0]["aggregate_id"]
+        .as_str()
+        .context("first page missing aggregate_id")?;
+    let cursor = format!("a:{}:{}", aggregate_type, aggregate_id);
     let paged = cli.run_json(&[
         "aggregate",
         "list",
         "--json",
         "--take",
         "1",
-        "--skip",
-        "1",
-        "--sort",
-        "version:desc,aggregate_id:asc",
+        "--cursor",
+        &cursor,
     ])?;
     let paged_list = paged
         .as_array()
-        .context("paged aggregate list did not return an array")?;
+        .context("cursor-based aggregate list did not return an array")?;
     assert_eq!(paged_list.len(), 1);
-    assert_eq!(paged_list[0]["aggregate_id"], "invoice-1");
+    assert_eq!(paged_list[0]["aggregate_id"], "order-1");
 
     Ok(())
 }

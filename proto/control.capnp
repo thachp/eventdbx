@@ -45,20 +45,23 @@ struct ControlHelloResponse {
 }
 
 struct ListAggregatesRequest {
-  skip @0 :UInt64;
-  take @1 :UInt64;
-  hasTake @2 :Bool;
-  filter @3 :Text;
-  hasFilter @4 :Bool;
-  sort @5 :List(AggregateSort);
-  hasSort @6 :Bool;
-  includeArchived @7 :Bool;
-  archivedOnly @8 :Bool;
-  token @9 :Text;
+  cursor @0 :Text;
+  hasCursor @1 :Bool;
+  take @2 :UInt64;
+  hasTake @3 :Bool;
+  filter @4 :Text;
+  hasFilter @5 :Bool;
+  sort @6 :List(AggregateSort);
+  hasSort @7 :Bool;
+  includeArchived @8 :Bool;
+  archivedOnly @9 :Bool;
+  token @10 :Text;
 }
 
 struct ListAggregatesResponse {
   aggregatesJson @0 :Text;
+  nextCursor @1 :Text;
+  hasNextCursor @2 :Bool;
 }
 
 struct GetAggregateRequest {
@@ -75,16 +78,19 @@ struct GetAggregateResponse {
 struct ListEventsRequest {
   aggregateType @0 :Text;
   aggregateId @1 :Text;
-  skip @2 :UInt64;
-  take @3 :UInt64;
-  hasTake @4 :Bool;
-  filter @5 :Text;
-  hasFilter @6 :Bool;
-  token @7 :Text;
+  cursor @2 :Text;
+  hasCursor @3 :Bool;
+  take @4 :UInt64;
+  hasTake @5 :Bool;
+  filter @6 :Text;
+  hasFilter @7 :Bool;
+  token @8 :Text;
 }
 
 struct ListEventsResponse {
   eventsJson @0 :Text;
+  nextCursor @1 :Text;
+  hasNextCursor @2 :Bool;
 }
 
 struct AppendEventRequest {

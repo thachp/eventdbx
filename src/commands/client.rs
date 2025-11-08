@@ -244,23 +244,22 @@ impl ServerClient {
         include_archived: bool,
         archived_only: bool,
     ) -> Result<Vec<AggregateState>> {
-        let mut skip = 0usize;
+        let mut cursor: Option<String> = None;
         let mut results = Vec::new();
         loop {
-            let page = self.list_aggregates_page(
+            let (page, next_cursor) = self.list_aggregates_page(
                 token,
-                skip,
+                cursor.as_deref(),
                 DEFAULT_PAGE_SIZE,
                 filter,
                 include_archived,
                 archived_only,
             )?;
-            let count = page.len();
-            if count == 0 {
+            results.extend(page);
+            cursor = next_cursor;
+            if cursor.is_none() {
                 break;
             }
-            skip += count;
-            results.extend(page);
         }
         Ok(results)
     }
@@ -268,12 +267,12 @@ impl ServerClient {
     fn list_aggregates_page(
         &self,
         token: &str,
-        skip: usize,
+        cursor: Option<&str>,
         take: usize,
         filter: Option<&str>,
         include_archived: bool,
         archived_only: bool,
-    ) -> Result<Vec<AggregateState>> {
+    ) -> Result<(Vec<AggregateState>, Option<String>)> {
         let request_id = next_request_id();
         send_control_request_blocking(
             &self.connect_addr,
@@ -283,7 +282,13 @@ impl ServerClient {
                 let payload_builder = request.reborrow().init_payload();
                 let mut list = payload_builder.init_list_aggregates();
                 list.set_token(token);
-                list.set_skip(skip as u64);
+                if let Some(cursor) = cursor {
+                    list.set_has_cursor(true);
+                    list.set_cursor(cursor);
+                } else {
+                    list.set_has_cursor(false);
+                    list.set_cursor("");
+                }
                 list.set_has_take(true);
                 list.set_take(take as u64);
                 list.set_include_archived(include_archived);
@@ -307,13 +312,18 @@ impl ServerClient {
                 {
                     payload::ListAggregates(Ok(result)) => {
                         let json = read_text(result.get_aggregates_json(), "aggregates_json")?;
-                        if json.trim().is_empty() {
-                            Ok(Vec::new())
+                        let aggregates = if json.trim().is_empty() {
+                            Vec::new()
                         } else {
-                            let aggregates: Vec<AggregateState> = serde_json::from_str(&json)
-                                .context("failed to parse list_aggregates payload")?;
-                            Ok(aggregates)
-                        }
+                            serde_json::from_str(&json)
+                                .context("failed to parse list_aggregates payload")?
+                        };
+                        let next_cursor = if result.get_has_next_cursor() {
+                            Some(read_text(result.get_next_cursor(), "next_cursor")?)
+                        } else {
+                            None
+                        };
+                        Ok((aggregates, next_cursor))
                     }
                     payload::Error(Ok(error)) => {
                         let code = read_text(error.get_code(), "code")?;
@@ -339,22 +349,21 @@ impl ServerClient {
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Vec<EventRecord>> {
-        let mut skip = 0usize;
+        let mut cursor: Option<String> = None;
         let mut results = Vec::new();
         loop {
-            let page = self.list_events_page(
+            let (page, next_cursor) = self.list_events_page(
                 token,
                 aggregate_type,
                 aggregate_id,
-                skip,
+                cursor.as_deref(),
                 DEFAULT_PAGE_SIZE,
             )?;
-            let count = page.len();
-            if count == 0 {
+            results.extend(page);
+            cursor = next_cursor;
+            if cursor.is_none() {
                 break;
             }
-            skip += count;
-            results.extend(page);
         }
         Ok(results)
     }
@@ -365,23 +374,31 @@ impl ServerClient {
         aggregate_type: &str,
         aggregate_id: &str,
         start_version: u64,
+        archived: bool,
     ) -> Result<Vec<EventRecord>> {
-        let mut skip = start_version as usize;
+        let mut cursor = if start_version == 0 {
+            None
+        } else {
+            let prefix = if archived { 'r' } else { 'a' };
+            Some(format!(
+                "{}:{}:{}:{}",
+                prefix, aggregate_type, aggregate_id, start_version
+            ))
+        };
         let mut results = Vec::new();
         loop {
-            let page = self.list_events_page(
+            let (page, next_cursor) = self.list_events_page(
                 token,
                 aggregate_type,
                 aggregate_id,
-                skip,
+                cursor.as_deref(),
                 DEFAULT_PAGE_SIZE,
             )?;
-            let count = page.len();
-            if count == 0 {
+            results.extend(page);
+            cursor = next_cursor;
+            if cursor.is_none() {
                 break;
             }
-            skip += count;
-            results.extend(page);
         }
         Ok(results)
     }
@@ -391,9 +408,9 @@ impl ServerClient {
         token: &str,
         aggregate_type: &str,
         aggregate_id: &str,
-        skip: usize,
+        cursor: Option<&str>,
         take: usize,
-    ) -> Result<Vec<EventRecord>> {
+    ) -> Result<(Vec<EventRecord>, Option<String>)> {
         let request_id = next_request_id();
         send_control_request_blocking(
             &self.connect_addr,
@@ -405,7 +422,13 @@ impl ServerClient {
                 list.set_token(token);
                 list.set_aggregate_type(aggregate_type);
                 list.set_aggregate_id(aggregate_id);
-                list.set_skip(skip as u64);
+                if let Some(cursor) = cursor {
+                    list.set_has_cursor(true);
+                    list.set_cursor(cursor);
+                } else {
+                    list.set_has_cursor(false);
+                    list.set_cursor("");
+                }
                 list.set_has_take(true);
                 list.set_take(take as u64);
                 list.set_has_filter(false);
@@ -421,18 +444,23 @@ impl ServerClient {
                 {
                     payload::ListEvents(Ok(result)) => {
                         let json = read_text(result.get_events_json(), "events_json")?;
-                        if json.trim().is_empty() {
-                            Ok(Vec::new())
+                        let events = if json.trim().is_empty() {
+                            Vec::new()
                         } else {
-                            let events: Vec<EventRecord> = serde_json::from_str(&json)
-                                .context("failed to parse list_events payload")?;
-                            Ok(events)
-                        }
+                            serde_json::from_str(&json)
+                                .context("failed to parse list_events payload")?
+                        };
+                        let next_cursor = if result.get_has_next_cursor() {
+                            Some(read_text(result.get_next_cursor(), "next_cursor")?)
+                        } else {
+                            None
+                        };
+                        Ok((events, next_cursor))
                     }
                     payload::Error(Ok(error)) => {
                         let code = read_text(error.get_code(), "code")?;
                         if code == "aggregate_not_found" {
-                            return Ok(Vec::new());
+                            return Ok((Vec::new(), None));
                         }
                         let message = read_text(error.get_message(), "message")?;
                         Err(anyhow!("server returned {}: {}", code, message))

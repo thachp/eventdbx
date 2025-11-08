@@ -15,11 +15,13 @@ Run the `dbx_rest_` plugin to expose these routes (`cargo run -p dbx_rest -- --b
 | Endpoint                                | Description                                   |
 | --------------------------------------- | --------------------------------------------- |
 | `GET /health`                           | Liveness probe (no auth required).            |
-| `GET /v1/aggregates`                    | List aggregates (`skip`/`take` query params). |
+| `GET /v1/aggregates`                    | List aggregates (`cursor`/`take` query params). |
 | `GET /v1/aggregates/{type}/{id}`        | Fetch the current aggregate state.            |
 | `GET /v1/aggregates/{type}/{id}/events` | Stream events with pagination.                |
 | `POST /v1/events`                       | Append an event.                              |
 | `GET /v1/aggregates/{type}/{id}/verify` | Return the aggregate's Merkle root.           |
+
+Cursor tokens mirror the CLI: aggregates use `a:<aggregate_type>:<aggregate_id>` for active data (`r:` for archived) and event cursors append the version (`a:<aggregate_type>:<aggregate_id>:<version>`). Supply the token from the final item in a page via the `cursor` query parameter to continue listing.
 
 Example request:
 
