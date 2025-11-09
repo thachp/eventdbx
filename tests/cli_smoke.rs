@@ -189,6 +189,26 @@ impl CliTest {
     fn data_dir(&self) -> PathBuf {
         self.home.join(".eventdbx")
     }
+
+    fn config_path(&self) -> PathBuf {
+        self.data_dir().join("config.toml")
+    }
+
+    fn load_config(&self) -> Result<eventdbx::config::Config> {
+        let path = self.config_path();
+        if !path.exists() {
+            let _ = self.run(&["config"])?;
+        }
+        let contents = fs::read_to_string(&path).context("failed to read config.toml")?;
+        let cfg: eventdbx::config::Config =
+            toml::from_str(&contents).context("failed to parse config.toml")?;
+        Ok(cfg)
+    }
+
+    fn plugin_queue_db_path(&self) -> Result<PathBuf> {
+        let config = self.load_config()?;
+        Ok(config.plugin_queue_db_path())
+    }
 }
 
 #[test]
@@ -215,6 +235,8 @@ fn token_generate_and_list_json_round_trip() -> Result<()> {
         "alice",
         "--action",
         "aggregate.read",
+        "--tenant",
+        "default",
         "--json",
     ])?;
     let record: Value =
@@ -244,7 +266,9 @@ fn token_generate_and_list_json_round_trip() -> Result<()> {
 #[test]
 fn token_generate_requires_action_for_non_root() -> Result<()> {
     let cli = CliTest::new()?;
-    let failure = cli.run_failure(&["token", "generate", "--group", "ops", "--user", "alice"])?;
+    let failure = cli.run_failure(&[
+        "token", "generate", "--group", "ops", "--user", "alice", "--tenant", "default",
+    ])?;
     assert!(
         failure
             .stderr
@@ -267,6 +291,8 @@ fn token_refresh_replaces_token() -> Result<()> {
         "alice",
         "--action",
         "aggregate.read",
+        "--tenant",
+        "default",
         "--json",
     ])?;
     let original_token = original["token"]
@@ -409,7 +435,7 @@ cli_success_contains_test!(
 fn queue_clear_prompts_and_respects_confirmation() -> Result<()> {
     let cli = CliTest::new()?;
     {
-        let queue_path = cli.data_dir().join("plugin_queue.db");
+        let queue_path = cli.plugin_queue_db_path()?;
         let store = PluginQueueStore::open(queue_path.as_path()).map_err(anyhow::Error::from)?;
         let job = store
             .enqueue_job(
@@ -447,7 +473,7 @@ fn queue_clear_prompts_and_respects_confirmation() -> Result<()> {
 fn queue_status_displays_dead_events() -> Result<()> {
     let cli = CliTest::new()?;
     {
-        let queue_path = cli.data_dir().join("plugin_queue.db");
+        let queue_path = cli.plugin_queue_db_path()?;
         let store = PluginQueueStore::open(queue_path.as_path()).map_err(anyhow::Error::from)?;
         store
             .enqueue_job(
@@ -953,6 +979,8 @@ fn token_revoke_updates_status() -> Result<()> {
         "alice",
         "--action",
         "aggregate.read",
+        "--tenant",
+        "default",
         "--json",
     ])?;
     let token = record["token"]
@@ -972,6 +1000,132 @@ fn token_revoke_updates_status() -> Result<()> {
     assert_eq!(array.len(), 1);
     assert_eq!(array[0]["status"], json!("revoked"));
 
+    Ok(())
+}
+
+#[test]
+fn tenant_assign_list_and_unassign_flow() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&["tenant", "assign", "people", "--shard", "shard-0003"])?;
+    cli.run(&["tenant", "assign", "billing", "--shard", "4"])?;
+
+    let list_all = cli.run_json(&["tenant", "list", "--json"])?;
+    let entries = list_all
+        .as_array()
+        .context("tenant list did not return an array")?;
+    assert_eq!(
+        entries.len(),
+        2,
+        "expected two tenant assignments: {entries:?}"
+    );
+    assert!(
+        entries.iter().any(|entry| {
+            entry["tenant"] == json!("people")
+                && entry["shard"] == json!("shard-0003")
+                && entry["quota"].is_null()
+        }),
+        "missing people assignment: {entries:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["tenant"] == json!("billing")
+                && entry["shard"] == json!("shard-0004")
+                && entry["quota"].is_null()),
+        "missing billing assignment: {entries:?}"
+    );
+
+    let filtered = cli.run_json(&["tenant", "list", "--json", "--shard", "4"])?;
+    let filtered_array = filtered
+        .as_array()
+        .context("filtered tenant list did not return an array")?;
+    assert_eq!(filtered_array.len(), 1, "expected one entry for shard-0004");
+    assert_eq!(filtered_array[0]["tenant"], json!("billing"));
+    assert!(filtered_array[0]["quota"].is_null());
+
+    cli.run(&["tenant", "unassign", "people"])?;
+    let after_unassign = cli.run_json(&["tenant", "list", "--json"])?;
+    let remaining = after_unassign
+        .as_array()
+        .context("tenant list did not return an array after unassign")?;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0]["tenant"], json!("billing"));
+    assert_eq!(remaining[0]["shard"], json!("shard-0004"));
+    assert!(remaining[0]["quota"].is_null());
+    Ok(())
+}
+
+#[test]
+fn tenant_stats_reports_counts() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&["tenant", "assign", "alpha", "--shard", "1"])?;
+    cli.run(&["tenant", "assign", "bravo", "--shard", "1"])?;
+    cli.run(&["tenant", "assign", "charlie", "--shard", "2"])?;
+
+    let stats = cli.run_json(&["tenant", "stats", "--json"])?;
+    let stats_map = stats
+        .as_object()
+        .context("tenant stats did not return an object")?;
+    assert_eq!(stats_map.get("shard-0001").and_then(Value::as_u64), Some(2));
+    assert_eq!(stats_map.get("shard-0002").and_then(Value::as_u64), Some(1));
+
+    cli.run(&["tenant", "unassign", "alpha"])?;
+    let after = cli.run_json(&["tenant", "stats", "--json"])?;
+    let after_map = after
+        .as_object()
+        .context("tenant stats did not return an object after unassign")?;
+    assert_eq!(after_map.get("shard-0001").and_then(Value::as_u64), Some(1));
+    assert_eq!(after_map.get("shard-0002").and_then(Value::as_u64), Some(1));
+    Ok(())
+}
+
+#[test]
+fn tenant_quota_limits_aggregate_creation() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&["tenant", "quota", "set", "default", "--max-aggregates", "1"])?;
+
+    let list = cli.run_json(&["tenant", "list", "--json"])?;
+    let quota_entry = list
+        .as_array()
+        .context("tenant list did not return an array after quota set")?
+        .iter()
+        .find(|entry| entry["tenant"] == json!("default"))
+        .cloned()
+        .context("missing default tenant entry with quota")?;
+    assert_eq!(quota_entry["quota"], json!(1));
+
+    cli.run(&["schema", "create", "order", "--events", "order_created"])?;
+    cli.create_aggregate("order", "order-1", "order_created")?;
+
+    let failure = cli.run_failure(&[
+        "aggregate",
+        "create",
+        "order",
+        "order-2",
+        "--event",
+        "order_created",
+        "--json",
+    ])?;
+    assert!(
+        failure.stderr.contains("quota"),
+        "unexpected quota failure message:\n{}",
+        failure.stderr
+    );
+
+    cli.run(&["tenant", "quota", "clear", "default"])?;
+    let list_after_clear = cli.run_json(&["tenant", "list", "--json"])?;
+    assert!(
+        !list_after_clear
+            .as_array()
+            .context("tenant list did not return an array after quota clear")?
+            .iter()
+            .any(|entry| entry["tenant"] == json!("default")),
+        "default tenant entry should disappear once quota is cleared"
+    );
+    cli.create_aggregate("order", "order-2", "order_created")?;
     Ok(())
 }
 
@@ -1456,12 +1610,11 @@ fn aggregate_create_outputs_state() -> Result<()> {
 #[test]
 fn aggregate_list_json_empty() -> Result<()> {
     let cli = CliTest::new()?;
-    let failure = cli.run_failure(&["aggregate", "list", "--json"])?;
-    assert!(
-        failure.stderr.contains("storage error"),
-        "unexpected aggregate list failure:\n{}",
-        failure.stderr
-    );
+    let output = cli.run_json(&["aggregate", "list", "--json"])?;
+    let array = output
+        .as_array()
+        .context("aggregate list did not return an array")?;
+    assert!(array.is_empty(), "expected no aggregates, got {}", output);
     Ok(())
 }
 

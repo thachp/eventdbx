@@ -111,6 +111,10 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
             if args.actions.is_empty() {
                 bail!("at least one --action must be provided");
             }
+            if args.tenants.is_empty() {
+                bail!("--tenant must be specified at least once to bind the token to a tenant");
+            }
+
             let subject = args
                 .subject
                 .clone()

@@ -1206,11 +1206,7 @@ fn ensure_existing_domain(config: &Config, domain: &str) -> Result<PathBuf> {
 }
 
 fn domain_data_dir_for(config: &Config, domain: &str) -> PathBuf {
-    if domain.eq_ignore_ascii_case(DEFAULT_DOMAIN_NAME) {
-        config.data_dir.clone()
-    } else {
-        config.domains_root().join(domain)
-    }
+    config.domain_data_dir_for(domain)
 }
 
 fn load_remote_endpoint_for_domain(config: &Config, domain: &str) -> Result<DomainRemoteEndpoint> {
