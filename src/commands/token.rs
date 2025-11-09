@@ -51,6 +51,10 @@ pub struct TokenGenerateArgs {
     #[arg(long, default_value_t = false)]
     pub keep_alive: bool,
 
+    /// Restrict the token to one or more tenants (repeat flag to allow multiple)
+    #[arg(long = "tenant", value_name = "TENANT")]
+    pub tenants: Vec<String>,
+
     /// Emit JSON output
     #[arg(long, default_value_t = false)]
     pub json: bool,
@@ -122,6 +126,7 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
                 user: args.user,
                 actions: args.actions.clone(),
                 resources,
+                tenants: normalize_tenant_ids(&args.tenants),
                 ttl_secs: args.ttl,
                 not_before: None,
                 issued_by,
@@ -197,8 +202,13 @@ fn print_record(record: &TokenRecord) {
     } else {
         record.resources.join(",")
     };
+    let tenants = if record.tenants.is_empty() {
+        "any".to_string()
+    } else {
+        record.tenants.join(",")
+    };
     println!(
-        "token={}\n  jti={}\n  subject={}\n  group={}\n  user={}\n  status={:?}\n  issued_by={}\n  issued_at={}\n  expires_at={}\n  actions=[{}]\n  resources=[{}]",
+        "token={}\n  jti={}\n  subject={}\n  group={}\n  user={}\n  status={:?}\n  issued_by={}\n  issued_at={}\n  expires_at={}\n  actions=[{}]\n  resources=[{}]\n  tenants=[{}]",
         token_display,
         record.jti,
         record.subject,
@@ -209,6 +219,19 @@ fn print_record(record: &TokenRecord) {
         record.issued_at.to_rfc3339(),
         expires_at,
         actions,
-        resources
+        resources,
+        tenants
     );
+}
+
+fn normalize_tenant_ids(values: &[String]) -> Vec<String> {
+    let mut cleaned: Vec<String> = values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .collect();
+    cleaned.sort();
+    cleaned.dedup();
+    cleaned
 }

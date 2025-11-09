@@ -57,6 +57,8 @@ pub struct JwtClaims {
     pub issued_by: String,
     #[serde(default)]
     pub limits: JwtLimits,
+    #[serde(default)]
+    pub tenants: Vec<String>,
 }
 
 impl JwtClaims {
@@ -92,6 +94,15 @@ impl JwtClaims {
             .any(|pattern| wildcard_matches(pattern, resource))
     }
 
+    pub fn allows_tenant(&self, tenant: &str) -> bool {
+        if self.tenants.is_empty() {
+            return true;
+        }
+        self.tenants
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(tenant))
+    }
+
     pub fn expires_at(&self) -> Option<DateTime<Utc>> {
         self.exp.and_then(|ts| DateTime::from_timestamp(ts, 0))
     }
@@ -104,6 +115,7 @@ pub struct IssueTokenInput {
     pub user: String,
     pub actions: Vec<String>,
     pub resources: Vec<String>,
+    pub tenants: Vec<String>,
     pub ttl_secs: Option<u64>,
     pub not_before: Option<DateTime<Utc>>,
     pub issued_by: String,
@@ -118,8 +130,23 @@ impl IssueTokenInput {
         if self.resources.is_empty() {
             self.resources = vec![ROOT_RESOURCE.to_string()];
         }
+        if !self.tenants.is_empty() {
+            self.tenants = normalize_tenants(self.tenants);
+        }
         self
     }
+}
+
+fn normalize_tenants(values: Vec<String>) -> Vec<String> {
+    let mut cleaned: Vec<String> = values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .collect();
+    cleaned.sort();
+    cleaned.dedup();
+    cleaned
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +159,8 @@ pub struct TokenRecord {
     pub user: String,
     pub actions: Vec<String>,
     pub resources: Vec<String>,
+    #[serde(default)]
+    pub tenants: Vec<String>,
     pub issued_at: DateTime<Utc>,
     #[serde(default)]
     pub not_before: Option<DateTime<Utc>>,
@@ -307,6 +336,7 @@ impl TokenManager {
             resources: payload.resources.clone(),
             issued_by: payload.issued_by.clone(),
             limits: payload.limits.clone(),
+            tenants: payload.tenants.clone(),
         };
 
         let token = encode(&self.header, &claims, &self.encoding_key)
@@ -320,6 +350,7 @@ impl TokenManager {
             user: payload.user,
             actions: claims.actions.clone(),
             resources: claims.resources.clone(),
+            tenants: claims.tenants.clone(),
             issued_at: now,
             not_before: payload.not_before,
             expires_at,
@@ -483,6 +514,7 @@ impl TokenManager {
             } else {
                 record.resources.clone()
             },
+            tenants: record.tenants.clone(),
             ttl_secs,
             not_before: None,
             issued_by,

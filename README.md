@@ -94,6 +94,8 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    dbx token generate --group admin --user jane --expiration 3600
    ```
 
+   - Add `--tenant <id>` (repeat the flag for multiple tenants) to bind the token to specific tenant ids. The server rejects any request where the supplied `tenantId` does not appear in the token’s claims.
+
 5. **Append an event**
 
    - When the server is running the CLI proxies writes through the control socket automatically. Pass a token with `--token` or set `EVENTDBX_TOKEN` to reuse your own credentials; otherwise the CLI mints a short-lived token for the call.
@@ -114,6 +116,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    ```
 
    - `dbx checkout` stores remote settings per domain (`remote.json` under the domain data directory). You can re-run the command with just `--remote` or `--token` to rotate either value.
+   - When the remote hosts multiple tenants, pass `--remote-tenant <id>` so subsequent `dbx push`/`dbx pull` calls know which tenant to target.
    - Push schemas first so the destination validates incoming events with the same rules:
 
      ```bash
@@ -147,6 +150,19 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
      ```
 
      `watch` loops forever (or until `--run-once`), triggering a push, pull, or bidirectional cycle every `--interval` seconds. Pass `--background` to daemonize, `--skip-if-active` to avoid overlapping runs when another watcher is working on the same domain, and inspect persisted state at any time with `dbx watch status <domain>` (use `--all` for a summary of every watcher).
+
+## Manage tenants (multi-tenant mode)
+
+Enable multi-tenant mode in `config.toml` (set `[tenants] multi_tenant = true`) to hash tenants across shard directories. EventDBX automatically hashes tenants when no manual assignment exists, and you can override placements with the `dbx tenant` commands:
+
+```bash
+dbx tenant assign people --shard shard-0003
+dbx tenant unassign sandbox
+dbx tenant list --json
+dbx tenant stats
+```
+
+Assignments live in a dedicated RocksDB directory (`tenant_meta/` under your data root). Unassigned tenants continue to hash across the configured shard count.
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
 

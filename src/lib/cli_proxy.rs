@@ -48,6 +48,8 @@ use crate::{
         AggregateCursor, AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState,
         EventCursor, EventRecord,
     },
+    tenant::CoreProvider,
+    token::{JwtClaims, TokenManager},
 };
 
 #[derive(Debug, Clone)]
@@ -173,6 +175,7 @@ enum FirstMessage {
     Control {
         protocol_version: u16,
         token_result: Result<String, String>,
+        tenant_result: Result<Option<String>, String>,
     },
 }
 
@@ -230,7 +233,8 @@ pub mod test_support {
     use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
     pub fn spawn_control_session(
-        core: CoreContext,
+        core_provider: Arc<dyn CoreProvider>,
+        tokens: Arc<TokenManager>,
         shared_config: Arc<RwLock<Config>>,
     ) -> (
         Compat<WriteHalf<DuplexStream>>,
@@ -245,7 +249,7 @@ pub mod test_support {
             let message = read_message(&mut server_reader, ReaderOptions::new())
                 .await
                 .context("failed to read control hello")?;
-            let (protocol_version, token_result) = {
+            let (protocol_version, token_result, tenant_result) = {
                 let hello = message
                     .get_root::<control_hello::Reader>()
                     .context("failed to decode control hello")?;
@@ -259,15 +263,27 @@ pub mod test_support {
                             .map_err(|err| format!("invalid UTF-8 in control token: {err}"))
                             .map(|value| value.trim().to_string())
                     });
-                (protocol_version, token_result)
+                let tenant_result = hello
+                    .get_tenant_id()
+                    .map_err(|err| format!("failed to read control tenant id: {err}"))
+                    .and_then(|reader| {
+                        reader
+                            .to_str()
+                            .map_err(|err| format!("invalid UTF-8 in control tenant id: {err}"))
+                            .map(|value| value.trim().to_string())
+                    })
+                    .map(|value| if value.is_empty() { None } else { Some(value) });
+                (protocol_version, token_result, tenant_result)
             };
             drop(message);
             handle_control_handshake(
                 protocol_version,
                 token_result,
+                tenant_result,
                 &mut server_reader,
                 &mut server_writer,
-                core,
+                Arc::clone(&tokens),
+                Arc::clone(&core_provider),
                 shared_config,
             )
             .await
@@ -284,7 +300,8 @@ pub mod test_support {
 pub async fn start(
     bind_addr: &str,
     config_path: Arc<PathBuf>,
-    core: CoreContext,
+    tokens: Arc<TokenManager>,
+    core_provider: Arc<dyn CoreProvider>,
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<JoinHandle<()>> {
     let listener = TcpListener::bind(bind_addr)
@@ -297,11 +314,14 @@ pub async fn start(
     info!("CLI Cap'n Proto server listening on {}", display_addr);
 
     let handle = tokio::spawn({
-        let core = core.clone();
+        let core_provider = Arc::clone(&core_provider);
+        let tokens = Arc::clone(&tokens);
         let shared_config = Arc::clone(&shared_config);
         let config_path = Arc::clone(&config_path);
         async move {
-            if let Err(err) = serve(listener, config_path, core, shared_config).await {
+            if let Err(err) =
+                serve(listener, config_path, tokens, core_provider, shared_config).await
+            {
                 warn!("CLI proxy server terminated: {err:?}");
             }
         }
@@ -312,7 +332,8 @@ pub async fn start(
 async fn serve(
     listener: TcpListener,
     config_path: Arc<PathBuf>,
-    core: CoreContext,
+    tokens: Arc<TokenManager>,
+    core_provider: Arc<dyn CoreProvider>,
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<()> {
     loop {
@@ -321,10 +342,19 @@ async fn serve(
             .await
             .context("failed to accept CLI proxy connection")?;
         let config_path = Arc::clone(&config_path);
-        let core = core.clone();
+        let core_provider = Arc::clone(&core_provider);
+        let tokens = Arc::clone(&tokens);
         let shared_config = Arc::clone(&shared_config);
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, config_path, core, shared_config).await {
+            if let Err(err) = handle_connection(
+                stream,
+                config_path,
+                Arc::clone(&tokens),
+                Arc::clone(&core_provider),
+                shared_config,
+            )
+            .await
+            {
                 warn!(target: "cli_proxy", peer = %peer, "CLI proxy connection error: {err:?}");
             }
         });
@@ -334,7 +364,8 @@ async fn serve(
 async fn handle_connection(
     stream: TcpStream,
     config_path: Arc<PathBuf>,
-    core: CoreContext,
+    tokens: Arc<TokenManager>,
+    core_provider: Arc<dyn CoreProvider>,
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
@@ -363,13 +394,16 @@ async fn handle_connection(
         FirstMessage::Control {
             protocol_version,
             token_result,
+            tenant_result,
         } => {
             handle_control_handshake(
                 protocol_version,
                 token_result,
+                tenant_result,
                 &mut reader,
                 &mut writer,
-                core,
+                Arc::clone(&tokens),
+                core_provider,
                 shared_config,
             )
             .await
@@ -438,9 +472,11 @@ where
 async fn handle_control_handshake<R, W>(
     protocol_version: u16,
     token_result: Result<String, String>,
+    tenant_result: Result<Option<String>, String>,
     reader: &mut R,
     writer: &mut W,
-    core: CoreContext,
+    tokens: Arc<TokenManager>,
+    core_provider: Arc<dyn CoreProvider>,
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<()>
 where
@@ -449,29 +485,84 @@ where
 {
     let handshake_start = Instant::now();
 
-    let tokens = core.tokens();
-    let (accepted, response_text, claims, token) = if protocol_version != CONTROL_PROTOCOL_VERSION {
-        (
-            false,
-            format!("unsupported control protocol version {}", protocol_version),
-            None,
-            None,
-        )
-    } else {
+    let mut accepted = true;
+    let mut response_text = "ok".to_string();
+    let mut claims: Option<JwtClaims> = None;
+    let mut token: Option<String> = None;
+    let mut session_tenant: Option<String> = None;
+    let mut session_core: Option<CoreContext> = None;
+
+    if protocol_version != CONTROL_PROTOCOL_VERSION {
+        accepted = false;
+        response_text = format!("unsupported control protocol version {}", protocol_version);
+    }
+
+    if accepted {
         match token_result {
-            Err(message) => (false, message, None, None),
-            Ok(token) if token.is_empty() => {
-                (false, "missing control token".to_string(), None, None)
+            Err(message) => {
+                accepted = false;
+                response_text = message;
             }
-            Ok(token) => match tokens.verify(&token) {
-                Ok(claims) => (true, "ok".to_string(), Some(claims), Some(token)),
+            Ok(value) if value.trim().is_empty() => {
+                accepted = false;
+                response_text = "missing control token".to_string();
+            }
+            Ok(value) => match tokens.verify(&value) {
+                Ok(verified) => {
+                    claims = Some(verified);
+                    token = Some(value);
+                }
                 Err(err) => {
+                    accepted = false;
+                    response_text = "invalid control token".to_string();
                     warn!("control handshake rejected due to invalid token: {}", err);
-                    (false, "invalid control token".to_string(), None, None)
                 }
             },
         }
+    }
+
+    let requested_tenant = if accepted {
+        match tenant_result {
+            Err(message) => {
+                accepted = false;
+                response_text = message;
+                None
+            }
+            Ok(value) => value,
+        }
+    } else {
+        None
     };
+
+    if accepted {
+        let default_tenant = {
+            let guard = shared_config
+                .read()
+                .expect("config lock poisoned while resolving tenant");
+            guard.active_domain().to_string()
+        };
+        let tenant = requested_tenant
+            .filter(|value| !value.is_empty())
+            .unwrap_or(default_tenant);
+        if let Some(claims) = &claims {
+            if !claims.allows_tenant(&tenant) {
+                accepted = false;
+                response_text = format!("token does not grant access to tenant '{}'", tenant);
+            }
+        }
+        if accepted {
+            match core_provider.core_for(&tenant) {
+                Ok(core) => {
+                    session_core = Some(core);
+                    session_tenant = Some(tenant);
+                }
+                Err(err) => {
+                    accepted = false;
+                    response_text = format!("failed to initialise tenant '{}': {}", tenant, err);
+                }
+            }
+        }
+    }
 
     let response_bytes = {
         let mut message = capnp::message::Builder::new_default();
@@ -509,20 +600,27 @@ where
             subject = %claims.sub,
             token_group = %claims.group,
             token_user = %claims.user,
+            tenant = %session_tenant.as_deref().unwrap_or("<unknown>"),
             "control handshake accepted"
         );
     }
 
     let token = token.expect("token must be present when handshake accepted");
+    let tenant = session_tenant
+        .as_deref()
+        .expect("tenant must be present when handshake accepted")
+        .to_string();
+    let core = session_core.expect("core context must be present when handshake accepted");
     println!(
-        "control handshake accepted for token subject {}",
-        claims.as_ref().map(|c| c.sub.as_str()).unwrap_or("unknown")
+        "control handshake accepted for token subject {} (tenant={})",
+        claims.as_ref().map(|c| c.sub.as_str()).unwrap_or("unknown"),
+        tenant
     );
     let noise = perform_server_handshake(reader, writer, token.as_bytes())
         .await
         .context("failed to establish encrypted control channel")?;
 
-    handle_control_session_encrypted(reader, writer, noise, core, shared_config).await
+    handle_control_session_encrypted(reader, writer, noise, core, shared_config, tenant).await
 }
 
 fn classify_first_message(message: capnp::message::Reader<OwnedSegments>) -> Result<FirstMessage> {
@@ -544,9 +642,20 @@ fn classify_first_message(message: capnp::message::Reader<OwnedSegments>) -> Res
                     .map_err(|err| format!("invalid UTF-8 in control token: {err}"))
                     .map(|value| value.trim().to_string())
             });
+        let tenant_result = hello
+            .get_tenant_id()
+            .map_err(|err| format!("failed to read control tenant id: {err}"))
+            .and_then(|reader| {
+                reader
+                    .to_str()
+                    .map_err(|err| format!("invalid UTF-8 in control tenant id: {err}"))
+                    .map(|value| value.trim().to_string())
+            })
+            .map(|value| if value.is_empty() { None } else { Some(value) });
         return Ok(FirstMessage::Control {
             protocol_version: hello.get_protocol_version(),
             token_result,
+            tenant_result,
         });
     }
 
@@ -559,6 +668,7 @@ async fn handle_control_session_encrypted<R, W>(
     mut noise: TransportState,
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
+    tenant: String,
 ) -> Result<()>
 where
     R: futures::AsyncRead + Unpin,
@@ -581,9 +691,13 @@ where
         let (command_label, status_label, response_result) = match parse_control_command(request) {
             Ok(command) => {
                 let label = control_command_name(&command);
-                let result =
-                    execute_control_command(command, core.clone(), Arc::clone(&shared_config))
-                        .await;
+                let result = execute_control_command(
+                    command,
+                    core.clone(),
+                    Arc::clone(&shared_config),
+                    tenant.as_str(),
+                )
+                .await;
                 let status = match &result {
                     Ok(_) => "ok",
                     Err(err) => control_error_code(err),
@@ -1135,7 +1249,9 @@ async fn execute_control_command(
     command: ControlCommand,
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
+    tenant_id: &str,
 ) -> std::result::Result<ControlReply, EventError> {
+    let _tenant_id = tenant_id;
     match command {
         ControlCommand::ListAggregates {
             token,

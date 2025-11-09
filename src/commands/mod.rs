@@ -10,6 +10,7 @@ pub mod queue;
 pub mod schema;
 pub mod start;
 pub mod system;
+pub mod tenant;
 pub mod token;
 pub mod upgrade;
 pub mod watch;
