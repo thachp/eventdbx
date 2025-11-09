@@ -37,6 +37,7 @@ struct ControlResponse {
 struct ControlHello {
   protocolVersion @0 :UInt16;
   token @1 :Text;
+  tenantId @2 :Text;
 }
 
 struct ControlHelloResponse {

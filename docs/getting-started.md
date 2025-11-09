@@ -112,6 +112,8 @@ dbx token generate \
   --expiration 3600
 ```
 
+- Include `--tenant <id>` (repeat the flag for multiple tenants) to bind the token to specific tenant ids so the server can enforce per-tenant authorization.
+
 The command prints a signed JWT. Export it to `EVENTDBX_TOKEN` to save retyping:
 
 ```bash

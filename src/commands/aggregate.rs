@@ -1481,6 +1481,7 @@ fn issue_ephemeral_token(config: &Config) -> Result<String> {
         user,
         actions: vec![ROOT_ACTION.to_string()],
         resources: vec![ROOT_RESOURCE.to_string()],
+        tenants: Vec::new(),
         ttl_secs: Some(120),
         not_before: None,
         issued_by: "cli".to_string(),

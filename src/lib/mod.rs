@@ -17,5 +17,7 @@ pub mod server;
 pub mod service;
 pub mod snowflake;
 pub mod store;
+pub mod tenant;
+pub mod tenant_store;
 pub mod token;
 pub mod validation;

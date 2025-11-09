@@ -351,6 +351,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         verbose_responses: None,
         plugin_max_attempts: None,
         socket: None,
+        tenants: None,
         snowflake_worker_id: None,
     });
 }

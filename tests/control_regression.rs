@@ -13,6 +13,7 @@ use eventdbx::{
     schema::{CreateSchemaInput, SchemaManager},
     service::CoreContext,
     store::EventStore,
+    tenant::{CoreProvider, StaticCoreProvider},
     token::{IssueTokenInput, JwtLimits, TokenManager},
 };
 use futures::AsyncWriteExt;
@@ -24,22 +25,26 @@ use tokio_util::compat::Compat;
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
 
 async fn open_control_session(
-    core: CoreContext,
+    core_provider: Arc<dyn CoreProvider>,
+    tokens: Arc<TokenManager>,
     shared_config: Arc<RwLock<Config>>,
     token: &str,
+    tenant: &str,
 ) -> Result<(
     Compat<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
     Compat<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
     TransportState,
     tokio::task::JoinHandle<Result<()>>,
 )> {
-    let (mut writer, mut reader, task) = spawn_control_session(core, shared_config);
+    let (mut writer, mut reader, task) =
+        spawn_control_session(core_provider, tokens, shared_config);
 
     let mut hello_message = Builder::new_default();
     {
         let mut hello = hello_message.init_root::<control_hello::Builder>();
         hello.set_protocol_version(CONTROL_PROTOCOL_VERSION);
         hello.set_token(token);
+        hello.set_tenant_id(tenant);
     }
     let hello_bytes = write_message_to_words(&hello_message);
     writer
@@ -107,6 +112,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         config.page_limit,
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
+    let core_provider: Arc<dyn CoreProvider> = Arc::new(StaticCoreProvider::new(core.clone()));
 
     let token_record = tokens.issue(IssueTokenInput {
         subject: "system:admin".into(),
@@ -119,6 +125,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
             "aggregate.read".into(),
         ],
         resources: vec!["*".to_string()],
+        tenants: Vec::new(),
         ttl_secs: Some(3_600),
         not_before: None,
         issued_by: "control-test".into(),
@@ -129,8 +136,14 @@ async fn control_capnp_regression_flows() -> Result<()> {
         .clone()
         .expect("issued token missing value");
 
-    let (mut writer, mut reader, mut noise, server_task) =
-        open_control_session(core.clone(), Arc::clone(&shared_config), &token_value).await?;
+    let (mut writer, mut reader, mut noise, server_task) = open_control_session(
+        Arc::clone(&core_provider),
+        Arc::clone(&tokens),
+        Arc::clone(&shared_config),
+        &token_value,
+        config.active_domain(),
+    )
+    .await?;
 
     let mut next_request_id: u64 = 1;
 
@@ -644,6 +657,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         config.page_limit,
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
+    let core_provider: Arc<dyn CoreProvider> = Arc::new(StaticCoreProvider::new(core.clone()));
 
     let token_record = tokens.issue(IssueTokenInput {
         subject: "system:admin".into(),
@@ -656,6 +670,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             "aggregate.read".into(),
         ],
         resources: vec!["*".to_string()],
+        tenants: Vec::new(),
         ttl_secs: Some(3_600),
         not_before: None,
         issued_by: "control-batch-test".into(),
@@ -666,8 +681,14 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         .clone()
         .expect("issued token missing value");
 
-    let (mut writer, mut reader, mut noise, server_task) =
-        open_control_session(core.clone(), Arc::clone(&shared_config), &token_value).await?;
+    let (mut writer, mut reader, mut noise, server_task) = open_control_session(
+        Arc::clone(&core_provider),
+        Arc::clone(&tokens),
+        Arc::clone(&shared_config),
+        &token_value,
+        config.active_domain(),
+    )
+    .await?;
 
     let mut next_request_id: u64 = 1;
 

@@ -38,9 +38,17 @@ Run without flags to print the current configuration. The first invocation must 
 ## Tokens
 
 - `dbx token generate --group <name> --user <name> [--expiration <secs>] [--limit <writes>] [--keep-alive]`
+- Add `--tenant <id>` (repeatable) to restrict the token to specific tenant ids; the server rejects requests for tenants not present in the token claims.
 - `dbx token list`
 - `dbx token revoke --token <value>`
 - `dbx token refresh --token <value> [--expiration <secs>] [--limit <writes>]`
+
+## Tenants
+
+- `dbx tenant assign <tenant> --shard <shard-0001>` – Pin a tenant to an explicit shard label. Omit the command to continue using hash-based placement.
+- `dbx tenant unassign <tenant>` – Remove the explicit assignment so the tenant hashes across the configured shard count.
+- `dbx tenant list [--shard <shard-0001>] [--json]` – Display manual assignments (filters by shard and supports JSON output).
+- `dbx tenant stats [--json]` – Summarise explicit assignments per shard.
 
 ## Schemas
 
@@ -99,7 +107,7 @@ EventDBX can replicate an entire domain (or selected aggregates) between two nod
    dbx checkout -d example --remote replica.external:6363 --token "<remote token>"
    ```
 
-   Re-run the command with `--remote` or `--token` to rotate either value. Use `--port` when the socket listens on a non-default port.
+   Re-run the command with `--remote` or `--token` to rotate either value. Use `--port` when the socket listens on a non-default port, and add `--remote-tenant <id>` when the remote server hosts multiple tenants so `dbx push`/`dbx pull` know which tenant to target.
 
 2. Push schemas before pushing data so the destination validates events the same way:
 

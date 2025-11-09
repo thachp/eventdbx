@@ -28,6 +28,7 @@ use eventdbx::{
     merkle::{compute_merkle_root, empty_root},
     schema::{AggregateSchema, SchemaManager},
     store::{AggregateQueryScope, AggregateState, EventStore},
+    tenant::normalize_tenant_id,
     validation::{ensure_aggregate_id, ensure_snake_case},
 };
 use std::io::{self, Write};
@@ -73,6 +74,10 @@ pub struct DomainCheckoutArgs {
     /// Authorization token used when syncing with the remote domain
     #[arg(long = "token", value_name = "TOKEN")]
     pub remote_token: Option<String>,
+
+    /// Tenant identifier to associate with the remote endpoint
+    #[arg(long = "remote-tenant", value_name = "TENANT")]
+    pub remote_tenant: Option<String>,
 }
 
 #[derive(Args)]
@@ -96,12 +101,15 @@ struct DomainRemoteConfig {
     connect_addr: Option<String>,
     #[serde(default)]
     token: Option<String>,
+    #[serde(default)]
+    tenant: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct DomainRemoteEndpoint {
     connect_addr: String,
     token: String,
+    tenant: String,
 }
 
 #[derive(Args)]
@@ -218,12 +226,13 @@ pub fn checkout(config_path: Option<PathBuf>, args: DomainCheckoutArgs) -> Resul
         None
     };
 
-    if args.remote_addr.is_some() || args.remote_token.is_some() {
+    if args.remote_addr.is_some() || args.remote_token.is_some() || args.remote_tenant.is_some() {
         update_domain_remote_config(
             &config,
             args.remote_addr.as_deref(),
             remote_port,
             args.remote_token.as_deref(),
+            args.remote_tenant.as_deref(),
         )?;
     }
 
@@ -436,6 +445,7 @@ fn push_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
         let aggregates = Arc::clone(&aggregates);
         let token = remote.token.clone();
         let connect_addr = remote.connect_addr.clone();
+        let remote_tenant = remote.tenant.clone();
         let next_index = Arc::clone(&next_index);
         let failure_flag = Arc::clone(&failure_flag);
         let output_lock = Arc::clone(&output_lock);
@@ -445,7 +455,8 @@ fn push_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
         let total = total_aggregates;
 
         handles.push(thread::spawn(move || -> Result<()> {
-            let client = ServerClient::with_addr(connect_addr);
+            let client =
+                ServerClient::with_addr_and_tenant(connect_addr, Some(remote_tenant.clone()));
             loop {
                 if failure_flag.load(Ordering::Relaxed) {
                     break;
@@ -757,7 +768,10 @@ fn pull_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
     ensure_existing_domain(&config, &domain)?;
 
     let remote = load_remote_endpoint_for_domain(&config, &domain)?;
-    let client = ServerClient::with_addr(remote.connect_addr.clone());
+    let client = ServerClient::with_addr_and_tenant(
+        remote.connect_addr.clone(),
+        Some(remote.tenant.clone()),
+    );
 
     let remote_aggregates_list = collect_remote_aggregates(
         &client,
@@ -798,6 +812,7 @@ fn pull_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
         let remote_aggregates = Arc::clone(&remote_aggregates);
         let token = remote.token.clone();
         let connect_addr = remote.connect_addr.clone();
+        let remote_tenant = remote.tenant.clone();
         let next_index = Arc::clone(&next_index);
         let failure_flag = Arc::clone(&failure_flag);
         let output_lock = Arc::clone(&output_lock);
@@ -807,7 +822,8 @@ fn pull_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
         let total = total_remote;
 
         handles.push(thread::spawn(move || -> Result<()> {
-            let client = ServerClient::with_addr(connect_addr);
+            let client =
+                ServerClient::with_addr_and_tenant(connect_addr, Some(remote_tenant.clone()));
             loop {
                 if failure_flag.load(Ordering::Relaxed) {
                     break;
@@ -1104,7 +1120,10 @@ fn push_schema(config_path: Option<PathBuf>, args: SchemaSyncArgs) -> Result<()>
     ensure_existing_domain(&config, &domain)?;
 
     let remote = load_remote_endpoint_for_domain(&config, &domain)?;
-    let client = ServerClient::with_addr(remote.connect_addr.clone());
+    let client = ServerClient::with_addr_and_tenant(
+        remote.connect_addr.clone(),
+        Some(remote.tenant.clone()),
+    );
 
     let mut domain_config = config.clone();
     domain_config.domain = domain.clone();
@@ -1137,7 +1156,10 @@ fn pull_schema(config_path: Option<PathBuf>, args: SchemaSyncArgs) -> Result<()>
     ensure_existing_domain(&config, &domain)?;
 
     let remote = load_remote_endpoint_for_domain(&config, &domain)?;
-    let client = ServerClient::with_addr(remote.connect_addr.clone());
+    let client = ServerClient::with_addr_and_tenant(
+        remote.connect_addr.clone(),
+        Some(remote.tenant.clone()),
+    );
 
     let remote_snapshot = client.list_schemas(&remote.token).with_context(|| {
         format!(
@@ -1209,9 +1231,14 @@ fn load_remote_endpoint_for_domain(config: &Config, domain: &str) -> Result<Doma
             domain
         )
     })?;
+    let tenant = remote
+        .tenant
+        .clone()
+        .unwrap_or(normalize_tenant_id(domain)?);
     Ok(DomainRemoteEndpoint {
         connect_addr,
         token,
+        tenant,
     })
 }
 
@@ -1309,6 +1336,7 @@ fn update_domain_remote_config(
     remote: Option<&str>,
     remote_port: Option<u16>,
     token: Option<&str>,
+    tenant: Option<&str>,
 ) -> Result<()> {
     let domain_dir = config.domain_data_dir();
     if !domain_dir.exists() {
@@ -1352,6 +1380,19 @@ fn update_domain_remote_config(
         };
         if current.token != normalized {
             current.token = normalized;
+            changed = true;
+        }
+    }
+
+    if let Some(raw_tenant) = tenant {
+        let trimmed = raw_tenant.trim();
+        let normalized = if trimmed.is_empty() {
+            None
+        } else {
+            Some(normalize_tenant_id(trimmed)?)
+        };
+        if current.tenant != normalized {
+            current.tenant = normalized;
             changed = true;
         }
     }
@@ -1819,6 +1860,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         let result = resolve_checkout_domain(&args).expect("flag domain should resolve");
         assert_eq!(result, "herds");
@@ -1835,6 +1877,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         let result = resolve_checkout_domain(&args).expect("positional domain should resolve");
         assert_eq!(result, "herds_01");
@@ -1851,6 +1894,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         assert!(resolve_checkout_domain(&args).is_err());
     }
@@ -1881,6 +1925,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
 
         let err = checkout(Some(config_path.clone()), args)
@@ -1922,6 +1967,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         checkout(Some(config_path.clone()), create_args).expect("domain creation should succeed");
 
@@ -1934,6 +1980,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         checkout(Some(config_path.clone()), default_args)
             .expect("switching to default domain should succeed");
@@ -1947,6 +1994,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         checkout(Some(config_path.clone()), switch_args)
             .expect("switching to an existing domain should succeed");

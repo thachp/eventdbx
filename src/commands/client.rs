@@ -27,19 +27,35 @@ const DEFAULT_PAGE_SIZE: usize = 256;
 #[derive(Clone)]
 pub struct ServerClient {
     connect_addr: String,
+    tenant: Option<String>,
 }
 
 impl ServerClient {
     pub fn new(config: &Config) -> Result<Self> {
         let connect_addr = normalize_connect_addr(&config.socket.bind_addr);
 
-        Ok(Self { connect_addr })
+        Ok(Self {
+            connect_addr,
+            tenant: Some(config.active_domain().to_string()),
+        })
     }
 
+    #[allow(dead_code)]
     pub fn with_addr<S: Into<String>>(connect_addr: S) -> Self {
+        Self::with_addr_and_tenant(connect_addr, None)
+    }
+
+    pub fn with_addr_and_tenant<S: Into<String>>(connect_addr: S, tenant: Option<String>) -> Self {
         Self {
             connect_addr: connect_addr.into(),
+            tenant,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_tenant(mut self, tenant: Option<String>) -> Self {
+        self.tenant = tenant;
+        self
     }
 
     pub fn create_aggregate(
@@ -53,6 +69,7 @@ impl ServerClient {
         note: Option<&str>,
     ) -> Result<Option<AggregateState>> {
         let connect_addr = self.connect_addr.clone();
+        let tenant = self.tenant.clone();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
@@ -65,6 +82,7 @@ impl ServerClient {
             return tokio::task::block_in_place(move || {
                 create_aggregate_blocking(
                     connect_addr,
+                    tenant.clone(),
                     token,
                     aggregate_type,
                     aggregate_id,
@@ -78,6 +96,7 @@ impl ServerClient {
 
         create_aggregate_blocking(
             connect_addr,
+            tenant,
             token,
             aggregate_type,
             aggregate_id,
@@ -99,6 +118,7 @@ impl ServerClient {
         note: Option<&str>,
     ) -> Result<Option<EventRecord>> {
         let connect_addr = self.connect_addr.clone();
+        let tenant = self.tenant.clone();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
@@ -111,6 +131,7 @@ impl ServerClient {
             return tokio::task::block_in_place(move || {
                 append_event_blocking(
                     connect_addr,
+                    tenant.clone(),
                     token,
                     aggregate_type,
                     aggregate_id,
@@ -124,6 +145,7 @@ impl ServerClient {
 
         append_event_blocking(
             connect_addr,
+            tenant,
             token,
             aggregate_type,
             aggregate_id,
@@ -145,6 +167,7 @@ impl ServerClient {
         note: Option<&str>,
     ) -> Result<Option<EventRecord>> {
         let connect_addr = self.connect_addr.clone();
+        let tenant = self.tenant.clone();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
@@ -157,6 +180,7 @@ impl ServerClient {
             return tokio::task::block_in_place(move || {
                 patch_event_blocking(
                     connect_addr,
+                    tenant.clone(),
                     token,
                     aggregate_type,
                     aggregate_id,
@@ -170,6 +194,7 @@ impl ServerClient {
 
         patch_event_blocking(
             connect_addr,
+            tenant,
             token,
             aggregate_type,
             aggregate_id,
@@ -190,6 +215,7 @@ impl ServerClient {
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -277,6 +303,7 @@ impl ServerClient {
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -415,6 +442,7 @@ impl ServerClient {
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -488,6 +516,7 @@ impl ServerClient {
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -530,6 +559,7 @@ impl ServerClient {
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -583,6 +613,7 @@ impl ServerClient {
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -620,6 +651,7 @@ impl ServerClient {
 
 fn create_aggregate_blocking(
     connect_addr: String,
+    tenant: Option<String>,
     token: String,
     aggregate_type: String,
     aggregate_id: String,
@@ -647,6 +679,7 @@ fn create_aggregate_blocking(
     send_control_request_blocking(
         &connect_addr,
         &token,
+        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -703,6 +736,7 @@ fn create_aggregate_blocking(
 
 fn append_event_blocking(
     connect_addr: String,
+    tenant: Option<String>,
     token: String,
     aggregate_type: String,
     aggregate_id: String,
@@ -733,6 +767,7 @@ fn append_event_blocking(
     send_control_request_blocking(
         &connect_addr,
         &token,
+        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -789,6 +824,7 @@ fn append_event_blocking(
 
 fn patch_event_blocking(
     connect_addr: String,
+    tenant: Option<String>,
     token: String,
     aggregate_type: String,
     aggregate_id: String,
@@ -816,6 +852,7 @@ fn patch_event_blocking(
     send_control_request_blocking(
         &connect_addr,
         &token,
+        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -873,6 +910,7 @@ fn patch_event_blocking(
 fn send_control_request_blocking<Build, Handle, T>(
     connect_addr: &str,
     handshake_token: &str,
+    handshake_tenant: Option<&str>,
     request_id: u64,
     build: Build,
     handle: Handle,
@@ -895,6 +933,11 @@ where
         let mut hello = hello_message.init_root::<control_hello::Builder>();
         hello.set_protocol_version(CONTROL_PROTOCOL_VERSION);
         hello.set_token(handshake_token);
+        if let Some(tenant) = handshake_tenant {
+            hello.set_tenant_id(tenant);
+        } else {
+            hello.set_tenant_id("");
+        }
     }
     serialize::write_message(&mut stream, &hello_message)
         .context("failed to send control hello")?;

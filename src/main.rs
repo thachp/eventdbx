@@ -17,6 +17,7 @@ use crate::commands::{
     schema::SchemaCommands,
     start::{DestroyArgs, StartArgs},
     system::{BackupArgs, RestoreArgs},
+    tenant::TenantCommands as TenantSubcommands,
     token::TokenCommands,
     upgrade::UpgradeArgs,
     watch::WatchArgs,
@@ -90,6 +91,11 @@ enum Commands {
     Events(commands::events::EventsArgs),
     /// Show or manage the plugin retry queue
     Queue(QueueArgs),
+    /// Manage tenant shard assignments
+    Tenant {
+        #[command(subcommand)]
+        command: TenantSubcommands,
+    },
     /// Manage aggregates
     Aggregate {
         #[command(subcommand)]
@@ -144,6 +150,7 @@ async fn main() -> Result<()> {
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
         Commands::Events(args) => commands::events::list(config, args)?,
         Commands::Queue(args) => commands::queue::execute(config, args)?,
+        Commands::Tenant { command } => commands::tenant::execute(config, command)?,
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
         Commands::Upgrade(args) => commands::upgrade::execute(args).await?,
         Commands::Backup(args) => commands::system::backup(config, args)?,
