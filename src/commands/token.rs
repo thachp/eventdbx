@@ -6,6 +6,7 @@ use clap::{Args, Subcommand};
 use crate::commands::config::ensure_secrets_configured;
 use eventdbx::{
     config::load_or_default,
+    tenant::normalize_tenant_list,
     token::{IssueTokenInput, JwtLimits, RevokeTokenInput, TokenManager, TokenRecord},
 };
 use serde_json;
@@ -126,7 +127,7 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
                 user: args.user,
                 actions: args.actions.clone(),
                 resources,
-                tenants: normalize_tenant_ids(&args.tenants),
+                tenants: normalize_tenant_list(&args.tenants),
                 ttl_secs: args.ttl,
                 not_before: None,
                 issued_by,
@@ -222,16 +223,4 @@ fn print_record(record: &TokenRecord) {
         resources,
         tenants
     );
-}
-
-fn normalize_tenant_ids(values: &[String]) -> Vec<String> {
-    let mut cleaned: Vec<String> = values
-        .iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .collect();
-    cleaned.sort();
-    cleaned.dedup();
-    cleaned
 }

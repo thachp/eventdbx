@@ -15,6 +15,7 @@ use super::{
     encryption::{self, Encryptor},
     error::{EventError, Result},
     store::ActorClaims,
+    tenant::normalize_tenant_list,
 };
 
 pub const ROOT_ACTION: &str = "*.*";
@@ -131,22 +132,10 @@ impl IssueTokenInput {
             self.resources = vec![ROOT_RESOURCE.to_string()];
         }
         if !self.tenants.is_empty() {
-            self.tenants = normalize_tenants(self.tenants);
+            self.tenants = normalize_tenant_list(self.tenants);
         }
         self
     }
-}
-
-fn normalize_tenants(values: Vec<String>) -> Vec<String> {
-    let mut cleaned: Vec<String> = values
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())
-        .collect();
-    cleaned.sort();
-    cleaned.dedup();
-    cleaned
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -13,7 +13,7 @@ use eventdbx::{
     schema::{CreateSchemaInput, SchemaManager},
     service::CoreContext,
     store::EventStore,
-    tenant::CoreProvider,
+    tenant::{CoreProvider, StaticCoreProvider},
     token::{IssueTokenInput, JwtLimits, TokenManager},
 };
 use futures::AsyncWriteExt;
@@ -78,22 +78,6 @@ async fn open_control_session(
     Ok((writer, reader, noise, task))
 }
 
-struct TestCoreProvider {
-    core: CoreContext,
-}
-
-impl TestCoreProvider {
-    fn new(core: CoreContext) -> Self {
-        Self { core }
-    }
-}
-
-impl CoreProvider for TestCoreProvider {
-    fn core_for(&self, _tenant: &str) -> eventdbx::error::Result<CoreContext> {
-        Ok(self.core.clone())
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn control_capnp_regression_flows() -> Result<()> {
     let tempdir = tempdir().context("failed to create temp dir")?;
@@ -128,7 +112,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         config.page_limit,
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
-    let core_provider: Arc<dyn CoreProvider> = Arc::new(TestCoreProvider::new(core.clone()));
+    let core_provider: Arc<dyn CoreProvider> = Arc::new(StaticCoreProvider::new(core.clone()));
 
     let token_record = tokens.issue(IssueTokenInput {
         subject: "system:admin".into(),
@@ -673,7 +657,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         config.page_limit,
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
-    let core_provider: Arc<dyn CoreProvider> = Arc::new(TestCoreProvider::new(core.clone()));
+    let core_provider: Arc<dyn CoreProvider> = Arc::new(StaticCoreProvider::new(core.clone()));
 
     let token_record = tokens.issue(IssueTokenInput {
         subject: "system:admin".into(),

@@ -173,6 +173,21 @@ pub fn normalize_tenant_id(raw: &str) -> Result<String> {
     Ok(lower)
 }
 
+pub fn normalize_tenant_list<I, S>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut cleaned: Vec<String> = values
+        .into_iter()
+        .map(|value| value.as_ref().trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect();
+    cleaned.sort();
+    cleaned.dedup();
+    cleaned
+}
+
 pub fn normalize_shard_id(raw: &str, shard_count: u16) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -197,19 +212,16 @@ pub fn normalize_shard_id(raw: &str, shard_count: u16) -> Result<String> {
     Ok(format_shard_id(index))
 }
 
-#[cfg(test)]
 pub struct StaticCoreProvider {
     core: CoreContext,
 }
 
-#[cfg(test)]
 impl StaticCoreProvider {
     pub fn new(core: CoreContext) -> Self {
         Self { core }
     }
 }
 
-#[cfg(test)]
 impl CoreProvider for StaticCoreProvider {
     fn core_for(&self, _tenant: &str) -> Result<CoreContext> {
         Ok(self.core.clone())
