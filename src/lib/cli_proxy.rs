@@ -196,6 +196,7 @@ fn control_error_code(err: &EventError) -> &'static str {
         EventError::Storage(_) => "storage",
         EventError::Io(_) => "io",
         EventError::Serialization(_) => "serialization",
+        EventError::TenantQuotaExceeded(_) => "tenant_quota",
     }
 }
 
@@ -534,20 +535,29 @@ where
         None
     };
 
+    let config_snapshot = shared_config
+        .read()
+        .expect("config lock poisoned while resolving tenant")
+        .clone();
+    let require_tenant = config_snapshot.multi_tenant();
+
     if accepted {
-        let default_tenant = {
-            let guard = shared_config
-                .read()
-                .expect("config lock poisoned while resolving tenant");
-            guard.active_domain().to_string()
-        };
-        let tenant = requested_tenant
-            .filter(|value| !value.is_empty())
-            .unwrap_or(default_tenant);
-        if let Some(claims) = &claims {
-            if !claims.allows_tenant(&tenant) {
+        let tenant = match requested_tenant.filter(|value| !value.is_empty()) {
+            Some(value) => value,
+            None if require_tenant => {
                 accepted = false;
-                response_text = format!("token does not grant access to tenant '{}'", tenant);
+                response_text =
+                    "tenantId is required when multi-tenant mode is enabled".to_string();
+                String::new()
+            }
+            None => config_snapshot.active_domain().to_string(),
+        };
+        if accepted {
+            if let Some(claims) = &claims {
+                if !claims.allows_tenant(&tenant) {
+                    accepted = false;
+                    response_text = format!("token does not grant access to tenant '{}'", tenant);
+                }
             }
         }
         if accepted {

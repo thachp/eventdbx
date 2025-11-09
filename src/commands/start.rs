@@ -134,7 +134,7 @@ pub fn stop(config_path: Option<PathBuf>) -> Result<()> {
     let pid = record.pid;
 
     if !process_is_running(pid) {
-        fs::remove_file(&pid_path)?;
+        remove_pid_file(&pid_path)?;
         println!("Removed stale EventDBX server pid file.");
         return Ok(());
     }
@@ -158,7 +158,7 @@ pub fn stop(config_path: Option<PathBuf>) -> Result<()> {
         }
     }
 
-    fs::remove_file(&pid_path)?;
+    remove_pid_file(&pid_path)?;
     if let Some(started_at) = record.started_at {
         println!(
             "EventDBX server stopped (pid {}) after {} (started {})",
@@ -170,6 +170,38 @@ pub fn stop(config_path: Option<PathBuf>) -> Result<()> {
         println!("EventDBX server stopped (pid {})", pid);
     }
     Ok(())
+}
+
+fn remove_pid_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn remove_pid_file_ignores_missing_path() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("eventdbx.pid");
+        assert!(!pid_path.exists());
+        remove_pid_file(pid_path.as_path()).expect("removing missing pid file should succeed");
+    }
+
+    #[test]
+    fn remove_pid_file_deletes_existing_file() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("eventdbx.pid");
+        fs::write(&pid_path, "1234").unwrap();
+        assert!(pid_path.exists());
+        remove_pid_file(pid_path.as_path()).expect("should remove pid file");
+        assert!(!pid_path.exists());
+    }
 }
 
 pub fn status(config_path: Option<PathBuf>) -> Result<()> {

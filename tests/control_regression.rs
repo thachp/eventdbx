@@ -14,6 +14,7 @@ use eventdbx::{
     service::CoreContext,
     store::EventStore,
     tenant::{CoreProvider, StaticCoreProvider},
+    tenant_store::TenantAssignmentStore,
     token::{IssueTokenInput, JwtLimits, TokenManager},
 };
 use futures::AsyncWriteExt;
@@ -102,6 +103,12 @@ async fn control_capnp_regression_flows() -> Result<()> {
         None,
         config.snowflake_worker_id,
     )?);
+    let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
+    assignments.ensure_aggregate_count("default", || {
+        store
+            .counts()
+            .map(|counts| counts.total_aggregates() as u64)
+    })?;
 
     let core = CoreContext::new(
         Arc::clone(&tokens),
@@ -110,6 +117,9 @@ async fn control_capnp_regression_flows() -> Result<()> {
         config.restrict,
         config.list_page_size,
         config.page_limit,
+        "default",
+        None,
+        Arc::clone(&assignments),
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
     let core_provider: Arc<dyn CoreProvider> = Arc::new(StaticCoreProvider::new(core.clone()));
@@ -647,6 +657,12 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         None,
         config.snowflake_worker_id,
     )?);
+    let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
+    assignments.ensure_aggregate_count("default", || {
+        store
+            .counts()
+            .map(|counts| counts.total_aggregates() as u64)
+    })?;
 
     let core = CoreContext::new(
         Arc::clone(&tokens),
@@ -655,6 +671,9 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         config.restrict,
         config.list_page_size,
         config.page_limit,
+        "default",
+        None,
+        Arc::clone(&assignments),
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
     let core_provider: Arc<dyn CoreProvider> = Arc::new(StaticCoreProvider::new(core.clone()));

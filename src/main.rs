@@ -11,7 +11,6 @@ use crate::commands::{
     aggregate::AggregateCommands,
     config::ConfigArgs,
     domain::{DomainCheckoutArgs, DomainMergeArgs, PullCommand, PushCommand},
-    list::ListArgs,
     plugin::{PluginCommands, PluginWorkerArgs},
     queue::QueueArgs,
     schema::SchemaCommands,
@@ -42,8 +41,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List domains with aggregate and event counts
-    List(ListArgs),
     /// Start the EventDBX server
     Start(StartArgs),
     /// Stop the EventDBX server
@@ -133,7 +130,6 @@ async fn main() -> Result<()> {
     }
 
     match command {
-        Commands::List(args) => commands::list::execute(config, args)?,
         Commands::Start(args) => commands::start::execute(config, args).await?,
         Commands::Stop => commands::start::stop(config)?,
         Commands::Status => commands::start::status(config)?,

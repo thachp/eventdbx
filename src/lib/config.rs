@@ -18,6 +18,7 @@ use super::{
     encryption::Encryptor,
     error::{EventError, Result},
     restrict::{self, RestrictMode},
+    store::EventStore,
     tenant_store::{TenantAssignmentStore, compute_default_shard},
     token::JwtManagerConfig,
 };
@@ -381,6 +382,19 @@ impl Config {
         if self.multi_tenant() {
             fs::create_dir_all(self.shards_root())?;
         }
+        self.ensure_event_store_initialized()?;
+        Ok(())
+    }
+
+    pub fn ensure_event_store_initialized(&self) -> Result<()> {
+        let path = self.event_store_path();
+        if path.join("CURRENT").exists() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let _store = EventStore::open(path, self.encryption_key()?, self.snowflake_worker_id)?;
         Ok(())
     }
 
@@ -401,20 +415,12 @@ impl Config {
     }
 
     pub fn domain_data_dir_for(&self, domain: &str) -> PathBuf {
-        if domain.eq_ignore_ascii_case(DEFAULT_DOMAIN_NAME) {
-            return self.data_dir.clone();
-        }
-
-        if self.multi_tenant() {
-            let tenant = domain.to_ascii_lowercase();
-            if let Some(shard) = self.lookup_assigned_shard(&tenant) {
-                return self.tenant_shard_dir(&shard, &tenant);
-            }
-            let shard = compute_default_shard(&tenant, self.shard_count());
+        let tenant = domain.to_ascii_lowercase();
+        if let Some(shard) = self.lookup_assigned_shard(&tenant) {
             return self.tenant_shard_dir(&shard, &tenant);
         }
-
-        self.domains_root().join(domain)
+        let shard = compute_default_shard(&tenant, self.shard_count());
+        self.tenant_shard_dir(&shard, &tenant)
     }
 
     pub fn shards_root(&self) -> PathBuf {
@@ -447,7 +453,7 @@ impl Config {
 
     fn lookup_assigned_shard(&self, tenant: &str) -> Option<String> {
         let path = self.tenant_meta_path();
-        let store = TenantAssignmentStore::open(path).ok()?;
+        let store = TenantAssignmentStore::open_read_only(path).ok()?;
         store.shard_for(tenant).ok()?
     }
 
@@ -508,7 +514,7 @@ impl Config {
     }
 
     pub fn cli_token_path(&self) -> PathBuf {
-        self.domain_data_dir().join("cli.token")
+        self.data_dir.join("cli.token")
     }
 
     pub fn jwt_revocations_path(&self) -> PathBuf {
@@ -588,7 +594,7 @@ impl Config {
     }
 
     pub fn pid_file_path(&self) -> PathBuf {
-        self.domain_data_dir().join("eventdbx.pid")
+        self.data_dir.join("eventdbx.pid")
     }
 
     pub fn verbose_responses(&self) -> bool {

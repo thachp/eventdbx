@@ -4,7 +4,6 @@ pub mod client;
 pub mod config;
 pub mod domain;
 pub mod events;
-pub mod list;
 pub mod plugin;
 pub mod queue;
 pub mod schema;

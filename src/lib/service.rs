@@ -10,6 +10,7 @@ use crate::{
         AppendEvent, EventArchiveScope, EventCursor, EventQueryScope, EventRecord, EventStore,
         select_state_field,
     },
+    tenant_store::TenantAssignmentStore,
     token::{JwtClaims, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
@@ -28,6 +29,9 @@ pub struct CoreContext {
     restrict: RestrictMode,
     list_page_size: usize,
     page_limit: usize,
+    tenant_id: String,
+    aggregate_quota: Option<u64>,
+    assignments: Arc<TenantAssignmentStore>,
 }
 
 impl CoreContext {
@@ -38,6 +42,9 @@ impl CoreContext {
         restrict: RestrictMode,
         list_page_size: usize,
         page_limit: usize,
+        tenant_id: impl Into<String>,
+        aggregate_quota: Option<u64>,
+        assignments: Arc<TenantAssignmentStore>,
     ) -> Self {
         Self {
             tokens,
@@ -46,6 +53,9 @@ impl CoreContext {
             restrict,
             list_page_size,
             page_limit,
+            tenant_id: tenant_id.into(),
+            aggregate_quota,
+            assignments,
         }
     }
 
@@ -83,6 +93,29 @@ impl CoreContext {
     pub fn sanitize_aggregate(&self, mut aggregate: AggregateState) -> AggregateState {
         aggregate.state = self.filter_state_map(&aggregate.aggregate_type, aggregate.state);
         aggregate
+    }
+
+    fn ensure_tenant_count_initialized(&self) -> Result<u64> {
+        let store = Arc::clone(&self.store);
+        self.assignments
+            .ensure_aggregate_count(&self.tenant_id, || {
+                store
+                    .counts()
+                    .map(|counts| counts.total_aggregates() as u64)
+            })
+    }
+
+    fn enforce_aggregate_quota(&self) -> Result<()> {
+        let current = self.ensure_tenant_count_initialized()?;
+        if let Some(limit) = self.aggregate_quota {
+            if current >= limit {
+                return Err(EventError::TenantQuotaExceeded(format!(
+                    "tenant '{}' reached aggregate quota ({limit})",
+                    self.tenant_id
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn list_aggregates(
@@ -273,6 +306,8 @@ impl CoreContext {
             )));
         }
 
+        self.enforce_aggregate_quota()?;
+
         let resource = format!("aggregate:{}:{}", aggregate_type, aggregate_id);
         let claims =
             self.tokens()
@@ -293,6 +328,8 @@ impl CoreContext {
             note,
         };
         let _record = self.append_event_internal(append_input, true)?;
+        self.assignments
+            .increment_aggregate_count(&self.tenant_id, 1)?;
 
         let aggregate = store.get_aggregate_state(&aggregate_type, &aggregate_id)?;
         Ok(self.sanitize_aggregate(aggregate))

@@ -73,15 +73,16 @@ impl TenantRegistry {
     }
 
     fn build_core_context(&self, tenant: &str) -> Result<Arc<CoreContext>> {
+        let quota = self.assignments.quota_for(tenant)?;
         if self.multi_tenant {
             let shard = self.resolve_shard(tenant)?;
-            self.build_sharded_context(tenant, &shard)
+            self.build_sharded_context(tenant, &shard, quota)
         } else {
-            self.build_legacy_context(tenant)
+            self.build_legacy_context(tenant, quota)
         }
     }
 
-    fn build_legacy_context(&self, tenant: &str) -> Result<Arc<CoreContext>> {
+    fn build_legacy_context(&self, tenant: &str, quota: Option<u64>) -> Result<Arc<CoreContext>> {
         let tenant_dir = self.config.domain_data_dir_for(tenant);
         fs::create_dir_all(&tenant_dir)?;
 
@@ -95,6 +96,11 @@ impl TenantRegistry {
             self.snowflake_worker_id,
         )?);
         let schemas = Arc::new(SchemaManager::load(tenant_config.schema_store_path())?);
+        self.assignments.ensure_aggregate_count(tenant, || {
+            store
+                .counts()
+                .map(|counts| counts.total_aggregates() as u64)
+        })?;
 
         Ok(Arc::new(CoreContext::new(
             Arc::clone(&self.tokens),
@@ -103,10 +109,18 @@ impl TenantRegistry {
             self.restrict,
             self.list_page_size,
             self.page_limit,
+            tenant.to_string(),
+            quota,
+            Arc::clone(&self.assignments),
         )))
     }
 
-    fn build_sharded_context(&self, tenant: &str, shard: &str) -> Result<Arc<CoreContext>> {
+    fn build_sharded_context(
+        &self,
+        tenant: &str,
+        shard: &str,
+        quota: Option<u64>,
+    ) -> Result<Arc<CoreContext>> {
         let tenant_dir = self.config.tenant_shard_dir(shard, tenant);
         fs::create_dir_all(&tenant_dir)?;
 
@@ -119,6 +133,11 @@ impl TenantRegistry {
             self.snowflake_worker_id,
         )?);
         let schemas = Arc::new(SchemaManager::load(schemas_path)?);
+        self.assignments.ensure_aggregate_count(tenant, || {
+            store
+                .counts()
+                .map(|counts| counts.total_aggregates() as u64)
+        })?;
 
         Ok(Arc::new(CoreContext::new(
             Arc::clone(&self.tokens),
@@ -127,6 +146,9 @@ impl TenantRegistry {
             self.restrict,
             self.list_page_size,
             self.page_limit,
+            tenant.to_string(),
+            quota,
+            Arc::clone(&self.assignments),
         )))
     }
 

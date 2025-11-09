@@ -43,6 +43,8 @@ pub enum EventError {
     Io(#[from] io::Error),
     #[error("serialization error: {0}")]
     Serialization(String),
+    #[error("tenant quota exceeded: {0}")]
+    TenantQuotaExceeded(String),
 }
 
 impl From<toml::de::Error> for EventError {
@@ -74,7 +76,9 @@ impl IntoResponse for EventError {
             Self::Config(_) => StatusCode::BAD_REQUEST,
             Self::InvalidToken | Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::TokenExpired => StatusCode::UNAUTHORIZED,
-            Self::TokenLimitReached | Self::AggregateArchived => StatusCode::FORBIDDEN,
+            Self::TokenLimitReached | Self::AggregateArchived | Self::TenantQuotaExceeded(_) => {
+                StatusCode::FORBIDDEN
+            }
             Self::AggregateNotFound | Self::SchemaNotFound => StatusCode::NOT_FOUND,
             Self::SchemaExists => StatusCode::CONFLICT,
             Self::SchemaViolation(_) => StatusCode::BAD_REQUEST,
