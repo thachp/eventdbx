@@ -7,6 +7,7 @@ use serde_json;
 
 use eventdbx::{
     config::load_or_default,
+    store::EventStore,
     tenant::{normalize_shard_id, normalize_tenant_id},
     tenant_store::TenantAssignmentStore,
 };
@@ -70,6 +71,8 @@ pub enum TenantQuotaCommands {
     Set(TenantQuotaSetArgs),
     /// Clear an aggregate quota for a tenant
     Clear(TenantQuotaClearArgs),
+    /// Recalculate aggregate counts for a tenant
+    Recalc(TenantQuotaRecalcArgs),
 }
 
 #[derive(Args)]
@@ -90,6 +93,13 @@ pub struct TenantQuotaClearArgs {
     pub tenant: String,
 }
 
+#[derive(Args)]
+pub struct TenantQuotaRecalcArgs {
+    /// Tenant identifier whose aggregate count should be recomputed
+    #[arg(value_name = "TENANT")]
+    pub tenant: String,
+}
+
 pub fn execute(config_path: Option<PathBuf>, command: TenantCommands) -> Result<()> {
     match command {
         TenantCommands::Assign(args) => assign(config_path, args),
@@ -99,6 +109,7 @@ pub fn execute(config_path: Option<PathBuf>, command: TenantCommands) -> Result<
         TenantCommands::Quota { command } => match command {
             TenantQuotaCommands::Set(args) => quota_set(config_path, args),
             TenantQuotaCommands::Clear(args) => quota_clear(config_path, args),
+            TenantQuotaCommands::Recalc(args) => quota_recalc(config_path, args),
         },
     }
 }
@@ -168,6 +179,7 @@ fn list(config_path: Option<PathBuf>, args: TenantListArgs) -> Result<()> {
                 tenant,
                 shard: record.shard,
                 quota: record.aggregate_quota,
+                count: record.aggregate_count,
             })
         })
         .collect();
@@ -243,28 +255,36 @@ struct TenantSummary {
     shard: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     quota: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<u64>,
 }
 
 fn print_table(entries: Vec<TenantSummary>) {
     let mut tenant_width = "tenant".len();
     let mut shard_width = "shard".len();
     let mut quota_width = "quota".len();
+    let mut count_width = "count".len();
     for entry in &entries {
         tenant_width = tenant_width.max(entry.tenant.len());
         shard_width = shard_width.max(entry.shard.as_deref().unwrap_or("-").len());
         if let Some(quota) = entry.quota {
             quota_width = quota_width.max(quota.to_string().len());
         }
+        if let Some(count) = entry.count {
+            count_width = count_width.max(count.to_string().len());
+        }
     }
 
     println!(
-        "{:tenant_width$}  {:shard_width$}  {:>quota_width$}",
+        "{:tenant_width$}  {:shard_width$}  {:>quota_width$}  {:>count_width$}",
         "tenant",
         "shard",
         "quota",
+        "count",
         tenant_width = tenant_width,
         shard_width = shard_width,
         quota_width = quota_width,
+        count_width = count_width,
     );
     for entry in entries {
         let shard_display = entry.shard.as_deref().unwrap_or("-");
@@ -272,14 +292,20 @@ fn print_table(entries: Vec<TenantSummary>) {
             .quota
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string());
+        let count_display = entry
+            .count
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:tenant_width$}  {:shard_width$}  {:>quota_width$}",
+            "{:tenant_width$}  {:shard_width$}  {:>quota_width$}  {:>count_width$}",
             entry.tenant,
             shard_display,
             quota_display,
+            count_display,
             tenant_width = tenant_width,
             shard_width = shard_width,
             quota_width = quota_width,
+            count_width = count_width,
         );
     }
 }
@@ -315,5 +341,26 @@ fn quota_clear(config_path: Option<PathBuf>, args: TenantQuotaClearArgs) -> Resu
     } else {
         println!("No aggregate quota configured for tenant '{}'.", tenant);
     }
+    Ok(())
+}
+
+fn quota_recalc(config_path: Option<PathBuf>, args: TenantQuotaRecalcArgs) -> Result<()> {
+    let (config, _) = load_or_default(config_path)?;
+    let tenant = normalize_tenant_id(&args.tenant)?;
+    let store = TenantAssignmentStore::open(config.tenant_meta_path())?;
+    let tenant_event_store = EventStore::open(
+        config.event_store_path_for(&tenant),
+        config.encryption_key()?,
+        config.snowflake_worker_id,
+    )?;
+    let counts = tenant_event_store
+        .counts()
+        .map(|counts| counts.total_aggregates() as u64)?;
+    store.set_quota(&tenant, store.quota_for(&tenant)?)?;
+    store.ensure_aggregate_count(&tenant, || Ok(counts))?;
+    println!(
+        "Recalculated aggregate count for tenant '{}' ({} aggregate(s)).",
+        tenant, counts
+    );
     Ok(())
 }
