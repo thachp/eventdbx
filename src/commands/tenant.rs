@@ -356,7 +356,6 @@ fn quota_recalc(config_path: Option<PathBuf>, args: TenantQuotaRecalcArgs) -> Re
     let counts = tenant_event_store
         .counts()
         .map(|counts| counts.total_aggregates() as u64)?;
-    store.set_quota(&tenant, store.quota_for(&tenant)?)?;
     store.ensure_aggregate_count(&tenant, || Ok(counts))?;
     println!(
         "Recalculated aggregate count for tenant '{}' ({} aggregate(s)).",
