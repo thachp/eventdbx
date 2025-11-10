@@ -81,7 +81,7 @@ snow = "0.9"
 semver = "1.0"
 validator = { version = "0.16", features = ["card"] }
 json-patch = "1.2"
-similar = "2.4"
+similar = "2.7"
 jsonwebtoken = "9.3"
 once_cell = "1.19"
 metrics = "0.22"

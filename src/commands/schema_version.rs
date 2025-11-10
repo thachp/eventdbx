@@ -1,4 +1,4 @@
-use std::{env, fs, io::IsTerminal, path::PathBuf};
+use std::{fs, io::IsTerminal, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::SecondsFormat;
@@ -13,7 +13,7 @@ use eventdbx::{
     tenant::normalize_tenant_id,
 };
 
-use crate::commands::tenant::prepare_remote_client;
+use crate::commands::{resolve_actor_name, tenant::prepare_remote_client};
 
 #[derive(Args, Clone)]
 pub struct SchemaPublishArgs {
@@ -189,7 +189,7 @@ pub(crate) fn schema_publish(config_path: Option<PathBuf>, args: SchemaPublishAr
     let payload = fs::read_to_string(&source_path)
         .with_context(|| format!("failed to read schema input from {}", source_path.display()))?;
 
-    let actor = resolve_actor(args.actor.as_deref());
+    let actor = resolve_actor_name(args.actor.as_deref(), None, "unknown");
     let manager = SchemaHistoryManager::new(config.domain_data_dir_for(&tenant));
     let outcome = manager.publish(PublishOptions {
         schema_json: &payload,
@@ -582,7 +582,7 @@ pub(crate) fn schema_activate(
         _ => VersionFallback::Latest,
     };
     let version_id = resolve_version_spec(&manifest, args.version.as_deref(), fallback)?;
-    let actor = resolve_actor(args.actor.as_deref());
+    let actor = resolve_actor_name(args.actor.as_deref(), None, "unknown");
     let result = manager.activate_version(
         &version_id,
         Some(actor.as_str()),
@@ -648,21 +648,6 @@ pub(crate) fn resolve_schema_tenant(config: &Config, tenant_arg: Option<&str>) -
         Some(value) => Ok(normalize_tenant_id(value)?),
         None => Ok(normalize_tenant_id(config.active_domain())?),
     }
-}
-
-fn resolve_actor(explicit: Option<&str>) -> String {
-    if let Some(value) = explicit {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    env::var("USER")
-        .or_else(|_| env::var("USERNAME"))
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[derive(Clone, Copy)]

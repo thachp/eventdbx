@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    fs,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -33,7 +33,7 @@ use eventdbx::{
 };
 use std::io::{self, Write};
 
-use crate::commands::client::ServerClient;
+use crate::commands::{client::ServerClient, resolve_actor_name};
 
 #[derive(Args)]
 #[command(arg_required_else_help = true)]
@@ -1197,7 +1197,11 @@ fn push_schema(config_path: Option<PathBuf>, args: PushSchemaArgs) -> Result<()>
     );
 
     if args.publish {
-        let actor_value = resolve_push_actor(args.publish_actor.as_deref());
+        let actor_value = resolve_actor_name(
+            args.publish_actor.as_deref(),
+            Some(remote.token.as_str()),
+            "dbx push",
+        );
         let publish_result = client
             .publish_tenant_schemas(
                 &remote.token,
@@ -1301,21 +1305,6 @@ fn ensure_existing_domain(config: &Config, domain: &str) -> Result<PathBuf> {
 
 fn domain_data_dir_for(config: &Config, domain: &str) -> PathBuf {
     config.domain_data_dir_for(domain)
-}
-
-fn resolve_push_actor(explicit: Option<&str>) -> String {
-    if let Some(value) = explicit {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    env::var("USER")
-        .or_else(|_| env::var("USERNAME"))
-        .map(|value| value.trim().to_string())
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "dbx push".to_string())
 }
 
 fn load_remote_endpoint_for_domain(config: &Config, domain: &str) -> Result<DomainRemoteEndpoint> {
