@@ -101,6 +101,16 @@ dbx schema person
 - Populate `events.<event>.fields` with the fields an event may touch; an empty list keeps the event permissive.
 - Toggle `locked`, `field_locks`, or `hidden_fields` to freeze fields or suppress them from aggregate detail responses.
 
+Adjust these settings anytime with `dbx schema field <aggregate> <field> …`:
+
+```bash
+dbx schema field person email --type text --format email --required
+dbx schema field person full_name --length-min 1 --length-max 64
+dbx schema field person profile --properties @profile_rules.json
+```
+
+Pass `--clear-type`, `--clear-rules`, or `--clear-format` to roll back constraints, and use `--rules @path/to/file.json` when you need to swap in a full JSON block at once.
+
 Version schemas per tenant whenever you need rollback or auditability:
 
 - `dbx tenant schema publish <tenant> [--activate]` snapshots the current `schemas.json` into `schemas/versions/<id>.json` and records metadata in `schemas/schema_manifest.json` under that tenant’s data directory. (Skip `<tenant>` to use the currently active domain, or run `dbx schema publish` which assumes the active domain automatically.)

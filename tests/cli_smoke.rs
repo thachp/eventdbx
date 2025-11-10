@@ -637,6 +637,91 @@ fn schema_hide_field() -> Result<()> {
 }
 
 #[test]
+fn schema_field_sets_type_and_rules() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&[
+        "schema",
+        "create",
+        "contacts",
+        "--events",
+        "contact_created",
+    ])?;
+
+    let type_out = cli.run(&["schema", "field", "contacts", "email", "--type", "text"])?;
+    assert!(
+        type_out.contains("type=text"),
+        "unexpected schema field type output:\n{}",
+        type_out
+    );
+
+    let rules_out = cli.run(&[
+        "schema",
+        "field",
+        "contacts",
+        "email",
+        "--format",
+        "email",
+        "--required",
+    ])?;
+    assert!(
+        rules_out.contains("rules=updated"),
+        "unexpected schema field rules output:\n{}",
+        rules_out
+    );
+
+    let schema = cli.run_json(&["schema", "contacts"])?;
+    let column = schema["column_types"]["email"]
+        .as_object()
+        .context("email column missing from schema json")?;
+    assert_eq!(column.get("type"), Some(&json!("text")));
+    assert_eq!(column.get("required"), Some(&json!(true)));
+    assert_eq!(column.get("format"), Some(&json!("email")));
+
+    let clear_rules = cli.run(&[
+        "schema",
+        "field",
+        "contacts",
+        "email",
+        "--clear-format",
+        "--not-required",
+    ])?;
+    assert!(
+        clear_rules.contains("rules=updated"),
+        "unexpected schema field clear output:\n{}",
+        clear_rules
+    );
+    let after = cli.run_json(&["schema", "contacts"])?;
+    assert_eq!(after["column_types"]["email"], json!("text"));
+
+    Ok(())
+}
+
+#[test]
+fn schema_field_clear_type_removes_column() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "orders", "--events", "order_created"])?;
+    cli.run(&["schema", "field", "orders", "total", "--type", "integer"])?;
+
+    let cleared = cli.run(&["schema", "field", "orders", "total", "--clear-type"])?;
+    assert!(
+        cleared.contains("type=cleared"),
+        "unexpected schema field clear type output:\n{}",
+        cleared
+    );
+
+    let schema = cli.run_json(&["schema", "orders"])?;
+    let columns = schema["column_types"]
+        .as_object()
+        .context("column_types missing from schema json")?;
+    assert!(
+        !columns.contains_key("total"),
+        "expected total column to be removed: {}",
+        schema
+    );
+    Ok(())
+}
+
+#[test]
 fn schema_create_duplicate_fails() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run(&["schema", "create", "dupe", "--events", "event_a"])?;
