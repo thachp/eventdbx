@@ -92,7 +92,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 
    - `dbx tenant schema publish <tenant> [--activate] [--reason <text>]` captures the current `schemas.json`, writes it to `schemas/versions/<id>.json`, and records metadata in `schemas/schema_manifest.json` under the tenant’s data directory. (Omit `<tenant>` to target whichever domain is currently active.) Prefer `dbx schema publish …` if you’re already in the schema workflow—the commands are identical and simply default the tenant from the active domain.
    - `dbx tenant schema history <tenant> [--json] [--audit]` prints every recorded version plus the audit trail of publish/activate/rollback events.
-   - `dbx tenant schema diff <tenant> --from <version> --to <version> [--json]` emits a JSON Patch describing how two versions differ.
+  - `dbx tenant schema diff <tenant> --from <version> --to <version> [--json] [--style patch|unified|split] [--color auto|always|never]` emits either a JSON Patch, a GitHub-style unified diff, or a side-by-side split view. Use `--color always` to force green additions / red removals (default `auto` enables color only when stdout is a TTY).
    - `dbx tenant schema activate|rollback <tenant> --version <id>` advances or rewinds the active pointer. Include `--no-reload` if the daemon is offline; otherwise the CLI tells the server to evict and reload that tenant’s schema cache immediately.
    - `dbx tenant schema reload <tenant>` forces the running daemon to drop its cached schema/context for that tenant—useful after manual edits or when you disable automatic reloads.
 

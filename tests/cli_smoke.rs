@@ -1419,6 +1419,48 @@ fn tenant_schema_diff_and_rollback_flow() -> Result<()> {
         "expected diff to include at least one operation"
     );
 
+    let unified_output = cli.run(&[
+        "tenant",
+        "schema",
+        "diff",
+        "default",
+        "--from",
+        first_id.as_str(),
+        "--to",
+        latest_id.as_str(),
+        "--style",
+        "unified",
+        "--color",
+        "always",
+    ])?;
+    assert!(
+        (unified_output.contains("@@") || unified_output.contains("+++ "))
+            && unified_output.contains("\u{1b}[32m")
+            && unified_output.contains("\u{1b}[31m"),
+        "unified diff output did not include expected formatting:\n{}",
+        unified_output
+    );
+
+    let split_output = cli.run(&[
+        "tenant",
+        "schema",
+        "diff",
+        "default",
+        "--from",
+        first_id.as_str(),
+        "--to",
+        latest_id.as_str(),
+        "--style",
+        "split",
+        "--color",
+        "always",
+    ])?;
+    assert!(
+        split_output.contains('|') && split_output.contains("schema@"),
+        "split diff output missing expected columns:\n{}",
+        split_output
+    );
+
     let rollback_output = cli.run(&[
         "tenant",
         "schema",

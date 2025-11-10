@@ -1,10 +1,11 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, io::IsTerminal, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::SecondsFormat;
-use clap::Args;
+use clap::{Args, ValueEnum};
 use json_patch;
 use serde_json::{self, Value};
+use similar::TextDiff;
 
 use eventdbx::{
     config::{Config, load_or_default},
@@ -96,6 +97,33 @@ pub struct SchemaDiffArgs {
     /// Emit JSON patch output
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Render style for non-JSON output (patch, unified, or split)
+    #[arg(long = "style", value_enum, default_value_t = SchemaDiffStyle::Unified)]
+    pub style: SchemaDiffStyle,
+
+    /// Color mode for rendered diffs (auto = TTY only)
+    #[arg(long = "color", value_enum, default_value_t = SchemaDiffColor::Auto)]
+    pub color: SchemaDiffColor,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Default, PartialEq, Eq)]
+pub enum SchemaDiffStyle {
+    /// JSON Patch-style operations
+    Patch,
+    /// Unified diff similar to GitHub (default)
+    #[default]
+    Unified,
+    /// Side-by-side split diff
+    Split,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, Default, PartialEq, Eq)]
+pub enum SchemaDiffColor {
+    #[default]
+    Auto,
+    Always,
+    Never,
 }
 
 #[derive(Args, Clone)]
@@ -282,9 +310,249 @@ pub(crate) fn schema_diff(config_path: Option<PathBuf>, args: SchemaDiffArgs) ->
             "tenant={} diff from {} to {} includes {} operation(s):",
             tenant, from_id, to_id, operations
         );
-        println!("{}", serde_json::to_string_pretty(&patch_value)?);
+        let colorize = match args.color {
+            SchemaDiffColor::Always => true,
+            SchemaDiffColor::Never => false,
+            SchemaDiffColor::Auto => std::io::stdout().is_terminal(),
+        };
+        match args.style {
+            SchemaDiffStyle::Patch => {
+                println!("{}", serde_json::to_string_pretty(&patch_value)?);
+            }
+            SchemaDiffStyle::Unified => {
+                let diff_text =
+                    render_schema_unified_diff(&from_json, &to_json, &from_id, &to_id, colorize)?;
+                print_diff_or_placeholder(&diff_text);
+            }
+            SchemaDiffStyle::Split => {
+                let diff_text =
+                    render_schema_split_diff(&from_json, &to_json, &from_id, &to_id, colorize)?;
+                print_diff_or_placeholder(&diff_text);
+            }
+        }
     }
     Ok(())
+}
+
+fn render_schema_unified_diff(
+    from_json: &Value,
+    to_json: &Value,
+    from_label: &str,
+    to_label: &str,
+    colorize: bool,
+) -> Result<String> {
+    let from_pretty = serde_json::to_string_pretty(from_json)?;
+    let to_pretty = serde_json::to_string_pretty(to_json)?;
+    let diff = TextDiff::from_lines(&from_pretty, &to_pretty);
+    let mut unified = diff.unified_diff();
+    unified.context_radius(3);
+    unified.header(
+        &format!("schema@{}", from_label),
+        &format!("schema@{}", to_label),
+    );
+    let mut rendered = unified.to_string();
+    if colorize {
+        rendered = colorize_unified_output(&rendered);
+    }
+    Ok(rendered)
+}
+
+fn render_schema_split_diff(
+    from_json: &Value,
+    to_json: &Value,
+    from_label: &str,
+    to_label: &str,
+    colorize: bool,
+) -> Result<String> {
+    let from_pretty = serde_json::to_string_pretty(from_json)?;
+    let to_pretty = serde_json::to_string_pretty(to_json)?;
+    let diff = TextDiff::from_lines(&from_pretty, &to_pretty);
+    let old_lines = diff.old_slices();
+    let new_lines = diff.new_slices();
+    let mut output = String::new();
+    output.push_str(&format!(
+        "{:<3} {:<40} | {:<3} {:<40}\n",
+        "",
+        format!("schema@{from_label}"),
+        "",
+        format!("schema@{to_label}")
+    ));
+    for group in diff.grouped_ops(3) {
+        let header = format!(
+            "@@ -{} +{} @@",
+            group
+                .first()
+                .map(|op| op.old_range().start + 1)
+                .unwrap_or(0),
+            group
+                .first()
+                .map(|op| op.new_range().start + 1)
+                .unwrap_or(0)
+        );
+        output.push_str(&format!("{:=<88}\n", header));
+        for op in group {
+            match op.tag() {
+                similar::DiffTag::Equal => {
+                    let old_range = op.old_range();
+                    let new_range = op.new_range();
+                    for offset in 0..old_range.len() {
+                        let left = old_lines[old_range.start + offset];
+                        let right = new_lines[new_range.start + offset];
+                        append_split_row(
+                            &mut output,
+                            "",
+                            Some(left),
+                            "",
+                            Some(right),
+                            None,
+                            colorize,
+                        );
+                    }
+                }
+                similar::DiffTag::Delete => {
+                    for idx in op.old_range() {
+                        let left = old_lines[idx];
+                        append_split_row(
+                            &mut output,
+                            "-",
+                            Some(left),
+                            "",
+                            None,
+                            Some(Color::Red),
+                            colorize,
+                        );
+                    }
+                }
+                similar::DiffTag::Insert => {
+                    for idx in op.new_range() {
+                        let right = new_lines[idx];
+                        append_split_row(
+                            &mut output,
+                            "",
+                            None,
+                            "+",
+                            Some(right),
+                            Some(Color::Green),
+                            colorize,
+                        );
+                    }
+                }
+                similar::DiffTag::Replace => {
+                    for idx in op.old_range() {
+                        let left = old_lines[idx];
+                        append_split_row(
+                            &mut output,
+                            "-",
+                            Some(left),
+                            "",
+                            None,
+                            Some(Color::Red),
+                            colorize,
+                        );
+                    }
+                    for idx in op.new_range() {
+                        let right = new_lines[idx];
+                        append_split_row(
+                            &mut output,
+                            "",
+                            None,
+                            "+",
+                            Some(right),
+                            Some(Color::Green),
+                            colorize,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn print_diff_or_placeholder(diff_text: &str) {
+    if diff_text.trim().is_empty() {
+        println!("(no textual diff to display)");
+    } else {
+        print!("{diff_text}");
+        if !diff_text.ends_with('\n') {
+            println!();
+        }
+    }
+}
+
+fn colorize_unified_output(diff_text: &str) -> String {
+    const RESET: &str = "\x1b[0m";
+    const GREEN: &str = "\x1b[32m";
+    const RED: &str = "\x1b[31m";
+    let ends_with_newline = diff_text.ends_with('\n');
+    let lines: Vec<String> = diff_text
+        .lines()
+        .map(|line| {
+            if line.starts_with('+') && !line.starts_with("+++") {
+                format!("{GREEN}{line}{RESET}")
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                format!("{RED}{line}{RESET}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    let mut result = lines.join("\n");
+    if ends_with_newline {
+        result.push('\n');
+    }
+    result
+}
+
+enum Color {
+    Red,
+    Green,
+}
+
+fn append_split_row(
+    output: &mut String,
+    left_tag: &str,
+    left_text: Option<&str>,
+    right_tag: &str,
+    right_text: Option<&str>,
+    color: Option<Color>,
+    enable_color: bool,
+) {
+    let row = format!(
+        "{:<3} {:<40} | {:<3} {:<40}\n",
+        left_tag,
+        truncate_line(left_text.unwrap_or(""), 40),
+        right_tag,
+        truncate_line(right_text.unwrap_or(""), 40)
+    );
+    if enable_color {
+        match color {
+            Some(Color::Red) => {
+                output.push_str("\x1b[31m");
+                output.push_str(&row);
+                output.push_str("\x1b[0m");
+                return;
+            }
+            Some(Color::Green) => {
+                output.push_str("\x1b[32m");
+                output.push_str(&row);
+                output.push_str("\x1b[0m");
+                return;
+            }
+            None => {}
+        }
+    }
+    output.push_str(&row);
+}
+
+fn truncate_line(line: &str, width: usize) -> String {
+    let trimmed = line.trim_end_matches('\n');
+    if trimmed.chars().count() <= width {
+        trimmed.to_string()
+    } else {
+        let truncated: String = trimmed.chars().take(width.saturating_sub(3)).collect();
+        format!("{truncated}...")
+    }
 }
 
 pub(crate) fn schema_reload(config_path: Option<PathBuf>, args: SchemaReloadArgs) -> Result<()> {
