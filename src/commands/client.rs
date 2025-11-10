@@ -647,6 +647,222 @@ impl ServerClient {
             },
         )
     }
+
+    pub fn assign_tenant(&self, token: &str, tenant: &str, shard: &str) -> Result<bool> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut assign = payload_builder.init_tenant_assign();
+                assign.set_token(token);
+                assign.set_tenant_id(tenant);
+                assign.set_shard_id(shard);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_assign response payload")?
+                {
+                    payload::TenantAssign(Ok(reply)) => Ok(reply.get_changed()),
+                    payload::TenantAssign(Err(err)) => {
+                        Err(anyhow!("failed to decode tenant_assign response: {}", err))
+                    }
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn unassign_tenant(&self, token: &str, tenant: &str) -> Result<bool> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut unassign = payload_builder.init_tenant_unassign();
+                unassign.set_token(token);
+                unassign.set_tenant_id(tenant);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_unassign response payload")?
+                {
+                    payload::TenantUnassign(Ok(reply)) => Ok(reply.get_changed()),
+                    payload::TenantUnassign(Err(err)) => Err(anyhow!(
+                        "failed to decode tenant_unassign response: {}",
+                        err
+                    )),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn set_tenant_quota(&self, token: &str, tenant: &str, max_aggregates: u64) -> Result<bool> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut quota = payload_builder.init_tenant_quota_set();
+                quota.set_token(token);
+                quota.set_tenant_id(tenant);
+                quota.set_max_aggregates(max_aggregates);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_quota_set response payload")?
+                {
+                    payload::TenantQuotaSet(Ok(reply)) => Ok(reply.get_changed()),
+                    payload::TenantQuotaSet(Err(err)) => Err(anyhow!(
+                        "failed to decode tenant_quota_set response: {}",
+                        err
+                    )),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn clear_tenant_quota(&self, token: &str, tenant: &str) -> Result<bool> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut quota = payload_builder.init_tenant_quota_clear();
+                quota.set_token(token);
+                quota.set_tenant_id(tenant);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_quota_clear response payload")?
+                {
+                    payload::TenantQuotaClear(Ok(reply)) => Ok(reply.get_changed()),
+                    payload::TenantQuotaClear(Err(err)) => Err(anyhow!(
+                        "failed to decode tenant_quota_clear response: {}",
+                        err
+                    )),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn recalc_tenant_aggregates(&self, token: &str, tenant: &str) -> Result<u64> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut quota = payload_builder.init_tenant_quota_recalc();
+                quota.set_token(token);
+                quota.set_tenant_id(tenant);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_quota_recalc response payload")?
+                {
+                    payload::TenantQuotaRecalc(Ok(reply)) => Ok(reply.get_aggregate_count()),
+                    payload::TenantQuotaRecalc(Err(err)) => Err(anyhow!(
+                        "failed to decode tenant_quota_recalc response: {}",
+                        err
+                    )),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
 }
 
 fn create_aggregate_blocking(

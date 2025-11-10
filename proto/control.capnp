@@ -14,6 +14,11 @@ struct ControlRequest {
     setAggregateArchive @9 :SetAggregateArchiveRequest;
     listSchemas @10 :ListSchemasRequest;
     replaceSchemas @11 :ReplaceSchemasRequest;
+    tenantAssign @12 :TenantAssignRequest;
+    tenantUnassign @13 :TenantUnassignRequest;
+    tenantQuotaSet @14 :TenantQuotaSetRequest;
+    tenantQuotaClear @15 :TenantQuotaClearRequest;
+    tenantQuotaRecalc @16 :TenantQuotaRecalcRequest;
   }
 }
 
@@ -31,6 +36,11 @@ struct ControlResponse {
     setAggregateArchive @9 :SetAggregateArchiveResponse;
     listSchemas @10 :ListSchemasResponse;
     replaceSchemas @11 :ReplaceSchemasResponse;
+    tenantAssign @12 :TenantAssignResponse;
+    tenantUnassign @13 :TenantUnassignResponse;
+    tenantQuotaSet @14 :TenantQuotaSetResponse;
+    tenantQuotaClear @15 :TenantQuotaClearResponse;
+    tenantQuotaRecalc @16 :TenantQuotaRecalcResponse;
   }
 }
 
@@ -205,4 +215,54 @@ enum AggregateSortField {
 struct ControlError {
   code @0 :Text;
   message @1 :Text;
+}
+
+struct TenantAssignRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+  shardId @2 :Text;
+}
+
+struct TenantAssignResponse {
+  changed @0 :Bool;
+  shardId @1 :Text;
+}
+
+struct TenantUnassignRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+}
+
+struct TenantUnassignResponse {
+  changed @0 :Bool;
+}
+
+struct TenantQuotaSetRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+  maxAggregates @2 :UInt64;
+}
+
+struct TenantQuotaSetResponse {
+  changed @0 :Bool;
+  quota @1 :UInt64;
+  hasQuota @2 :Bool;
+}
+
+struct TenantQuotaClearRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+}
+
+struct TenantQuotaClearResponse {
+  changed @0 :Bool;
+}
+
+struct TenantQuotaRecalcRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+}
+
+struct TenantQuotaRecalcResponse {
+  aggregateCount @0 :UInt64;
 }

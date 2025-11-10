@@ -5,8 +5,10 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json;
 
+use crate::commands::{cli_token, client::ServerClient};
 use eventdbx::{
-    config::load_or_default,
+    config::{load_or_default, Config},
+    error::EventError,
     store::EventStore,
     tenant::{normalize_shard_id, normalize_tenant_id},
     tenant_store::TenantAssignmentStore,
@@ -118,15 +120,13 @@ fn assign(config_path: Option<PathBuf>, args: TenantAssignArgs) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let tenant = normalize_tenant_id(&args.tenant)?;
     let shard = normalize_shard_id(&args.shard, config.shard_count())?;
-    let store = TenantAssignmentStore::open(config.tenant_meta_path())?;
-    let changed = store.assign(&tenant, &shard)?;
-    if changed {
-        println!("Assigned tenant '{}' to shard '{}'.", tenant, shard);
-    } else {
-        println!(
-            "Tenant '{}' is already assigned to shard '{}'.",
-            tenant, shard
-        );
+    match try_assign_offline(&config, &tenant, &shard) {
+        Ok(changed) => report_assign(&tenant, &shard, changed),
+        Err(err) if is_lock_error(&err) => {
+            let changed = assign_online(&config, &tenant, &shard)?;
+            report_assign(&tenant, &shard, changed);
+        }
+        Err(err) => return Err(err.into()),
     }
     Ok(())
 }
@@ -134,17 +134,13 @@ fn assign(config_path: Option<PathBuf>, args: TenantAssignArgs) -> Result<()> {
 fn unassign(config_path: Option<PathBuf>, args: TenantUnassignArgs) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let tenant = normalize_tenant_id(&args.tenant)?;
-    let store = TenantAssignmentStore::open(config.tenant_meta_path())?;
-    if store.unassign(&tenant)? {
-        println!(
-            "Removed explicit shard assignment for tenant '{}'; default hashing will apply.",
-            tenant
-        );
-    } else {
-        println!(
-            "Tenant '{}' was not explicitly assigned to a shard.",
-            tenant
-        );
+    match try_unassign_offline(&config, &tenant) {
+        Ok(changed) => report_unassign(&tenant, changed),
+        Err(err) if is_lock_error(&err) => {
+            let changed = unassign_online(&config, &tenant)?;
+            report_unassign(&tenant, changed);
+        }
+        Err(err) => return Err(err.into()),
     }
     Ok(())
 }
@@ -316,18 +312,13 @@ fn quota_set(config_path: Option<PathBuf>, args: TenantQuotaSetArgs) -> Result<(
     }
     let (config, _) = load_or_default(config_path)?;
     let tenant = normalize_tenant_id(&args.tenant)?;
-    let store = TenantAssignmentStore::open(config.tenant_meta_path())?;
-    let changed = store.set_quota(&tenant, Some(args.max_aggregates))?;
-    if changed {
-        println!(
-            "Set aggregate quota for tenant '{}' to {}.",
-            tenant, args.max_aggregates
-        );
-    } else {
-        println!(
-            "Aggregate quota for tenant '{}' already set to {}.",
-            tenant, args.max_aggregates
-        );
+    match try_set_quota_offline(&config, &tenant, args.max_aggregates) {
+        Ok(changed) => report_quota_set(&tenant, args.max_aggregates, changed),
+        Err(err) if is_lock_error(&err) => {
+            let changed = quota_set_online(&config, &tenant, args.max_aggregates)?;
+            report_quota_set(&tenant, args.max_aggregates, changed);
+        }
+        Err(err) => return Err(err.into()),
     }
     Ok(())
 }
@@ -335,11 +326,13 @@ fn quota_set(config_path: Option<PathBuf>, args: TenantQuotaSetArgs) -> Result<(
 fn quota_clear(config_path: Option<PathBuf>, args: TenantQuotaClearArgs) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let tenant = normalize_tenant_id(&args.tenant)?;
-    let store = TenantAssignmentStore::open(config.tenant_meta_path())?;
-    if store.set_quota(&tenant, None)? {
-        println!("Cleared aggregate quota for tenant '{}'.", tenant);
-    } else {
-        println!("No aggregate quota configured for tenant '{}'.", tenant);
+    match try_clear_quota_offline(&config, &tenant) {
+        Ok(changed) => report_quota_clear(&tenant, changed),
+        Err(err) if is_lock_error(&err) => {
+            let changed = quota_clear_online(&config, &tenant)?;
+            report_quota_clear(&tenant, changed);
+        }
+        Err(err) => return Err(err.into()),
     }
     Ok(())
 }
@@ -347,19 +340,147 @@ fn quota_clear(config_path: Option<PathBuf>, args: TenantQuotaClearArgs) -> Resu
 fn quota_recalc(config_path: Option<PathBuf>, args: TenantQuotaRecalcArgs) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let tenant = normalize_tenant_id(&args.tenant)?;
+    match try_quota_recalc_offline(&config, &tenant) {
+        Ok(counts) => report_quota_recalc(&tenant, counts),
+        Err(err) if is_lock_error(&err) => {
+            let counts = quota_recalc_online(&config, &tenant)?;
+            report_quota_recalc(&tenant, counts);
+        }
+        Err(err) => return Err(err.into()),
+    }
+    Ok(())
+}
+
+fn try_assign_offline(
+    config: &Config,
+    tenant: &str,
+    shard: &str,
+) -> std::result::Result<bool, EventError> {
+    let store = TenantAssignmentStore::open(config.tenant_meta_path())?;
+    store.assign(tenant, shard)
+}
+
+fn try_unassign_offline(config: &Config, tenant: &str) -> std::result::Result<bool, EventError> {
+    let store = TenantAssignmentStore::open(config.tenant_meta_path())?;
+    store.unassign(tenant)
+}
+
+fn try_set_quota_offline(
+    config: &Config,
+    tenant: &str,
+    quota: u64,
+) -> std::result::Result<bool, EventError> {
+    let store = TenantAssignmentStore::open(config.tenant_meta_path())?;
+    store.set_quota(tenant, Some(quota))
+}
+
+fn try_clear_quota_offline(config: &Config, tenant: &str) -> std::result::Result<bool, EventError> {
+    let store = TenantAssignmentStore::open(config.tenant_meta_path())?;
+    store.set_quota(tenant, None)
+}
+
+fn try_quota_recalc_offline(config: &Config, tenant: &str) -> std::result::Result<u64, EventError> {
     let store = TenantAssignmentStore::open(config.tenant_meta_path())?;
     let tenant_event_store = EventStore::open(
-        config.event_store_path_for(&tenant),
+        config.event_store_path_for(tenant),
         config.encryption_key()?,
         config.snowflake_worker_id,
     )?;
     let counts = tenant_event_store
         .counts()
         .map(|counts| counts.total_aggregates() as u64)?;
-    store.ensure_aggregate_count(&tenant, || Ok(counts))?;
+    store.ensure_aggregate_count(tenant, || Ok(counts))?;
+    Ok(counts)
+}
+
+fn assign_online(config: &Config, tenant: &str, shard: &str) -> Result<bool> {
+    let (client, token) = prepare_remote_client(config, tenant)?;
+    client.assign_tenant(&token, tenant, shard)
+}
+
+fn unassign_online(config: &Config, tenant: &str) -> Result<bool> {
+    let (client, token) = prepare_remote_client(config, tenant)?;
+    client.unassign_tenant(&token, tenant)
+}
+
+fn quota_set_online(config: &Config, tenant: &str, quota: u64) -> Result<bool> {
+    let (client, token) = prepare_remote_client(config, tenant)?;
+    client.set_tenant_quota(&token, tenant, quota)
+}
+
+fn quota_clear_online(config: &Config, tenant: &str) -> Result<bool> {
+    let (client, token) = prepare_remote_client(config, tenant)?;
+    client.clear_tenant_quota(&token, tenant)
+}
+
+fn quota_recalc_online(config: &Config, tenant: &str) -> Result<u64> {
+    let (client, token) = prepare_remote_client(config, tenant)?;
+    client.recalc_tenant_aggregates(&token, tenant)
+}
+
+fn prepare_remote_client(config: &Config, tenant: &str) -> Result<(ServerClient, String)> {
+    let token = cli_token::ensure_bootstrap_token(config)?;
+    let client = ServerClient::new(config)?.with_tenant(Some(tenant.to_string()));
+    Ok((client, token))
+}
+
+fn is_lock_error(err: &EventError) -> bool {
+    match err {
+        EventError::Storage(message) => {
+            let lower = message.to_ascii_lowercase();
+            lower.contains("lock file") || lower.contains("resource temporarily unavailable")
+        }
+        _ => false,
+    }
+}
+
+fn report_assign(tenant: &str, shard: &str, changed: bool) {
+    if changed {
+        println!("Assigned tenant '{}' to shard '{}'.", tenant, shard);
+    } else {
+        println!(
+            "Tenant '{}' is already assigned to shard '{}'.",
+            tenant, shard
+        );
+    }
+}
+
+fn report_unassign(tenant: &str, changed: bool) {
+    if changed {
+        println!(
+            "Removed explicit shard assignment for tenant '{}'; default hashing will apply.",
+            tenant
+        );
+    } else {
+        println!(
+            "Tenant '{}' was not explicitly assigned to a shard.",
+            tenant
+        );
+    }
+}
+
+fn report_quota_set(tenant: &str, quota: u64, changed: bool) {
+    if changed {
+        println!("Set aggregate quota for tenant '{}' to {}.", tenant, quota);
+    } else {
+        println!(
+            "Aggregate quota for tenant '{}' already set to {}.",
+            tenant, quota
+        );
+    }
+}
+
+fn report_quota_clear(tenant: &str, changed: bool) {
+    if changed {
+        println!("Cleared aggregate quota for tenant '{}'.", tenant);
+    } else {
+        println!("No aggregate quota configured for tenant '{}'.", tenant);
+    }
+}
+
+fn report_quota_recalc(tenant: &str, count: u64) {
     println!(
         "Recalculated aggregate count for tenant '{}' ({} aggregate(s)).",
-        tenant, counts
+        tenant, count
     );
-    Ok(())
 }

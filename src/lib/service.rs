@@ -71,6 +71,14 @@ impl CoreContext {
         Arc::clone(&self.store)
     }
 
+    pub fn assignments(&self) -> Arc<TenantAssignmentStore> {
+        Arc::clone(&self.assignments)
+    }
+
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
     pub fn restrict(&self) -> RestrictMode {
         self.restrict
     }
