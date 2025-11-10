@@ -3,9 +3,15 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand};
 
+use crate::commands::schema_version::{
+    SchemaActivateArgs, SchemaDiffArgs, SchemaHistoryArgs, SchemaPublishArgs, SchemaReloadArgs,
+    SchemaRollbackArgs, SchemaShowArgs, schema_activate, schema_diff, schema_history,
+    schema_publish, schema_reload, schema_rollback, schema_show,
+};
 use eventdbx::{
     config::load_or_default,
     schema::{CreateSchemaInput, MAX_EVENT_NOTE_LENGTH, SchemaManager, SchemaUpdate},
+    schema_history::SchemaAuditAction,
 };
 use serde_json;
 
@@ -25,6 +31,20 @@ pub enum SchemaCommands {
     Hide(SchemaHideArgs),
     /// Validate payload against a schema definition
     Validate(SchemaValidateArgs),
+    /// Publish a tenant-level schema snapshot
+    Publish(SchemaPublishArgs),
+    /// Show schema history for a tenant
+    History(SchemaHistoryArgs),
+    /// Show a specific schema version
+    Show(SchemaShowArgs),
+    /// Diff two schema versions
+    Diff(SchemaDiffArgs),
+    /// Activate a schema version
+    Activate(SchemaActivateArgs),
+    /// Roll back to a previous schema version
+    Rollback(SchemaRollbackArgs),
+    /// Reload the tenant schema cache
+    Reload(SchemaReloadArgs),
     /// Fallback handler for positional aggregate commands
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -201,6 +221,15 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
             );
             Ok(())
         }
+        SchemaCommands::Publish(args) => schema_publish(config_path, args),
+        SchemaCommands::History(args) => schema_history(config_path, args),
+        SchemaCommands::Show(args) => schema_show(config_path, args),
+        SchemaCommands::Diff(args) => schema_diff(config_path, args),
+        SchemaCommands::Activate(args) => {
+            schema_activate(config_path, args, SchemaAuditAction::Activate, "activated")
+        }
+        SchemaCommands::Rollback(args) => schema_rollback(config_path, args),
+        SchemaCommands::Reload(args) => schema_reload(config_path, args),
         SchemaCommands::External(args) => {
             let (config, _) = load_or_default(config_path)?;
             let manager = SchemaManager::load(config.schema_store_path())?;
