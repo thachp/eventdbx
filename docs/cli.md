@@ -58,8 +58,11 @@ Run without flags to print the current configuration. The first invocation must 
 - `dbx schema annotate <name> <event> [--note <text>] [--clear]`
 - `dbx schema list`
 - `dbx schema field <aggregate> <field> [--type <type>] [--format <format>] [--required|--not-required] [...rules]`
+- `dbx schema alter <aggregate> <event> [--add <field,...>] [--remove <field,...>] [--set <field,...>] [--clear]`
 
 `schema field` lets you manage column types, formats, substring/regex checks, numeric ranges, nested object rules, or clear them entirely (`--clear-type`, `--clear-rules`) without editing `schemas.json` by hand.
+
+`schema alter` updates the allowed field list per event—append or remove entries incrementally, replace the list via `--set`, or empty it with `--clear`.
 
 ## Aggregates
 

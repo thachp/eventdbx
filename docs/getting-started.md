@@ -111,6 +111,14 @@ dbx schema field person profile --properties @profile_rules.json
 
 Pass `--clear-type`, `--clear-rules`, or `--clear-format` to roll back constraints, and use `--rules @path/to/file.json` when you need to swap in a full JSON block at once.
 
+Manage the per-event allow-list with `dbx schema alter <aggregate> <event>`:
+
+```bash
+dbx schema alter person person_created --add first_name,last_name
+dbx schema alter person person_updated --set comment,status
+dbx schema alter person person_updated --clear
+```
+
 Version schemas per tenant whenever you need rollback or auditability:
 
 - `dbx tenant schema publish <tenant> [--activate]` snapshots the current `schemas.json` into `schemas/versions/<id>.json` and records metadata in `schemas/schema_manifest.json` under that tenant’s data directory. (Skip `<tenant>` to use the currently active domain, or run `dbx schema publish` which assumes the active domain automatically.)

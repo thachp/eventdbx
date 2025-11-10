@@ -686,6 +686,7 @@ pub struct SchemaUpdate {
     pub field_lock: Option<(String, bool)>,
     pub event_add_fields: BTreeMap<String, Vec<String>>,
     pub event_remove_fields: BTreeMap<String, Vec<String>>,
+    pub event_set_fields: BTreeMap<String, Vec<String>>,
     pub event_notes: BTreeMap<String, Option<String>>,
     pub hidden: Option<bool>,
     pub hidden_field: Option<(String, bool)>,
@@ -853,6 +854,23 @@ impl SchemaManager {
                         field
                     )));
                 }
+            }
+
+            for (event, fields) in update.event_set_fields {
+                let schema_event = schema.events.get_mut(&event).ok_or_else(|| {
+                    EventError::InvalidSchema(format!(
+                        "event {} is not defined for aggregate {}",
+                        event, aggregate
+                    ))
+                })?;
+                for field in &fields {
+                    if field.trim().is_empty() {
+                        return Err(EventError::InvalidSchema(
+                            "field names cannot be empty".into(),
+                        ));
+                    }
+                }
+                schema_event.fields = fields;
             }
 
             for (event, fields) in update.event_add_fields {

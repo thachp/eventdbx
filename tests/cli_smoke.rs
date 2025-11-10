@@ -722,6 +722,122 @@ fn schema_field_clear_type_removes_column() -> Result<()> {
 }
 
 #[test]
+fn schema_alter_add_remove_flow() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "person", "--events", "person_created"])?;
+
+    let add = cli.run(&[
+        "schema",
+        "alter",
+        "person",
+        "person_created",
+        "--add",
+        "first_name,last_name",
+    ])?;
+    assert!(
+        add.contains("added=first_name,last_name"),
+        "unexpected schema alter add output:\n{}",
+        add
+    );
+
+    let schema = cli.run_json(&["schema", "person"])?;
+    let fields = schema["events"]["person_created"]["fields"]
+        .as_array()
+        .context("expected fields array after add")?;
+    assert!(
+        fields.iter().any(|value| value == "first_name")
+            && fields.iter().any(|value| value == "last_name"),
+        "field list missing expected entries: {}",
+        schema
+    );
+
+    let remove = cli.run(&[
+        "schema",
+        "alter",
+        "person",
+        "person_created",
+        "--remove",
+        "last_name",
+    ])?;
+    assert!(
+        remove.contains("removed=last_name"),
+        "unexpected schema alter remove output:\n{}",
+        remove
+    );
+
+    let after_remove = cli.run_json(&["schema", "person"])?;
+    let remaining = after_remove["events"]["person_created"]["fields"]
+        .as_array()
+        .context("expected fields array after remove")?;
+    let remaining_values: Vec<_> = remaining
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        remaining_values,
+        vec!["first_name".to_string()],
+        "expected only first_name after removal: {}",
+        after_remove
+    );
+
+    Ok(())
+}
+
+#[test]
+fn schema_alter_set_and_clear() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "order", "--events", "order_created"])?;
+
+    let set = cli.run(&[
+        "schema",
+        "alter",
+        "order",
+        "order_created",
+        "--set",
+        "order_id,status",
+    ])?;
+    assert!(
+        set.contains("fields=order_id,status"),
+        "unexpected schema alter set output:\n{}",
+        set
+    );
+
+    let schema = cli.run_json(&["schema", "order"])?;
+    let fields = schema["events"]["order_created"]["fields"]
+        .as_array()
+        .context("expected fields array after set")?;
+    let set_values: Vec<_> = fields
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        set_values,
+        vec!["order_id".to_string(), "status".to_string()],
+        "expected set fields to replace list: {}",
+        schema
+    );
+
+    let cleared = cli.run(&["schema", "alter", "order", "order_created", "--clear"])?;
+    assert!(
+        cleared.contains("fields=cleared"),
+        "unexpected schema alter clear output:\n{}",
+        cleared
+    );
+
+    let after_clear = cli.run_json(&["schema", "order"])?;
+    let cleared_fields = after_clear["events"]["order_created"]["fields"]
+        .as_array()
+        .context("expected fields array after clear")?;
+    assert!(
+        cleared_fields.is_empty(),
+        "expected fields to be empty after clear: {}",
+        after_clear
+    );
+
+    Ok(())
+}
+
+#[test]
 fn schema_create_duplicate_fails() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run(&["schema", "create", "dupe", "--events", "event_a"])?;

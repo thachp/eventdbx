@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, str::FromStr};
+use std::{collections::HashSet, fs, path::PathBuf, str::FromStr};
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand, ValueEnum};
@@ -35,6 +35,8 @@ pub enum SchemaCommands {
     Hide(SchemaHideArgs),
     /// Modify column types and validation rules for a field
     Field(SchemaFieldArgs),
+    /// Manage the field allow-list for a specific event
+    Alter(SchemaAlterArgs),
     /// Validate payload against a schema definition
     Validate(SchemaValidateArgs),
     /// Publish a tenant-level schema snapshot
@@ -390,6 +392,54 @@ impl From<FieldFormatArg> for FieldFormat {
 }
 
 #[derive(Args)]
+pub struct SchemaAlterArgs {
+    /// Aggregate name whose event definition will change
+    #[arg(value_name = "AGGREGATE")]
+    pub aggregate: String,
+
+    /// Event name to update
+    #[arg(value_name = "EVENT")]
+    pub event: String,
+
+    /// Append fields to the allow-list
+    #[arg(
+        long = "add",
+        value_name = "FIELD",
+        value_delimiter = ',',
+        conflicts_with_all = ["set", "clear"]
+    )]
+    pub add: Option<Vec<String>>,
+
+    /// Remove fields from the allow-list
+    #[arg(
+        long = "remove",
+        value_name = "FIELD",
+        value_delimiter = ',',
+        conflicts_with_all = ["set", "clear"]
+    )]
+    pub remove: Option<Vec<String>>,
+
+    /// Replace the allow-list entirely
+    #[arg(
+        long = "set",
+        value_name = "FIELD",
+        value_delimiter = ',',
+        conflicts_with_all = ["add", "remove", "clear"]
+    )]
+    pub set: Option<Vec<String>>,
+
+    /// Clear all allowed fields (equivalent to an empty set)
+    #[arg(long = "clear", default_value_t = false, conflicts_with_all = ["set", "add", "remove"])]
+    pub clear: bool,
+}
+
+impl SchemaAlterArgs {
+    fn has_mutation(&self) -> bool {
+        self.set.is_some() || self.clear || self.add.is_some() || self.remove.is_some()
+    }
+}
+
+#[derive(Args)]
 pub struct SchemaValidateArgs {
     /// Aggregate name to validate against
     #[arg(long)]
@@ -408,6 +458,7 @@ pub fn execute(config_path: Option<PathBuf>, command: SchemaCommands) -> Result<
     match command {
         SchemaCommands::Hide(args) => hide_field(config_path, args),
         SchemaCommands::Field(args) => schema_field(config_path, args),
+        SchemaCommands::Alter(args) => schema_alter(config_path, args),
         SchemaCommands::Create(args) => {
             let (config, _) = load_or_default(config_path)?;
             let manager = SchemaManager::load(config.schema_store_path())?;
@@ -695,6 +746,93 @@ fn schema_field(config_path: Option<PathBuf>, args: SchemaFieldArgs) -> Result<(
     Ok(())
 }
 
+fn schema_alter(config_path: Option<PathBuf>, args: SchemaAlterArgs) -> Result<()> {
+    let aggregate = args.aggregate.trim();
+    if aggregate.is_empty() {
+        return Err(anyhow!("aggregate name cannot be empty"));
+    }
+
+    let event = args.event.trim();
+    if event.is_empty() {
+        return Err(anyhow!("event name cannot be empty"));
+    }
+
+    if !args.has_mutation() {
+        return Err(anyhow!(
+            "no changes requested; supply --add, --remove, --set, or --clear"
+        ));
+    }
+
+    let (config, _) = load_or_default(config_path)?;
+    let manager = SchemaManager::load(config.schema_store_path())?;
+    let schema = manager.get(aggregate)?;
+    if !schema.events.contains_key(event) {
+        return Err(anyhow!(
+            "event {} is not defined for aggregate {}",
+            event,
+            aggregate
+        ));
+    }
+
+    let mut update = SchemaUpdate::default();
+    let mut actions = Vec::new();
+
+    if let Some(set_fields) = &args.set {
+        let normalized = normalize_field_names(set_fields, "--set")?;
+        update
+            .event_set_fields
+            .insert(event.to_string(), normalized.clone());
+        actions.push(format!(
+            "fields={}",
+            if normalized.is_empty() {
+                "[]".to_string()
+            } else {
+                normalized.join(",")
+            }
+        ));
+    } else if args.clear {
+        update
+            .event_set_fields
+            .insert(event.to_string(), Vec::new());
+        actions.push("fields=cleared".to_string());
+    } else {
+        if let Some(add_fields) = &args.add {
+            let normalized = normalize_field_names(add_fields, "--add")?;
+            update
+                .event_add_fields
+                .entry(event.to_string())
+                .or_default()
+                .extend(normalized.clone());
+            actions.push(format!("added={}", normalized.join(",")));
+        }
+        if let Some(remove_fields) = &args.remove {
+            let normalized = normalize_field_names(remove_fields, "--remove")?;
+            update
+                .event_remove_fields
+                .entry(event.to_string())
+                .or_default()
+                .extend(normalized.clone());
+            actions.push(format!("removed={}", normalized.join(",")));
+        }
+    }
+
+    if actions.is_empty() {
+        return Err(anyhow!(
+            "no valid field names supplied; please check the provided arguments"
+        ));
+    }
+
+    manager.update(aggregate, update)?;
+
+    println!(
+        "aggregate={} event={} {}",
+        aggregate,
+        event,
+        actions.join(" ")
+    );
+    Ok(())
+}
+
 fn parse_json_input<T>(input: &str, label: &str) -> Result<T>
 where
     T: DeserializeOwned,
@@ -717,4 +855,22 @@ fn clone_non_empty(values: &[String], label: &str) -> Result<Vec<String>> {
         items.push(value.clone());
     }
     Ok(items)
+}
+
+fn normalize_field_names(values: &[String], flag: &str) -> Result<Vec<String>> {
+    if values.is_empty() {
+        return Err(anyhow!("{flag} requires at least one field name"));
+    }
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!("{flag} entries cannot be empty"));
+        }
+        if seen.insert(trimmed.to_string()) {
+            normalized.push(trimmed.to_string());
+        }
+    }
+    Ok(normalized)
 }

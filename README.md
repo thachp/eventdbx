@@ -489,12 +489,16 @@ Rules are optional and can be combined when the target type supports them:
 - `range`: `{ "min": <value>, "max": <value> }` for numeric and temporal types (`integer`, `float`, `decimal`, `timestamp`, `date`). Boundary values must parse to the column’s type.
 - `properties`: nested `column_types` definitions for `object` columns, enabling recursion with the same rule set as top-level fields.
 
-Use `dbx schema field <aggregate> <field> …` to manage types and rules without editing `schemas.json`. It can set `--type <text|integer|…>`, toggle `--required/--not-required`, enforce `--format <email|url|…>`, swap `--regex` / `--contains` lists, adjust `--length-min` / `--length-max`, feed JSON rule blocks via `--rules @rules.json` or `--properties @object_rules.json`, and clear definitions (`--clear-type`, `--clear-rules`, `--clear-format`, etc.).
+Use `dbx schema field <aggregate> <field> …` to manage types and rules without editing `schemas.json`. It can set `--type <text|integer|…>`, toggle `--required/--not-required`, enforce `--format <email|url|…>`, swap `--regex` / `--contains` lists, adjust `--length-min` / `--length-max`, feed JSON rule blocks via `--rules @rules.json` or `--properties @object_rules.json`, and clear definitions (`--clear-type`, `--clear-rules`, `--clear-format`, etc.). Pair it with `dbx schema alter <aggregate> <event>` to append/remove event field allow-lists or replace them entirely via `--set`/`--clear`.
 
 ```bash
 dbx schema field person email --type text --format email --required
 dbx schema field person status --regex '^(pending|active|blocked)$'
 dbx schema field person profile --type object --properties @profile_rules.json
+
+dbx schema alter person person_created --add first_name,last_name
+dbx schema alter person person_updated --set status,comment
+dbx schema alter person person_updated --clear
 ```
 
 ## Performance Testing
