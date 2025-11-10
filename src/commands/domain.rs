@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -119,11 +119,59 @@ pub struct SchemaSyncArgs {
     pub domain: String,
 }
 
+#[derive(Args)]
+pub struct PushSchemaArgs {
+    /// Domain to synchronise
+    #[arg(value_name = "DOMAIN")]
+    pub domain: String,
+
+    /// Publish and activate the schemas on the remote after pushing
+    #[arg(long, default_value_t = false)]
+    pub publish: bool,
+
+    /// Reason recorded in the remote schema manifest (requires --publish)
+    #[arg(long = "publish-reason", value_name = "TEXT", requires = "publish")]
+    pub publish_reason: Option<String>,
+
+    /// Actor recorded in the remote schema manifest (requires --publish)
+    #[arg(long = "publish-actor", value_name = "NAME", requires = "publish")]
+    pub publish_actor: Option<String>,
+
+    /// Optional labels stored alongside the remote schema version (requires --publish)
+    #[arg(
+        long = "publish-label",
+        value_name = "LABEL",
+        value_delimiter = ',',
+        requires = "publish"
+    )]
+    pub publish_labels: Vec<String>,
+
+    /// Skip activating the published version on the remote (requires --publish)
+    #[arg(
+        long = "publish-no-activate",
+        default_value_t = false,
+        requires = "publish"
+    )]
+    pub publish_no_activate: bool,
+
+    /// Skip reloading the remote daemon after publishing (requires --publish)
+    #[arg(
+        long = "publish-no-reload",
+        default_value_t = false,
+        requires = "publish"
+    )]
+    pub publish_no_reload: bool,
+
+    /// Publish a new remote version even if the schemas did not change (requires --publish)
+    #[arg(long = "publish-force", default_value_t = false, requires = "publish")]
+    pub publish_force: bool,
+}
+
 #[derive(Subcommand)]
 pub enum PushCommand {
     /// Push schemas to the remote endpoint
     #[command(name = "schema")]
-    Schema(SchemaSyncArgs),
+    Schema(PushSchemaArgs),
     /// Push domain data (domain name as positional argument)
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -1114,7 +1162,7 @@ fn process_pull_aggregate(
     })
 }
 
-fn push_schema(config_path: Option<PathBuf>, args: SchemaSyncArgs) -> Result<()> {
+fn push_schema(config_path: Option<PathBuf>, args: PushSchemaArgs) -> Result<()> {
     let domain = normalize_domain_name(&args.domain)?;
     let (config, _) = load_or_default(config_path)?;
     ensure_existing_domain(&config, &domain)?;
@@ -1147,6 +1195,52 @@ fn push_schema(config_path: Option<PathBuf>, args: SchemaSyncArgs) -> Result<()>
         domain,
         remote.connect_addr
     );
+
+    if args.publish {
+        let actor_value = resolve_push_actor(args.publish_actor.as_deref());
+        let publish_result = client
+            .publish_tenant_schemas(
+                &remote.token,
+                &remote.tenant,
+                args.publish_reason.as_deref(),
+                Some(actor_value.as_str()),
+                &args.publish_labels,
+                !args.publish_no_activate,
+                args.publish_force,
+                !args.publish_no_reload,
+            )
+            .with_context(|| {
+                format!(
+                    "remote publish failed for tenant '{}' on {}",
+                    remote.tenant, remote.connect_addr
+                )
+            })?;
+
+        if publish_result.skipped {
+            println!(
+                "Remote tenant '{}' schemas unchanged; publish skipped.",
+                remote.tenant
+            );
+        } else if publish_result.activated {
+            println!(
+                "Remote tenant '{}' published version {} (activated).",
+                remote.tenant, publish_result.version_id
+            );
+        } else {
+            println!(
+                "Remote tenant '{}' published version {} (inactive).",
+                remote.tenant, publish_result.version_id
+            );
+        }
+
+        if args.publish_no_reload {
+            println!(
+                "Remote daemon reload skipped for tenant '{}' (--publish-no-reload).",
+                remote.tenant
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -1207,6 +1301,21 @@ fn ensure_existing_domain(config: &Config, domain: &str) -> Result<PathBuf> {
 
 fn domain_data_dir_for(config: &Config, domain: &str) -> PathBuf {
     config.domain_data_dir_for(domain)
+}
+
+fn resolve_push_actor(explicit: Option<&str>) -> String {
+    if let Some(value) = explicit {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    env::var("USER")
+        .or_else(|_| env::var("USERNAME"))
+        .map(|value| value.trim().to_string())
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "dbx push".to_string())
 }
 
 fn load_remote_endpoint_for_domain(config: &Config, domain: &str) -> Result<DomainRemoteEndpoint> {

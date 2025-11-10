@@ -1082,6 +1082,167 @@ fn tenant_stats_reports_counts() -> Result<()> {
 }
 
 #[test]
+fn tenant_schema_publish_records_history() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&[
+        "schema",
+        "create",
+        "orders",
+        "--events",
+        "order_created",
+        "--json",
+    ])?;
+
+    let publish_output = cli.run(&[
+        "tenant",
+        "schema",
+        "publish",
+        "default",
+        "--activate",
+        "--reason",
+        "initial load",
+        "--no-reload",
+    ])?;
+    assert!(
+        publish_output.contains("published version="),
+        "unexpected publish output: {}",
+        publish_output
+    );
+
+    let manifest = cli.run_json(&["tenant", "schema", "history", "default", "--json"])?;
+    let active = manifest["active_version"]
+        .as_str()
+        .context("history output missing active_version")?;
+    let versions = manifest["versions"]
+        .as_array()
+        .context("history output missing versions array")?;
+    assert_eq!(versions.len(), 1, "expected a single schema version");
+    assert_eq!(
+        versions[0]["id"],
+        json!(active),
+        "first version id should be active"
+    );
+    assert_eq!(
+        versions[0]["reason"],
+        json!("initial load"),
+        "version reason should match publish flag"
+    );
+    let audit = manifest["audit_log"]
+        .as_array()
+        .context("history output missing audit log")?;
+    assert_eq!(
+        audit.len(),
+        2,
+        "expected publish + activate audit entries, got {:?}",
+        audit
+    );
+    assert_eq!(audit[0]["action"], json!("publish"));
+    assert_eq!(audit[1]["action"], json!("activate"));
+    Ok(())
+}
+
+#[test]
+fn tenant_schema_diff_and_rollback_flow() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&[
+        "schema",
+        "create",
+        "orders",
+        "--events",
+        "order_created",
+        "--json",
+    ])?;
+    cli.run(&[
+        "tenant",
+        "schema",
+        "publish",
+        "default",
+        "--activate",
+        "--no-reload",
+    ])?;
+
+    cli.run(&["schema", "add", "orders", "order_shipped"])?;
+    cli.run(&[
+        "tenant",
+        "schema",
+        "publish",
+        "default",
+        "--activate",
+        "--reason",
+        "add shipped",
+        "--no-reload",
+    ])?;
+
+    let manifest = cli.run_json(&["tenant", "schema", "history", "default", "--json"])?;
+    let versions = manifest["versions"]
+        .as_array()
+        .context("expected versions array after second publish")?;
+    assert!(
+        versions.len() >= 2,
+        "history should include at least two versions: {:?}",
+        versions
+    );
+    let first_id = versions
+        .first()
+        .and_then(|value| value["id"].as_str())
+        .context("missing id for first version")?
+        .to_string();
+    let latest_id = versions
+        .last()
+        .and_then(|value| value["id"].as_str())
+        .context("missing id for latest version")?
+        .to_string();
+    assert_ne!(
+        first_id, latest_id,
+        "second publish should create new version"
+    );
+
+    let diff = cli.run_json(&[
+        "tenant",
+        "schema",
+        "diff",
+        "default",
+        "--from",
+        first_id.as_str(),
+        "--to",
+        latest_id.as_str(),
+        "--json",
+    ])?;
+    let operations = diff
+        .as_array()
+        .context("diff output was not a JSON array")?;
+    assert!(
+        !operations.is_empty(),
+        "expected diff to include at least one operation"
+    );
+
+    let rollback_output = cli.run(&[
+        "tenant",
+        "schema",
+        "rollback",
+        "default",
+        "--version",
+        first_id.as_str(),
+        "--no-reload",
+    ])?;
+    assert!(
+        rollback_output.contains("rolled back") || rollback_output.contains("already active"),
+        "unexpected rollback output: {}",
+        rollback_output
+    );
+
+    let post_manifest = cli.run_json(&["tenant", "schema", "history", "default", "--json"])?;
+    assert_eq!(
+        post_manifest["active_version"],
+        json!(first_id),
+        "rollback should update active version"
+    );
+    Ok(())
+}
+
+#[test]
 fn tenant_quota_limits_aggregate_creation() -> Result<()> {
     let cli = CliTest::new()?;
 

@@ -101,6 +101,14 @@ dbx schema person
 - Populate `events.<event>.fields` with the fields an event may touch; an empty list keeps the event permissive.
 - Toggle `locked`, `field_locks`, or `hidden_fields` to freeze fields or suppress them from aggregate detail responses.
 
+Version schemas per tenant whenever you need rollback or auditability:
+
+- `dbx tenant schema publish <tenant> [--activate]` snapshots the current `schemas.json` into `schemas/versions/<id>.json` and records metadata in `schemas/schema_manifest.json` under that tenant’s data directory.
+- `dbx tenant schema history <tenant> [--audit]` shows every stored version plus who published or activated it.
+- `dbx tenant schema diff <tenant> --from <version> --to <version>` emits a JSON Patch so you can review changes before activating them.
+- `dbx tenant schema activate|rollback <tenant> --version <id>` flips the active pointer. Pass `--no-reload` if the daemon is stopped; otherwise the CLI automatically evicts the tenant context so the server sees the new schema.
+- `dbx tenant schema reload <tenant>` manually refreshes the running daemon’s schema cache—handy after manual edits or when you defer reloads during maintenance.
+
 ## 5. Issue a token
 
 Automation uses bearer tokens for control-socket calls and any optional plugin surfaces.

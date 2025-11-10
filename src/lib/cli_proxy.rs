@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    env,
+    env, fs,
     io::Cursor,
     path::{Path, PathBuf},
     process::Stdio,
@@ -20,6 +20,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     process::Command,
     task::{JoinHandle, spawn_blocking},
+    time::{Duration, sleep},
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, error, info, warn};
@@ -40,6 +41,7 @@ use crate::{
         write_encrypted_frame,
     },
     schema::AggregateSchema,
+    schema_history::{PublishOptions, SchemaHistoryManager},
     service::{
         AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
         normalize_optional_comment,
@@ -106,6 +108,14 @@ enum ControlReply {
     },
     TenantQuotaRecalc {
         aggregate_count: u64,
+    },
+    TenantReload {
+        reloaded: bool,
+    },
+    TenantSchemaPublish {
+        version_id: String,
+        activated: bool,
+        skipped: bool,
     },
 }
 
@@ -204,6 +214,20 @@ enum ControlCommand {
         token: String,
         tenant: String,
     },
+    TenantReload {
+        token: String,
+        tenant: String,
+    },
+    TenantSchemaPublish {
+        token: String,
+        tenant: String,
+        reason: Option<String>,
+        actor: Option<String>,
+        labels: Vec<String>,
+        activate: bool,
+        force: bool,
+        reload: bool,
+    },
 }
 
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
@@ -240,6 +264,38 @@ fn control_error_code(err: &EventError) -> &'static str {
     }
 }
 
+async fn refresh_tenant_context(core_provider: Arc<dyn CoreProvider>, tenant: &str) -> bool {
+    let mut attempt = 0usize;
+    loop {
+        match core_provider.core_for(tenant) {
+            Ok(_) => return true,
+            Err(EventError::Storage(message)) => {
+                let lower = message.to_ascii_lowercase();
+                if lower.contains("lock") && attempt < 5 {
+                    attempt += 1;
+                    sleep(Duration::from_millis(100 * attempt as u64)).await;
+                    continue;
+                }
+                warn!(
+                    tenant = %tenant,
+                    attempt = attempt,
+                    "tenant reload skipped; failed to open context: {}",
+                    message
+                );
+                return false;
+            }
+            Err(err) => {
+                warn!(
+                    tenant = %tenant,
+                    "tenant reload skipped; failed to open context: {}",
+                    err
+                );
+                return false;
+            }
+        }
+    }
+}
+
 fn control_command_name(command: &ControlCommand) -> &'static str {
     match command {
         ControlCommand::ListAggregates { .. } => "list_aggregates",
@@ -258,6 +314,8 @@ fn control_command_name(command: &ControlCommand) -> &'static str {
         ControlCommand::TenantQuotaSet { .. } => "tenant_quota_set",
         ControlCommand::TenantQuotaClear { .. } => "tenant_quota_clear",
         ControlCommand::TenantQuotaRecalc { .. } => "tenant_quota_recalc",
+        ControlCommand::TenantReload { .. } => "tenant_reload",
+        ControlCommand::TenantSchemaPublish { .. } => "tenant_schema_publish",
     }
 }
 
@@ -940,6 +998,20 @@ where
                                 let mut builder = payload.init_tenant_quota_recalc();
                                 builder.set_aggregate_count(aggregate_count);
                             }
+                            ControlReply::TenantReload { reloaded } => {
+                                let mut builder = payload.init_tenant_reload();
+                                builder.set_reloaded(reloaded);
+                            }
+                            ControlReply::TenantSchemaPublish {
+                                version_id,
+                                activated,
+                                skipped,
+                            } => {
+                                let mut builder = payload.init_tenant_schema_publish();
+                                builder.set_version_id(&version_id);
+                                builder.set_activated(activated);
+                                builder.set_skipped(skipped);
+                            }
                         }
                     }
                     Err(err) => {
@@ -1386,6 +1458,52 @@ fn parse_control_command(
             let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
             Ok(ControlCommand::TenantQuotaRecalc { token, tenant })
         }
+        payload::TenantReload(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            Ok(ControlCommand::TenantReload { token, tenant })
+        }
+        payload::TenantSchemaPublish(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            let reason = if req.get_has_reason() {
+                Some(read_control_text(req.get_reason(), "reason")?)
+            } else {
+                None
+            };
+            let actor = if req.get_has_actor() {
+                Some(read_control_text(req.get_actor(), "actor")?)
+            } else {
+                None
+            };
+            let labels_reader = req
+                .get_labels()
+                .map_err(|err| EventError::Serialization(err.to_string()))?;
+            let mut labels = Vec::with_capacity(labels_reader.len() as usize);
+            for entry in labels_reader.iter() {
+                let value = entry
+                    .map_err(|err| EventError::Serialization(err.to_string()))?
+                    .to_string()
+                    .map_err(|err| EventError::Serialization(err.to_string()))?;
+                labels.push(value);
+            }
+            Ok(ControlCommand::TenantSchemaPublish {
+                token,
+                tenant,
+                reason,
+                actor,
+                labels,
+                activate: req.get_activate(),
+                force: req.get_force(),
+                reload: req.get_reload(),
+            })
+        }
     }
 }
 
@@ -1783,6 +1901,55 @@ async fn execute_control_command(
             assignments.ensure_aggregate_count(&tenant, || Ok(count))?;
             Ok(ControlReply::TenantQuotaRecalc {
                 aggregate_count: count,
+            })
+        }
+        ControlCommand::TenantReload { token, tenant } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            drop(core);
+            core_provider.invalidate_tenant(&tenant);
+            let reloaded = refresh_tenant_context(Arc::clone(&core_provider), &tenant).await;
+            Ok(ControlReply::TenantReload { reloaded })
+        }
+        ControlCommand::TenantSchemaPublish {
+            token,
+            tenant,
+            reason,
+            actor,
+            labels,
+            activate,
+            force,
+            reload,
+        } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let domain_root = {
+                let guard = shared_config
+                    .read()
+                    .map_err(|_| EventError::Storage("failed to acquire config lock".into()))?;
+                guard.domain_data_dir_for(&tenant)
+            };
+            drop(core);
+            let manager = SchemaHistoryManager::new(&domain_root);
+            let payload =
+                fs::read_to_string(manager.active_schema_path()).map_err(EventError::Io)?;
+            let outcome = manager.publish(PublishOptions {
+                schema_json: &payload,
+                actor: actor.as_deref(),
+                reason: reason.as_deref(),
+                labels: labels.as_slice(),
+                activate,
+                skip_if_identical: !force,
+            })?;
+            drop(manager);
+            if reload {
+                core_provider.invalidate_tenant(&tenant);
+                let _ = refresh_tenant_context(Arc::clone(&core_provider), &tenant).await;
+            }
+            Ok(ControlReply::TenantSchemaPublish {
+                version_id: outcome.version_id,
+                activated: outcome.activated,
+                skipped: outcome.skipped,
             })
         }
     }
