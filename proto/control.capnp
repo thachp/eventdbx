@@ -19,6 +19,8 @@ struct ControlRequest {
     tenantQuotaSet @14 :TenantQuotaSetRequest;
     tenantQuotaClear @15 :TenantQuotaClearRequest;
     tenantQuotaRecalc @16 :TenantQuotaRecalcRequest;
+    tenantReload @17 :TenantReloadRequest;
+    tenantSchemaPublish @18 :TenantSchemaPublishRequest;
   }
 }
 
@@ -41,6 +43,8 @@ struct ControlResponse {
     tenantQuotaSet @14 :TenantQuotaSetResponse;
     tenantQuotaClear @15 :TenantQuotaClearResponse;
     tenantQuotaRecalc @16 :TenantQuotaRecalcResponse;
+    tenantReload @17 :TenantReloadResponse;
+    tenantSchemaPublish @18 :TenantSchemaPublishResponse;
   }
 }
 
@@ -265,4 +269,32 @@ struct TenantQuotaRecalcRequest {
 
 struct TenantQuotaRecalcResponse {
   aggregateCount @0 :UInt64;
+}
+
+struct TenantReloadRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+}
+
+struct TenantReloadResponse {
+  reloaded @0 :Bool;
+}
+
+struct TenantSchemaPublishRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+  reason @2 :Text;
+  hasReason @3 :Bool;
+  actor @4 :Text;
+  hasActor @5 :Bool;
+  labels @6 :List(Text);
+  activate @7 :Bool;
+  force @8 :Bool;
+  reload @9 :Bool;
+}
+
+struct TenantSchemaPublishResponse {
+  versionId @0 :Text;
+  activated @1 :Bool;
+  skipped @2 :Bool;
 }

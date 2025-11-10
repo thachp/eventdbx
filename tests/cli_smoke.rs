@@ -637,6 +637,207 @@ fn schema_hide_field() -> Result<()> {
 }
 
 #[test]
+fn schema_field_sets_type_and_rules() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&[
+        "schema",
+        "create",
+        "contacts",
+        "--events",
+        "contact_created",
+    ])?;
+
+    let type_out = cli.run(&["schema", "field", "contacts", "email", "--type", "text"])?;
+    assert!(
+        type_out.contains("type=text"),
+        "unexpected schema field type output:\n{}",
+        type_out
+    );
+
+    let rules_out = cli.run(&[
+        "schema",
+        "field",
+        "contacts",
+        "email",
+        "--format",
+        "email",
+        "--required",
+    ])?;
+    assert!(
+        rules_out.contains("rules=updated"),
+        "unexpected schema field rules output:\n{}",
+        rules_out
+    );
+
+    let schema = cli.run_json(&["schema", "contacts"])?;
+    let column = schema["column_types"]["email"]
+        .as_object()
+        .context("email column missing from schema json")?;
+    assert_eq!(column.get("type"), Some(&json!("text")));
+    assert_eq!(column.get("required"), Some(&json!(true)));
+    assert_eq!(column.get("format"), Some(&json!("email")));
+
+    let clear_rules = cli.run(&[
+        "schema",
+        "field",
+        "contacts",
+        "email",
+        "--clear-format",
+        "--not-required",
+    ])?;
+    assert!(
+        clear_rules.contains("rules=updated"),
+        "unexpected schema field clear output:\n{}",
+        clear_rules
+    );
+    let after = cli.run_json(&["schema", "contacts"])?;
+    assert_eq!(after["column_types"]["email"], json!("text"));
+
+    Ok(())
+}
+
+#[test]
+fn schema_field_clear_type_removes_column() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "orders", "--events", "order_created"])?;
+    cli.run(&["schema", "field", "orders", "total", "--type", "integer"])?;
+
+    let cleared = cli.run(&["schema", "field", "orders", "total", "--clear-type"])?;
+    assert!(
+        cleared.contains("type=cleared"),
+        "unexpected schema field clear type output:\n{}",
+        cleared
+    );
+
+    let schema = cli.run_json(&["schema", "orders"])?;
+    let columns = schema["column_types"]
+        .as_object()
+        .context("column_types missing from schema json")?;
+    assert!(
+        !columns.contains_key("total"),
+        "expected total column to be removed: {}",
+        schema
+    );
+    Ok(())
+}
+
+#[test]
+fn schema_alter_add_remove_flow() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "person", "--events", "person_created"])?;
+
+    let add = cli.run(&[
+        "schema",
+        "alter",
+        "person",
+        "person_created",
+        "--add",
+        "first_name,last_name",
+    ])?;
+    assert!(
+        add.contains("added=first_name,last_name"),
+        "unexpected schema alter add output:\n{}",
+        add
+    );
+
+    let schema = cli.run_json(&["schema", "person"])?;
+    let fields = schema["events"]["person_created"]["fields"]
+        .as_array()
+        .context("expected fields array after add")?;
+    assert!(
+        fields.iter().any(|value| value == "first_name")
+            && fields.iter().any(|value| value == "last_name"),
+        "field list missing expected entries: {}",
+        schema
+    );
+
+    let remove = cli.run(&[
+        "schema",
+        "alter",
+        "person",
+        "person_created",
+        "--remove",
+        "last_name",
+    ])?;
+    assert!(
+        remove.contains("removed=last_name"),
+        "unexpected schema alter remove output:\n{}",
+        remove
+    );
+
+    let after_remove = cli.run_json(&["schema", "person"])?;
+    let remaining = after_remove["events"]["person_created"]["fields"]
+        .as_array()
+        .context("expected fields array after remove")?;
+    let remaining_values: Vec<_> = remaining
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        remaining_values,
+        vec!["first_name".to_string()],
+        "expected only first_name after removal: {}",
+        after_remove
+    );
+
+    Ok(())
+}
+
+#[test]
+fn schema_alter_set_and_clear() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "order", "--events", "order_created"])?;
+
+    let set = cli.run(&[
+        "schema",
+        "alter",
+        "order",
+        "order_created",
+        "--set",
+        "order_id,status",
+    ])?;
+    assert!(
+        set.contains("fields=order_id,status"),
+        "unexpected schema alter set output:\n{}",
+        set
+    );
+
+    let schema = cli.run_json(&["schema", "order"])?;
+    let fields = schema["events"]["order_created"]["fields"]
+        .as_array()
+        .context("expected fields array after set")?;
+    let set_values: Vec<_> = fields
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        set_values,
+        vec!["order_id".to_string(), "status".to_string()],
+        "expected set fields to replace list: {}",
+        schema
+    );
+
+    let cleared = cli.run(&["schema", "alter", "order", "order_created", "--clear"])?;
+    assert!(
+        cleared.contains("fields=cleared"),
+        "unexpected schema alter clear output:\n{}",
+        cleared
+    );
+
+    let after_clear = cli.run_json(&["schema", "order"])?;
+    let cleared_fields = after_clear["events"]["order_created"]["fields"]
+        .as_array()
+        .context("expected fields array after clear")?;
+    assert!(
+        cleared_fields.is_empty(),
+        "expected fields to be empty after clear: {}",
+        after_clear
+    );
+
+    Ok(())
+}
+
+#[test]
 fn schema_create_duplicate_fails() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run(&["schema", "create", "dupe", "--events", "event_a"])?;
@@ -1078,6 +1279,209 @@ fn tenant_stats_reports_counts() -> Result<()> {
         .context("tenant stats did not return an object after unassign")?;
     assert_eq!(after_map.get("shard-0001").and_then(Value::as_u64), Some(1));
     assert_eq!(after_map.get("shard-0002").and_then(Value::as_u64), Some(1));
+    Ok(())
+}
+
+#[test]
+fn tenant_schema_publish_records_history() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&[
+        "schema",
+        "create",
+        "orders",
+        "--events",
+        "order_created",
+        "--json",
+    ])?;
+
+    let publish_output = cli.run(&[
+        "tenant",
+        "schema",
+        "publish",
+        "default",
+        "--activate",
+        "--reason",
+        "initial load",
+        "--no-reload",
+    ])?;
+    assert!(
+        publish_output.contains("published version="),
+        "unexpected publish output: {}",
+        publish_output
+    );
+
+    let manifest = cli.run_json(&["tenant", "schema", "history", "default", "--json"])?;
+    let active = manifest["active_version"]
+        .as_str()
+        .context("history output missing active_version")?;
+    let versions = manifest["versions"]
+        .as_array()
+        .context("history output missing versions array")?;
+    assert_eq!(versions.len(), 1, "expected a single schema version");
+    assert_eq!(
+        versions[0]["id"],
+        json!(active),
+        "first version id should be active"
+    );
+    assert_eq!(
+        versions[0]["reason"],
+        json!("initial load"),
+        "version reason should match publish flag"
+    );
+    let audit = manifest["audit_log"]
+        .as_array()
+        .context("history output missing audit log")?;
+    assert_eq!(
+        audit.len(),
+        2,
+        "expected publish + activate audit entries, got {:?}",
+        audit
+    );
+    assert_eq!(audit[0]["action"], json!("publish"));
+    assert_eq!(audit[1]["action"], json!("activate"));
+    Ok(())
+}
+
+#[test]
+fn tenant_schema_diff_and_rollback_flow() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&[
+        "schema",
+        "create",
+        "orders",
+        "--events",
+        "order_created",
+        "--json",
+    ])?;
+    cli.run(&[
+        "tenant",
+        "schema",
+        "publish",
+        "default",
+        "--activate",
+        "--no-reload",
+    ])?;
+
+    cli.run(&["schema", "add", "orders", "order_shipped"])?;
+    cli.run(&[
+        "tenant",
+        "schema",
+        "publish",
+        "default",
+        "--activate",
+        "--reason",
+        "add shipped",
+        "--no-reload",
+    ])?;
+
+    let manifest = cli.run_json(&["tenant", "schema", "history", "default", "--json"])?;
+    let versions = manifest["versions"]
+        .as_array()
+        .context("expected versions array after second publish")?;
+    assert!(
+        versions.len() >= 2,
+        "history should include at least two versions: {:?}",
+        versions
+    );
+    let first_id = versions
+        .first()
+        .and_then(|value| value["id"].as_str())
+        .context("missing id for first version")?
+        .to_string();
+    let latest_id = versions
+        .last()
+        .and_then(|value| value["id"].as_str())
+        .context("missing id for latest version")?
+        .to_string();
+    assert_ne!(
+        first_id, latest_id,
+        "second publish should create new version"
+    );
+
+    let diff = cli.run_json(&[
+        "tenant",
+        "schema",
+        "diff",
+        "default",
+        "--from",
+        first_id.as_str(),
+        "--to",
+        latest_id.as_str(),
+        "--json",
+    ])?;
+    let operations = diff
+        .as_array()
+        .context("diff output was not a JSON array")?;
+    assert!(
+        !operations.is_empty(),
+        "expected diff to include at least one operation"
+    );
+
+    let unified_output = cli.run(&[
+        "tenant",
+        "schema",
+        "diff",
+        "default",
+        "--from",
+        first_id.as_str(),
+        "--to",
+        latest_id.as_str(),
+        "--style",
+        "unified",
+        "--color",
+        "always",
+    ])?;
+    assert!(
+        (unified_output.contains("@@") || unified_output.contains("+++ "))
+            && unified_output.contains("\u{1b}[32m")
+            && unified_output.contains("\u{1b}[31m"),
+        "unified diff output did not include expected formatting:\n{}",
+        unified_output
+    );
+
+    let split_output = cli.run(&[
+        "tenant",
+        "schema",
+        "diff",
+        "default",
+        "--from",
+        first_id.as_str(),
+        "--to",
+        latest_id.as_str(),
+        "--style",
+        "split",
+        "--color",
+        "always",
+    ])?;
+    assert!(
+        split_output.contains('|') && split_output.contains("schema@"),
+        "split diff output missing expected columns:\n{}",
+        split_output
+    );
+
+    let rollback_output = cli.run(&[
+        "tenant",
+        "schema",
+        "rollback",
+        "default",
+        "--version",
+        first_id.as_str(),
+        "--no-reload",
+    ])?;
+    assert!(
+        rollback_output.contains("rolled back") || rollback_output.contains("already active"),
+        "unexpected rollback output: {}",
+        rollback_output
+    );
+
+    let post_manifest = cli.run_json(&["tenant", "schema", "history", "default", "--json"])?;
+    assert_eq!(
+        post_manifest["active_version"],
+        json!(first_id),
+        "rollback should update active version"
+    );
     Ok(())
 }
 

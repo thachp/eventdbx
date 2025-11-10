@@ -5,10 +5,19 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use serde_json;
 
-use crate::commands::{cli_token, client::ServerClient};
+use crate::commands::{
+    cli_token,
+    client::ServerClient,
+    schema_version::{
+        SchemaActivateArgs, SchemaDiffArgs, SchemaHistoryArgs, SchemaPublishArgs, SchemaReloadArgs,
+        SchemaRollbackArgs, SchemaShowArgs, schema_activate, schema_diff, schema_history,
+        schema_publish, schema_reload, schema_rollback, schema_show,
+    },
+};
 use eventdbx::{
-    config::{load_or_default, Config},
+    config::{Config, load_or_default},
     error::EventError,
+    schema_history::SchemaAuditAction,
     store::EventStore,
     tenant::{normalize_shard_id, normalize_tenant_id},
     tenant_store::TenantAssignmentStore,
@@ -28,6 +37,11 @@ pub enum TenantCommands {
     Quota {
         #[command(subcommand)]
         command: TenantQuotaCommands,
+    },
+    /// Manage tenant schema history and activation
+    Schema {
+        #[command(subcommand)]
+        command: TenantSchemaCommands,
     },
 }
 
@@ -102,6 +116,24 @@ pub struct TenantQuotaRecalcArgs {
     pub tenant: String,
 }
 
+#[derive(Subcommand)]
+pub enum TenantSchemaCommands {
+    /// Publish a new schema version (optionally activating it)
+    Publish(SchemaPublishArgs),
+    /// Show schema version history for a tenant
+    History(SchemaHistoryArgs),
+    /// Show the JSON contents for a schema version
+    Show(SchemaShowArgs),
+    /// Diff two schema versions
+    Diff(SchemaDiffArgs),
+    /// Activate a specific schema version
+    Activate(SchemaActivateArgs),
+    /// Roll back to an earlier schema version
+    Rollback(SchemaRollbackArgs),
+    /// Reload the tenant schema cache in the running daemon
+    Reload(SchemaReloadArgs),
+}
+
 pub fn execute(config_path: Option<PathBuf>, command: TenantCommands) -> Result<()> {
     match command {
         TenantCommands::Assign(args) => assign(config_path, args),
@@ -112,6 +144,17 @@ pub fn execute(config_path: Option<PathBuf>, command: TenantCommands) -> Result<
             TenantQuotaCommands::Set(args) => quota_set(config_path, args),
             TenantQuotaCommands::Clear(args) => quota_clear(config_path, args),
             TenantQuotaCommands::Recalc(args) => quota_recalc(config_path, args),
+        },
+        TenantCommands::Schema { command } => match command {
+            TenantSchemaCommands::Publish(args) => schema_publish(config_path, args),
+            TenantSchemaCommands::History(args) => schema_history(config_path, args),
+            TenantSchemaCommands::Show(args) => schema_show(config_path, args),
+            TenantSchemaCommands::Diff(args) => schema_diff(config_path, args),
+            TenantSchemaCommands::Activate(args) => {
+                schema_activate(config_path, args, SchemaAuditAction::Activate, "activated")
+            }
+            TenantSchemaCommands::Rollback(args) => schema_rollback(config_path, args),
+            TenantSchemaCommands::Reload(args) => schema_reload(config_path, args),
         },
     }
 }
@@ -418,7 +461,10 @@ fn quota_recalc_online(config: &Config, tenant: &str) -> Result<u64> {
     client.recalc_tenant_aggregates(&token, tenant)
 }
 
-fn prepare_remote_client(config: &Config, tenant: &str) -> Result<(ServerClient, String)> {
+pub(crate) fn prepare_remote_client(
+    config: &Config,
+    tenant: &str,
+) -> Result<(ServerClient, String)> {
     let token = cli_token::ensure_bootstrap_token(config)?;
     let client = ServerClient::new(config)?.with_tenant(Some(tenant.to_string()));
     Ok((client, token))

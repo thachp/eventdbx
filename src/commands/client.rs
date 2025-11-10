@@ -30,6 +30,13 @@ pub struct ServerClient {
     tenant: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TenantSchemaPublishResult {
+    pub version_id: String,
+    pub activated: bool,
+    pub skipped: bool,
+}
+
 impl ServerClient {
     pub fn new(config: &Config) -> Result<Self> {
         let connect_addr = normalize_connect_addr(&config.socket.bind_addr);
@@ -845,6 +852,129 @@ impl ServerClient {
                     payload::TenantQuotaRecalc(Ok(reply)) => Ok(reply.get_aggregate_count()),
                     payload::TenantQuotaRecalc(Err(err)) => Err(anyhow!(
                         "failed to decode tenant_quota_recalc response: {}",
+                        err
+                    )),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn reload_tenant(&self, token: &str, tenant: &str) -> Result<bool> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut reload = payload_builder.init_tenant_reload();
+                reload.set_token(token);
+                reload.set_tenant_id(tenant);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_reload response payload")?
+                {
+                    payload::TenantReload(Ok(reply)) => Ok(reply.get_reloaded()),
+                    payload::TenantReload(Err(err)) => {
+                        Err(anyhow!("failed to decode tenant_reload response: {}", err))
+                    }
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn publish_tenant_schemas(
+        &self,
+        token: &str,
+        tenant: &str,
+        reason: Option<&str>,
+        actor: Option<&str>,
+        labels: &[String],
+        activate: bool,
+        force: bool,
+        reload: bool,
+    ) -> Result<TenantSchemaPublishResult> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut publish = payload_builder.init_tenant_schema_publish();
+                publish.set_token(token);
+                publish.set_tenant_id(tenant);
+                if let Some(text) = reason {
+                    publish.set_has_reason(true);
+                    publish.set_reason(text);
+                } else {
+                    publish.set_has_reason(false);
+                    publish.set_reason("");
+                }
+                if let Some(text) = actor {
+                    publish.set_has_actor(true);
+                    publish.set_actor(text);
+                } else {
+                    publish.set_has_actor(false);
+                    publish.set_actor("");
+                }
+                publish.set_activate(activate);
+                publish.set_force(force);
+                publish.set_reload(reload);
+                let mut labels_builder = publish.init_labels(labels.len() as u32);
+                for (idx, label) in labels.iter().enumerate() {
+                    labels_builder.set(idx as u32, label);
+                }
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_schema_publish response payload")?
+                {
+                    payload::TenantSchemaPublish(Ok(reply)) => {
+                        let version_id = read_text(reply.get_version_id(), "version_id")?;
+                        Ok(TenantSchemaPublishResult {
+                            version_id,
+                            activated: reply.get_activated(),
+                            skipped: reply.get_skipped(),
+                        })
+                    }
+                    payload::TenantSchemaPublish(Err(err)) => Err(anyhow!(
+                        "failed to decode tenant_schema_publish response: {}",
                         err
                     )),
                     payload::Error(Ok(error)) => {

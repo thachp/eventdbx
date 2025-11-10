@@ -88,6 +88,14 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    - `field_locks` and `hidden_fields` control which fields can be updated or returned in aggregate detail calls.
    - `locked: true` freezes the schema to prevent further event writes until it is unlocked.
 
+   When you need hot reloads or historical context, snapshot schema changes per tenant:
+
+   - `dbx tenant schema publish <tenant> [--activate] [--reason <text>]` captures the current `schemas.json`, writes it to `schemas/versions/<id>.json`, and records metadata in `schemas/schema_manifest.json` under the tenant’s data directory. (Omit `<tenant>` to target whichever domain is currently active.) Prefer `dbx schema publish …` if you’re already in the schema workflow—the commands are identical and simply default the tenant from the active domain.
+   - `dbx tenant schema history <tenant> [--json] [--audit]` prints every recorded version plus the audit trail of publish/activate/rollback events.
+  - `dbx tenant schema diff <tenant> --from <version> --to <version> [--json] [--style patch|unified|split] [--color auto|always|never]` emits either a JSON Patch, a GitHub-style unified diff, or a side-by-side split view. Use `--color always` to force green additions / red removals (default `auto` enables color only when stdout is a TTY).
+   - `dbx tenant schema activate|rollback <tenant> --version <id>` advances or rewinds the active pointer. Include `--no-reload` if the daemon is offline; otherwise the CLI tells the server to evict and reload that tenant’s schema cache immediately.
+   - `dbx tenant schema reload <tenant>` forces the running daemon to drop its cached schema/context for that tenant—useful after manual edits or when you disable automatic reloads.
+
 4. **Issue a token for CLI access**
 
    ```bash
@@ -121,7 +129,10 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 
      ```bash
      dbx push schema remote1
+     dbx push schema remote1 --publish --publish-reason "rollout #42"
      ```
+
+     Add `--publish` to snapshot and activate the schemas on the remote immediately (with optional `--publish-label`, `--publish-force`, or `--publish-no-reload` flags).
 
    - Mirror domain data to the remote. Limit the sync to a specific aggregate type or identifier when you need a targeted replication:
 
@@ -477,6 +488,18 @@ Rules are optional and can be combined when the target type supports them:
 - `length`: `{ "min": <usize>, "max": <usize> }` bounds the length of `text` (characters) or `binary` (decoded bytes).
 - `range`: `{ "min": <value>, "max": <value> }` for numeric and temporal types (`integer`, `float`, `decimal`, `timestamp`, `date`). Boundary values must parse to the column’s type.
 - `properties`: nested `column_types` definitions for `object` columns, enabling recursion with the same rule set as top-level fields.
+
+Use `dbx schema field <aggregate> <field> …` to manage types and rules without editing `schemas.json`. It can set `--type <text|integer|…>`, toggle `--required/--not-required`, enforce `--format <email|url|…>`, swap `--regex` / `--contains` lists, adjust `--length-min` / `--length-max`, feed JSON rule blocks via `--rules @rules.json` or `--properties @object_rules.json`, and clear definitions (`--clear-type`, `--clear-rules`, `--clear-format`, etc.). Pair it with `dbx schema alter <aggregate> <event>` to append/remove event field allow-lists or replace them entirely via `--set`/`--clear`.
+
+```bash
+dbx schema field person email --type text --format email --required
+dbx schema field person status --regex '^(pending|active|blocked)$'
+dbx schema field person profile --type object --properties @profile_rules.json
+
+dbx schema alter person person_created --add first_name,last_name
+dbx schema alter person person_updated --set status,comment
+dbx schema alter person person_updated --clear
+```
 
 ## Performance Testing
 
