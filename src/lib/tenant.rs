@@ -16,6 +16,7 @@ use crate::{
 
 pub trait CoreProvider: Send + Sync {
     fn core_for(&self, tenant: &str) -> Result<CoreContext>;
+    fn invalidate_tenant(&self, tenant: &str);
 }
 
 pub struct TenantRegistry {
@@ -70,6 +71,11 @@ impl TenantRegistry {
             .entry(normalized)
             .or_insert_with(|| Arc::clone(&context));
         Ok(Arc::clone(entry))
+    }
+
+    fn drop_cached_tenant(&self, tenant: &str) {
+        let mut cache = self.cache.lock();
+        cache.remove(tenant);
     }
 
     fn build_core_context(&self, tenant: &str) -> Result<Arc<CoreContext>> {
@@ -165,6 +171,13 @@ impl CoreProvider for TenantRegistry {
         let context = self.ensure_tenant_context(tenant)?;
         Ok(context.as_ref().clone())
     }
+
+    fn invalidate_tenant(&self, tenant: &str) {
+        match normalize_tenant_id(tenant) {
+            Ok(normalized) => self.drop_cached_tenant(&normalized),
+            Err(_) => self.drop_cached_tenant(tenant),
+        }
+    }
 }
 
 pub fn normalize_tenant_id(raw: &str) -> Result<String> {
@@ -248,4 +261,6 @@ impl CoreProvider for StaticCoreProvider {
     fn core_for(&self, _tenant: &str) -> Result<CoreContext> {
         Ok(self.core.clone())
     }
+
+    fn invalidate_tenant(&self, _tenant: &str) {}
 }

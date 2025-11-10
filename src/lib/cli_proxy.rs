@@ -48,7 +48,7 @@ use crate::{
         AggregateCursor, AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState,
         EventCursor, EventRecord,
     },
-    tenant::CoreProvider,
+    tenant::{CoreProvider, normalize_tenant_id},
     token::{JwtClaims, TokenManager},
 };
 
@@ -90,6 +90,23 @@ enum ControlReply {
     },
     ListSchemas(String),
     ReplaceSchemas(u32),
+    TenantAssign {
+        changed: bool,
+        shard: String,
+    },
+    TenantUnassign {
+        changed: bool,
+    },
+    TenantQuotaSet {
+        changed: bool,
+        quota: Option<u64>,
+    },
+    TenantQuotaClear {
+        changed: bool,
+    },
+    TenantQuotaRecalc {
+        aggregate_count: u64,
+    },
 }
 
 enum ControlCommand {
@@ -165,10 +182,33 @@ enum ControlCommand {
         token: String,
         schemas_json: String,
     },
+    TenantAssign {
+        token: String,
+        tenant: String,
+        shard: String,
+    },
+    TenantUnassign {
+        token: String,
+        tenant: String,
+    },
+    TenantQuotaSet {
+        token: String,
+        tenant: String,
+        max_aggregates: u64,
+    },
+    TenantQuotaClear {
+        token: String,
+        tenant: String,
+    },
+    TenantQuotaRecalc {
+        token: String,
+        tenant: String,
+    },
 }
 
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
 const CONTROL_RESPONSE_HEADROOM: usize = 4 * 1024;
+const TENANT_MANAGE_ACTION: &str = "tenant.manage";
 
 enum FirstMessage {
     Cli(capnp::message::Reader<OwnedSegments>),
@@ -213,6 +253,11 @@ fn control_command_name(command: &ControlCommand) -> &'static str {
         ControlCommand::SetAggregateArchive { .. } => "set_aggregate_archive",
         ControlCommand::ListSchemas { .. } => "list_schemas",
         ControlCommand::ReplaceSchemas { .. } => "replace_schemas",
+        ControlCommand::TenantAssign { .. } => "tenant_assign",
+        ControlCommand::TenantUnassign { .. } => "tenant_unassign",
+        ControlCommand::TenantQuotaSet { .. } => "tenant_quota_set",
+        ControlCommand::TenantQuotaClear { .. } => "tenant_quota_clear",
+        ControlCommand::TenantQuotaRecalc { .. } => "tenant_quota_recalc",
     }
 }
 
@@ -630,7 +675,16 @@ where
         .await
         .context("failed to establish encrypted control channel")?;
 
-    handle_control_session_encrypted(reader, writer, noise, core, shared_config, tenant).await
+    handle_control_session_encrypted(
+        reader,
+        writer,
+        noise,
+        core,
+        shared_config,
+        tenant,
+        core_provider,
+    )
+    .await
 }
 
 fn classify_first_message(message: capnp::message::Reader<OwnedSegments>) -> Result<FirstMessage> {
@@ -679,6 +733,7 @@ async fn handle_control_session_encrypted<R, W>(
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
     tenant: String,
+    core_provider: Arc<dyn CoreProvider>,
 ) -> Result<()>
 where
     R: futures::AsyncRead + Unpin,
@@ -706,6 +761,7 @@ where
                     core.clone(),
                     Arc::clone(&shared_config),
                     tenant.as_str(),
+                    Arc::clone(&core_provider),
                 )
                 .await;
                 let status = match &result {
@@ -855,6 +911,34 @@ where
                             ControlReply::ReplaceSchemas(replaced) => {
                                 let mut builder = payload.init_replace_schemas();
                                 builder.set_replaced(replaced);
+                            }
+                            ControlReply::TenantAssign { changed, shard } => {
+                                let mut builder = payload.init_tenant_assign();
+                                builder.set_changed(changed);
+                                builder.set_shard_id(&shard);
+                            }
+                            ControlReply::TenantUnassign { changed } => {
+                                let mut builder = payload.init_tenant_unassign();
+                                builder.set_changed(changed);
+                            }
+                            ControlReply::TenantQuotaSet { changed, quota } => {
+                                let mut builder = payload.init_tenant_quota_set();
+                                builder.set_changed(changed);
+                                if let Some(value) = quota {
+                                    builder.set_has_quota(true);
+                                    builder.set_quota(value);
+                                } else {
+                                    builder.set_has_quota(false);
+                                    builder.set_quota(0);
+                                }
+                            }
+                            ControlReply::TenantQuotaClear { changed } => {
+                                let mut builder = payload.init_tenant_quota_clear();
+                                builder.set_changed(changed);
+                            }
+                            ControlReply::TenantQuotaRecalc { aggregate_count } => {
+                                let mut builder = payload.init_tenant_quota_recalc();
+                                builder.set_aggregate_count(aggregate_count);
                             }
                         }
                     }
@@ -1252,6 +1336,56 @@ fn parse_control_command(
                 schemas_json,
             })
         }
+        payload::TenantAssign(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            let shard = read_control_text(req.get_shard_id(), "shard_id")?;
+            Ok(ControlCommand::TenantAssign {
+                token,
+                tenant,
+                shard,
+            })
+        }
+        payload::TenantUnassign(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            Ok(ControlCommand::TenantUnassign { token, tenant })
+        }
+        payload::TenantQuotaSet(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            let max_aggregates = req.get_max_aggregates();
+            Ok(ControlCommand::TenantQuotaSet {
+                token,
+                tenant,
+                max_aggregates,
+            })
+        }
+        payload::TenantQuotaClear(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            Ok(ControlCommand::TenantQuotaClear { token, tenant })
+        }
+        payload::TenantQuotaRecalc(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            Ok(ControlCommand::TenantQuotaRecalc { token, tenant })
+        }
     }
 }
 
@@ -1260,6 +1394,7 @@ async fn execute_control_command(
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
     tenant_id: &str,
+    core_provider: Arc<dyn CoreProvider>,
 ) -> std::result::Result<ControlReply, EventError> {
     let _tenant_id = tenant_id;
     match command {
@@ -1585,6 +1720,71 @@ async fn execute_control_command(
             .map_err(|err| EventError::Storage(format!("replace schemas task failed: {err}")))??;
             Ok(ControlReply::ReplaceSchemas(replaced))
         }
+        ControlCommand::TenantAssign {
+            token,
+            tenant,
+            shard,
+        } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let assignments = core.assignments();
+            let changed = assignments.assign(&tenant, &shard)?;
+            core_provider.invalidate_tenant(&tenant);
+            Ok(ControlReply::TenantAssign { changed, shard })
+        }
+        ControlCommand::TenantUnassign { token, tenant } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let assignments = core.assignments();
+            let changed = assignments.unassign(&tenant)?;
+            core_provider.invalidate_tenant(&tenant);
+            Ok(ControlReply::TenantUnassign { changed })
+        }
+        ControlCommand::TenantQuotaSet {
+            token,
+            tenant,
+            max_aggregates,
+        } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let assignments = core.assignments();
+            let changed = assignments.set_quota(&tenant, Some(max_aggregates))?;
+            core_provider.invalidate_tenant(&tenant);
+            Ok(ControlReply::TenantQuotaSet {
+                changed,
+                quota: Some(max_aggregates),
+            })
+        }
+        ControlCommand::TenantQuotaClear { token, tenant } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let assignments = core.assignments();
+            let changed = assignments.set_quota(&tenant, None)?;
+            core_provider.invalidate_tenant(&tenant);
+            Ok(ControlReply::TenantQuotaClear { changed })
+        }
+        ControlCommand::TenantQuotaRecalc { token, tenant } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let target_core = if tenant.eq_ignore_ascii_case(core.tenant_id()) {
+                core.clone()
+            } else {
+                core_provider.core_for(&tenant)?
+            };
+            let store = target_core.store();
+            let count = spawn_blocking(move || {
+                store
+                    .counts()
+                    .map(|counts| counts.total_aggregates() as u64)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("aggregate count task failed: {err}")))??;
+            let assignments = target_core.assignments();
+            assignments.ensure_aggregate_count(&tenant, || Ok(count))?;
+            Ok(ControlReply::TenantQuotaRecalc {
+                aggregate_count: count,
+            })
+        }
     }
 }
 
@@ -1681,6 +1881,20 @@ where
             "control response exceeds frame limit ({} bytes)",
             MAX_NOISE_FRAME_PAYLOAD
         )));
+    }
+    Ok(())
+}
+
+fn authorize_tenant_admin(
+    core: &CoreContext,
+    token: &str,
+    tenant: &str,
+) -> std::result::Result<(), EventError> {
+    let claims = core
+        .tokens()
+        .authorize_action(token, TENANT_MANAGE_ACTION, None)?;
+    if !claims.allows_tenant(tenant) {
+        return Err(EventError::Unauthorized);
     }
     Ok(())
 }
