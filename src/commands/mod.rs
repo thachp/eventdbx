@@ -8,6 +8,7 @@ use std::env;
 pub mod aggregate;
 pub mod cli_token;
 pub mod client;
+pub mod cloud;
 pub mod config;
 pub mod domain;
 pub mod events;

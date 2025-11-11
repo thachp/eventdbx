@@ -9,6 +9,7 @@ use eventdbx::observability;
 
 use crate::commands::{
     aggregate::AggregateCommands,
+    cloud::CloudCommands,
     config::ConfigArgs,
     domain::{DomainCheckoutArgs, DomainMergeArgs, PullCommand, PushCommand},
     plugin::{PluginCommands, PluginWorkerArgs},
@@ -71,6 +72,11 @@ enum Commands {
     Token {
         #[command(subcommand)]
         command: TokenCommands,
+    },
+    /// Link this CLI to EventDBX Cloud
+    Cloud {
+        #[command(subcommand)]
+        command: CloudCommands,
     },
     /// Manage schemas
     Schema {
@@ -141,6 +147,7 @@ async fn main() -> Result<()> {
         Commands::Pull { command } => commands::domain::pull(config, command)?,
         Commands::Config(args) => commands::config::execute(config, args)?,
         Commands::Token { command } => commands::token::execute(config, command)?,
+        Commands::Cloud { command } => commands::cloud::execute(command).await?,
         Commands::Schema { command } => commands::schema::execute(config, command)?,
         Commands::Watch(args) => commands::watch::execute(config, args)?,
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
