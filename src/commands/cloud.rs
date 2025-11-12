@@ -2,10 +2,15 @@ use std::{
     env, fs,
     io::{self, Write},
     path::PathBuf,
+    process::Command,
     sync::Arc,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
 use clap::{Args, Subcommand};
 use clerk_fapi_rs::{
     apis,
@@ -21,6 +26,7 @@ use clerk_fapi_rs::{
 };
 use dirs::home_dir;
 use parking_lot::RwLock;
+use serde::Deserialize;
 use serde_json;
 use tracing::debug;
 use validator::validate_email;
@@ -31,11 +37,14 @@ const ENV_EVENTDBX_CLOUD_FRONTEND_API: &str = "EVENTDBX_CLOUD_FRONTEND_API";
 const ENV_CLERK_FRONTEND_API: &str = "CLERK_FRONTEND_API";
 const ENV_EVENTDBX_CLOUD_PUBLISHABLE_KEY: &str = "EVENTDBX_CLOUD_PUBLISHABLE_KEY";
 const ENV_CLERK_PUBLISHABLE_KEY: &str = "CLERK_PUBLISHABLE_KEY";
+const CLOUD_TOP_UP_URL: &str = "https://pay.eventdbx.com/b/28EeV71dw7Y53pWcCxgYU00";
 
 #[derive(Subcommand)]
 pub enum CloudCommands {
     /// Link or unlink this CLI to EventDBX Cloud
     Auth(CloudAuthArgs),
+    /// View or manage your EventDBX Cloud balance
+    Balance(CloudBalanceArgs),
 }
 
 #[derive(Args)]
@@ -69,9 +78,21 @@ pub struct CloudAuthArgs {
     pub logout: bool,
 }
 
+#[derive(Args)]
+pub struct CloudBalanceArgs {
+    /// Open the EventDBX Cloud checkout to add funds using your default browser
+    #[arg(long = "top-up")]
+    pub top_up: bool,
+
+    /// Email address to lock in the EventDBX Cloud checkout (overrides the token email)
+    #[arg(long, requires = "top_up")]
+    pub email: Option<String>,
+}
+
 pub async fn execute(command: CloudCommands) -> Result<()> {
     match command {
         CloudCommands::Auth(args) => auth(args).await,
+        CloudCommands::Balance(args) => balance(args),
     }
 }
 
@@ -157,6 +178,57 @@ async fn auth(args: CloudAuthArgs) -> Result<()> {
     );
 
     Ok(())
+}
+
+fn balance(args: CloudBalanceArgs) -> Result<()> {
+    if args.top_up {
+        let locked_prefill_email = parse_locked_prefill_email(args.email.as_deref())?;
+        open_top_up_checkout(locked_prefill_email.as_deref())
+    } else {
+        println!("Use --top-up to open the EventDBX Cloud checkout and add funds to your balance.");
+        Ok(())
+    }
+}
+
+fn parse_locked_prefill_email(value: Option<&str>) -> Result<Option<String>> {
+    match value {
+        Some(input) => {
+            let trimmed = input.trim();
+            if trimmed.is_empty() {
+                bail!("--email cannot be empty when provided");
+            }
+            if !validate_email(trimmed) {
+                bail!("--email must be a valid email address");
+            }
+            Ok(Some(trimmed.to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+fn open_top_up_checkout(locked_prefill_email: Option<&str>) -> Result<()> {
+    let token = read_cloud_token()?;
+    let claims = decode_cloud_token(&token)?;
+    let subject = subject_from_claims(&claims)?;
+    let mut url = format!(
+        "{CLOUD_TOP_UP_URL}?client_reference_id={}",
+        percent_encode(subject)
+    );
+    if let Some(email) = locked_prefill_email.or_else(|| extract_email_from_claims(&claims)) {
+        url.push_str("&locked_prefilled_email=");
+        url.push_str(&percent_encode(email));
+    }
+    println!("Opening EventDBX Cloud checkout in your default browser...");
+    match open_in_browser(&url) {
+        Ok(()) => {
+            println!("If the browser does not open automatically, open this link manually:\n{url}");
+            Ok(())
+        }
+        Err(err) => {
+            println!("Open this link manually to top up your balance:\n{url}");
+            Err(err)
+        }
+    }
 }
 
 struct ClerkClient {
@@ -433,6 +505,161 @@ fn logout_cloud_session() -> Result<()> {
     Ok(())
 }
 
+fn read_cloud_token() -> Result<String> {
+    let token_path = cloud_token_path()?;
+    if !token_path.exists() {
+        bail!(
+            "No EventDBX Cloud session token found at {}. Run 'dbx cloud auth --email <email>' first.",
+            token_path.display()
+        );
+    }
+    let contents = fs::read_to_string(&token_path)
+        .with_context(|| format!("failed to read {}", token_path.display()))?;
+    let token = contents.trim();
+    if token.is_empty() {
+        bail!(
+            "EventDBX Cloud token file at {} is empty. Re-authenticate with 'dbx cloud auth'.",
+            token_path.display()
+        );
+    }
+    Ok(token.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+struct CloudTokenClaims {
+    sub: String,
+    #[serde(default)]
+    email_address: Option<String>,
+    #[serde(default)]
+    email_addresses: Vec<CloudEmailAddressClaims>,
+    #[serde(default)]
+    primary_email_address_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct CloudEmailAddressClaims {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    email_address: Option<String>,
+}
+
+fn decode_cloud_token(token: &str) -> Result<CloudTokenClaims> {
+    let payload_segment = token
+        .split('.')
+        .nth(1)
+        .ok_or_else(|| anyhow!("EventDBX Cloud token is not a valid JWT"))?;
+    let decoded = decode_jwt_segment(payload_segment)?;
+    let claims: CloudTokenClaims = serde_json::from_slice(&decoded)
+        .map_err(|err| anyhow!("failed to parse EventDBX Cloud token payload: {err}"))?;
+    Ok(claims)
+}
+
+fn subject_from_claims<'a>(claims: &'a CloudTokenClaims) -> Result<&'a str> {
+    let subject = claims.sub.trim();
+    if subject.is_empty() {
+        bail!("EventDBX Cloud token is missing a subject ('sub') claim");
+    }
+    Ok(subject)
+}
+
+fn extract_email_from_claims<'a>(claims: &'a CloudTokenClaims) -> Option<&'a str> {
+    if let Some(email) = claims
+        .email_address
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(email);
+    }
+
+    if let Some(primary_id) = claims
+        .primary_email_address_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if let Some(email) = claims
+            .email_addresses
+            .iter()
+            .find(|address| address.id.as_deref() == Some(primary_id))
+            .and_then(|address| address.email_address.as_deref())
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Some(email);
+        }
+    }
+
+    claims.email_addresses.iter().find_map(|address| {
+        address
+            .email_address
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    })
+}
+
+fn decode_jwt_segment(segment: &str) -> Result<Vec<u8>> {
+    URL_SAFE_NO_PAD
+        .decode(segment)
+        .or_else(|_| URL_SAFE.decode(segment))
+        .map_err(|err| anyhow!("failed to decode EventDBX Cloud token: {err}"))
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push_str(&format!("{byte:02X}"));
+            }
+        }
+    }
+    encoded
+}
+
+#[cfg(target_os = "windows")]
+fn open_in_browser(url: &str) -> Result<()> {
+    run_browser_command(
+        "cmd",
+        &["/C", "start", "", url],
+        "launch the default browser via 'start'",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn open_in_browser(url: &str) -> Result<()> {
+    run_browser_command("open", &[url], "launch the default browser via 'open'")
+}
+
+#[cfg(all(target_family = "unix", not(target_os = "macos")))]
+fn open_in_browser(url: &str) -> Result<()> {
+    run_browser_command(
+        "xdg-open",
+        &[url],
+        "launch the default browser via 'xdg-open'",
+    )
+}
+
+#[cfg(not(any(target_os = "windows", target_family = "unix")))]
+fn open_in_browser(_url: &str) -> Result<()> {
+    bail!("opening a browser is not supported on this platform");
+}
+
+#[cfg(any(target_os = "windows", target_family = "unix"))]
+fn run_browser_command(command: &str, args: &[&str], context: &str) -> Result<()> {
+    let status = Command::new(command)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to {context}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("{context} exited with status {status}");
+    }
+}
+
 async fn run_sign_up_flow(
     client: &ClerkClient,
     email: &str,
@@ -685,6 +912,52 @@ mod tests {
         assert_eq!(
             normalize_base_url("example.com/").unwrap(),
             "https://example.com"
+        );
+    }
+
+    #[test]
+    fn percent_encode_handles_reserved_characters() {
+        assert_eq!(percent_encode("abc123-_.~"), "abc123-_.~");
+        assert_eq!(percent_encode("user@example.com"), "user%40example.com");
+    }
+
+    #[test]
+    fn extract_email_prefers_primary_id() {
+        let claims = CloudTokenClaims {
+            sub: "user_123".into(),
+            email_address: None,
+            email_addresses: vec![
+                CloudEmailAddressClaims {
+                    id: Some("id_1".into()),
+                    email_address: Some("first@example.com".into()),
+                },
+                CloudEmailAddressClaims {
+                    id: Some("id_2".into()),
+                    email_address: Some("second@example.com".into()),
+                },
+            ],
+            primary_email_address_id: Some("id_2".into()),
+        };
+        assert_eq!(
+            extract_email_from_claims(&claims),
+            Some("second@example.com")
+        );
+    }
+
+    #[test]
+    fn extract_email_falls_back_to_first_address() {
+        let claims = CloudTokenClaims {
+            sub: "user_123".into(),
+            email_address: None,
+            email_addresses: vec![CloudEmailAddressClaims {
+                id: Some("id_1".into()),
+                email_address: Some("fallback@example.com".into()),
+            }],
+            primary_email_address_id: None,
+        };
+        assert_eq!(
+            extract_email_from_claims(&claims),
+            Some("fallback@example.com")
         );
     }
 }
