@@ -109,6 +109,9 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
+[patch.crates-io]
+clerk-fapi-rs = { path = "vendor/clerk-fapi-rs" }
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

@@ -27,7 +27,7 @@ use eventdbx::{
         self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateSortField,
         AggregateState, AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
     },
-    tenant_store::TenantAssignmentStore,
+    tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
     token::{IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
@@ -612,6 +612,8 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     .map(|counts| counts.total_aggregates() as u64)
             })?;
             assignments.increment_aggregate_count(config.active_domain(), -1)?;
+            let usage = store.approximate_storage_bytes()?;
+            assignments.set_storage_usage_bytes(config.active_domain(), Some(usage))?;
             println!(
                 "aggregate_type={} aggregate_id={} removed",
                 args.aggregate, args.aggregate_id
@@ -1083,6 +1085,8 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
             maybe_auto_snapshot(&store, &schema_manager, &record);
 
             assignments.increment_aggregate_count(config.active_domain(), 1)?;
+            let usage = store.approximate_storage_bytes()?;
+            assignments.set_storage_usage_bytes(config.active_domain(), Some(usage))?;
 
             if !plugins.is_empty() {
                 let schema = schema_manager.get(&record.aggregate_type).ok();
@@ -1276,7 +1280,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
             Err(err) => return Err(err.into()),
         }
     }
-
+    let assignments = TenantAssignmentStore::open(config.tenant_meta_path())?;
     let encryption = config.encryption_key()?;
     match EventStore::open(
         config.event_store_path(),
@@ -1308,6 +1312,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 bail!("aggregate {}::{} does not exist", aggregate, aggregate_id);
             }
             ensure_first_event_rule(is_new, &event)?;
+            enforce_offline_tenant_quota(config, &store, &assignments)?;
             let record = store.append(AppendEvent {
                 aggregate_type: aggregate.clone(),
                 aggregate_id: aggregate_id.clone(),
@@ -1324,6 +1329,8 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
             } else {
                 println!("Ok");
             }
+            let usage = store.approximate_storage_bytes()?;
+            assignments.set_storage_usage_bytes(config.active_domain(), Some(usage))?;
 
             if !plugins.is_empty() {
                 let schema = schema_manager.get(&record.aggregate_type).ok();
@@ -1601,10 +1608,16 @@ fn enforce_offline_tenant_quota(
             .counts()
             .map(|counts| counts.total_aggregates() as u64)
     })?;
-    if let Some(limit) = assignments.quota_for(tenant)? {
-        let current = assignments.aggregate_count(tenant)?.unwrap_or_default();
-        if current >= limit {
-            bail!("tenant '{}' reached aggregate quota ({})", tenant, limit);
+    let usage =
+        assignments.ensure_storage_usage_bytes(tenant, || store.approximate_storage_bytes())?;
+    if let Some(limit_mb) = assignments.quota_for(tenant)? {
+        let limit_bytes = limit_mb.saturating_mul(BYTES_PER_MEGABYTE);
+        if usage >= limit_bytes {
+            bail!(
+                "tenant '{}' reached storage quota ({} MB)",
+                tenant,
+                limit_mb
+            );
         }
     }
     Ok(())

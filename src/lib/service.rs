@@ -10,7 +10,7 @@ use crate::{
         AppendEvent, EventArchiveScope, EventCursor, EventQueryScope, EventRecord, EventStore,
         select_state_field,
     },
-    tenant_store::TenantAssignmentStore,
+    tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
     token::{JwtClaims, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
@@ -30,7 +30,7 @@ pub struct CoreContext {
     list_page_size: usize,
     page_limit: usize,
     tenant_id: String,
-    aggregate_quota: Option<u64>,
+    storage_quota_mb: Option<u64>,
     assignments: Arc<TenantAssignmentStore>,
 }
 
@@ -43,7 +43,7 @@ impl CoreContext {
         list_page_size: usize,
         page_limit: usize,
         tenant_id: impl Into<String>,
-        aggregate_quota: Option<u64>,
+        storage_quota_mb: Option<u64>,
         assignments: Arc<TenantAssignmentStore>,
     ) -> Self {
         Self {
@@ -54,7 +54,7 @@ impl CoreContext {
             list_page_size,
             page_limit,
             tenant_id: tenant_id.into(),
-            aggregate_quota,
+            storage_quota_mb,
             assignments,
         }
     }
@@ -103,23 +103,21 @@ impl CoreContext {
         aggregate
     }
 
-    fn ensure_tenant_count_initialized(&self) -> Result<u64> {
-        let store = Arc::clone(&self.store);
+    fn current_storage_usage_bytes(&self) -> Result<u64> {
+        let usage = self.store.approximate_storage_bytes()?;
         self.assignments
-            .ensure_aggregate_count(&self.tenant_id, || {
-                store
-                    .counts()
-                    .map(|counts| counts.total_aggregates() as u64)
-            })
+            .set_storage_usage_bytes(&self.tenant_id, Some(usage))?;
+        Ok(usage)
     }
 
-    fn enforce_aggregate_quota(&self) -> Result<()> {
-        let current = self.ensure_tenant_count_initialized()?;
-        if let Some(limit) = self.aggregate_quota {
-            if current >= limit {
+    fn enforce_storage_quota(&self) -> Result<()> {
+        if let Some(limit_mb) = self.storage_quota_mb {
+            let usage = self.current_storage_usage_bytes()?;
+            let limit_bytes = limit_mb.saturating_mul(BYTES_PER_MEGABYTE);
+            if usage >= limit_bytes {
                 return Err(EventError::TenantQuotaExceeded(format!(
-                    "tenant '{}' reached aggregate quota ({limit})",
-                    self.tenant_id
+                    "tenant '{}' reached storage quota ({} MB)",
+                    self.tenant_id, limit_mb
                 )));
             }
         }
@@ -314,8 +312,6 @@ impl CoreContext {
             )));
         }
 
-        self.enforce_aggregate_quota()?;
-
         let resource = format!("aggregate:{}:{}", aggregate_type, aggregate_id);
         let claims =
             self.tokens()
@@ -480,6 +476,8 @@ impl CoreContext {
             return Err(EventError::Unauthorized);
         }
 
+        self.enforce_storage_quota()?;
+
         let record = self.store.append(AppendEvent {
             aggregate_type,
             aggregate_id,
@@ -489,6 +487,7 @@ impl CoreContext {
             issued_by,
             note,
         })?;
+        let _ = self.current_storage_usage_bytes()?;
         Ok(record)
     }
 

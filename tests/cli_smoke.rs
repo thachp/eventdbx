@@ -1224,7 +1224,7 @@ fn tenant_assign_list_and_unassign_flow() -> Result<()> {
         entries.iter().any(|entry| {
             entry["tenant"] == json!("people")
                 && entry["shard"] == json!("shard-0003")
-                && entry["quota"].is_null()
+                && entry["quota_mb"].is_null()
         }),
         "missing people assignment: {entries:?}"
     );
@@ -1233,7 +1233,7 @@ fn tenant_assign_list_and_unassign_flow() -> Result<()> {
             .iter()
             .any(|entry| entry["tenant"] == json!("billing")
                 && entry["shard"] == json!("shard-0004")
-                && entry["quota"].is_null()),
+                && entry["quota_mb"].is_null()),
         "missing billing assignment: {entries:?}"
     );
 
@@ -1243,7 +1243,7 @@ fn tenant_assign_list_and_unassign_flow() -> Result<()> {
         .context("filtered tenant list did not return an array")?;
     assert_eq!(filtered_array.len(), 1, "expected one entry for shard-0004");
     assert_eq!(filtered_array[0]["tenant"], json!("billing"));
-    assert!(filtered_array[0]["quota"].is_null());
+    assert!(filtered_array[0]["quota_mb"].is_null());
 
     cli.run(&["tenant", "unassign", "people"])?;
     let after_unassign = cli.run_json(&["tenant", "list", "--json"])?;
@@ -1253,7 +1253,7 @@ fn tenant_assign_list_and_unassign_flow() -> Result<()> {
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0]["tenant"], json!("billing"));
     assert_eq!(remaining[0]["shard"], json!("shard-0004"));
-    assert!(remaining[0]["quota"].is_null());
+    assert!(remaining[0]["quota_mb"].is_null());
     Ok(())
 }
 
@@ -1489,7 +1489,7 @@ fn tenant_schema_diff_and_rollback_flow() -> Result<()> {
 fn tenant_quota_limits_aggregate_creation() -> Result<()> {
     let cli = CliTest::new()?;
 
-    cli.run(&["tenant", "quota", "set", "default", "--max-aggregates", "1"])?;
+    cli.run(&["tenant", "quota", "set", "default", "--max-storage-mb", "1"])?;
 
     let list = cli.run_json(&["tenant", "list", "--json"])?;
     let quota_entry = list
@@ -1499,18 +1499,22 @@ fn tenant_quota_limits_aggregate_creation() -> Result<()> {
         .find(|entry| entry["tenant"] == json!("default"))
         .cloned()
         .context("missing default tenant entry with quota")?;
-    assert_eq!(quota_entry["quota"], json!(1));
+    assert_eq!(quota_entry["quota_mb"], json!(1));
 
-    cli.run(&["schema", "create", "order", "--events", "order_created"])?;
-    cli.create_aggregate("order", "order-1", "order_created")?;
+    cli.run(&["schema", "create", "blob", "--events", "blob_created"])?;
+    let payload = format!(r#"{{"blob":"{}"}}"#, "x".repeat(200_000));
+    cli.create_aggregate_with_payload("blob", "blob-1", "blob_created", &payload)?;
+    cli.create_aggregate_with_payload("blob", "blob-2", "blob_created", &payload)?;
 
     let failure = cli.run_failure(&[
         "aggregate",
         "create",
-        "order",
-        "order-2",
+        "blob",
+        "blob-3",
         "--event",
-        "order_created",
+        "blob_created",
+        "--payload",
+        payload.as_str(),
         "--json",
     ])?;
     assert!(
@@ -1521,13 +1525,16 @@ fn tenant_quota_limits_aggregate_creation() -> Result<()> {
 
     cli.run(&["tenant", "quota", "clear", "default"])?;
     let list_after_clear = cli.run_json(&["tenant", "list", "--json"])?;
+    let cleared_entry = list_after_clear
+        .as_array()
+        .context("tenant list did not return an array after quota clear")?
+        .iter()
+        .find(|entry| entry["tenant"] == json!("default"))
+        .cloned()
+        .context("default tenant entry missing after quota clear")?;
     assert!(
-        !list_after_clear
-            .as_array()
-            .context("tenant list did not return an array after quota clear")?
-            .iter()
-            .any(|entry| entry["tenant"] == json!("default")),
-        "default tenant entry should disappear once quota is cleared"
+        cleared_entry["quota_mb"].is_null(),
+        "quota should be cleared for default tenant, got {cleared_entry:?}"
     );
     cli.create_aggregate("order", "order-2", "order_created")?;
     Ok(())

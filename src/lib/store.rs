@@ -9,7 +9,9 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, MutexGuard};
-use rocksdb::{DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options, WriteBatch};
+use rocksdb::{
+    DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options, WriteBatch, properties,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -1010,6 +1012,25 @@ impl EventStore {
             active_events,
             archived_events,
         })
+    }
+
+    pub fn approximate_storage_bytes(&self) -> Result<u64> {
+        let mut total = 0u64;
+        let sst = self
+            .db
+            .property_int_value(properties::TOTAL_SST_FILES_SIZE)
+            .map_err(|err| EventError::Storage(format!("rocksdb property error: {err}")))?;
+        if let Some(value) = sst {
+            total = total.saturating_add(value);
+        }
+        let memtables = self
+            .db
+            .property_int_value(properties::SIZE_ALL_MEM_TABLES)
+            .map_err(|err| EventError::Storage(format!("rocksdb property error: {err}")))?;
+        if let Some(value) = memtables {
+            total = total.saturating_add(value);
+        }
+        Ok(total)
     }
 
     fn count_index_entries(&self, index: AggregateIndex) -> Result<(usize, u64)> {

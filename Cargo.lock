@@ -576,8 +576,6 @@ checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
 [[package]]
 name = "clerk-fapi-rs"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e239d6a45c0bc0725bd254dbdd6f89918ea27c634cc753c173caca2f5b60fd0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

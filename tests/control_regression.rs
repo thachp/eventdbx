@@ -1485,7 +1485,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
             let mut quota = payload.init_tenant_quota_set();
             quota.set_token(&token_value);
             quota.set_tenant_id("default");
-            quota.set_max_aggregates(5);
+            quota.set_max_megabytes(5);
         },
         |response| match response
             .get_payload()
@@ -1524,7 +1524,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
     assert!(quota_clear);
     next_request_id += 1;
 
-    let aggregate_count = send_control_request(
+    let (aggregate_count, storage_bytes) = send_control_request(
         &mut writer,
         &mut reader,
         &mut noise,
@@ -1541,13 +1541,15 @@ async fn control_tenant_admin_commands() -> Result<()> {
             .context("payload decode failed")?
         {
             control_response::payload::TenantQuotaRecalc(Ok(result)) => {
-                Ok(result.get_aggregate_count())
+                Ok((result.get_aggregate_count(), result.get_storage_bytes()))
             }
             _ => Err(anyhow!("unexpected response variant")),
         },
     )
     .await?;
     assert_eq!(aggregate_count, 0);
+    let expected_usage = store.approximate_storage_bytes()?;
+    assert_eq!(storage_bytes, expected_usage);
 
     drop(writer);
     drop(reader);

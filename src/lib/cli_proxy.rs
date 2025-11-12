@@ -101,13 +101,14 @@ enum ControlReply {
     },
     TenantQuotaSet {
         changed: bool,
-        quota: Option<u64>,
+        quota_mb: Option<u64>,
     },
     TenantQuotaClear {
         changed: bool,
     },
     TenantQuotaRecalc {
         aggregate_count: u64,
+        storage_bytes: u64,
     },
     TenantReload {
         reloaded: bool,
@@ -204,7 +205,7 @@ enum ControlCommand {
     TenantQuotaSet {
         token: String,
         tenant: String,
-        max_aggregates: u64,
+        max_megabytes: u64,
     },
     TenantQuotaClear {
         token: String,
@@ -979,24 +980,28 @@ where
                                 let mut builder = payload.init_tenant_unassign();
                                 builder.set_changed(changed);
                             }
-                            ControlReply::TenantQuotaSet { changed, quota } => {
+                            ControlReply::TenantQuotaSet { changed, quota_mb } => {
                                 let mut builder = payload.init_tenant_quota_set();
                                 builder.set_changed(changed);
-                                if let Some(value) = quota {
+                                if let Some(value) = quota_mb {
                                     builder.set_has_quota(true);
-                                    builder.set_quota(value);
+                                    builder.set_megabytes(value);
                                 } else {
                                     builder.set_has_quota(false);
-                                    builder.set_quota(0);
+                                    builder.set_megabytes(0);
                                 }
                             }
                             ControlReply::TenantQuotaClear { changed } => {
                                 let mut builder = payload.init_tenant_quota_clear();
                                 builder.set_changed(changed);
                             }
-                            ControlReply::TenantQuotaRecalc { aggregate_count } => {
+                            ControlReply::TenantQuotaRecalc {
+                                aggregate_count,
+                                storage_bytes,
+                            } => {
                                 let mut builder = payload.init_tenant_quota_recalc();
                                 builder.set_aggregate_count(aggregate_count);
+                                builder.set_storage_bytes(storage_bytes);
                             }
                             ControlReply::TenantReload { reloaded } => {
                                 let mut builder = payload.init_tenant_reload();
@@ -1435,11 +1440,11 @@ fn parse_control_command(
                 .trim()
                 .to_string();
             let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
-            let max_aggregates = req.get_max_aggregates();
+            let max_megabytes = req.get_max_megabytes();
             Ok(ControlCommand::TenantQuotaSet {
                 token,
                 tenant,
-                max_aggregates,
+                max_megabytes,
             })
         }
         payload::TenantQuotaClear(req) => {
@@ -1861,16 +1866,16 @@ async fn execute_control_command(
         ControlCommand::TenantQuotaSet {
             token,
             tenant,
-            max_aggregates,
+            max_megabytes,
         } => {
             let tenant = normalize_tenant_id(&tenant)?;
             authorize_tenant_admin(&core, &token, &tenant)?;
             let assignments = core.assignments();
-            let changed = assignments.set_quota(&tenant, Some(max_aggregates))?;
+            let changed = assignments.set_quota(&tenant, Some(max_megabytes))?;
             core_provider.invalidate_tenant(&tenant);
             Ok(ControlReply::TenantQuotaSet {
                 changed,
-                quota: Some(max_aggregates),
+                quota_mb: Some(max_megabytes),
             })
         }
         ControlCommand::TenantQuotaClear { token, tenant } => {
@@ -1890,17 +1895,22 @@ async fn execute_control_command(
                 core_provider.core_for(&tenant)?
             };
             let store = target_core.store();
-            let count = spawn_blocking(move || {
-                store
+            let store_clone = store.clone();
+            let (aggregate_count, storage_bytes) = spawn_blocking(move || {
+                let count = store_clone
                     .counts()
-                    .map(|counts| counts.total_aggregates() as u64)
+                    .map(|counts| counts.total_aggregates() as u64)?;
+                let usage = store_clone.approximate_storage_bytes()?;
+                Ok::<(u64, u64), EventError>((count, usage))
             })
             .await
-            .map_err(|err| EventError::Storage(format!("aggregate count task failed: {err}")))??;
+            .map_err(|err| EventError::Storage(format!("usage task failed: {err}")))??;
             let assignments = target_core.assignments();
-            assignments.ensure_aggregate_count(&tenant, || Ok(count))?;
+            assignments.ensure_aggregate_count(&tenant, || Ok(aggregate_count))?;
+            assignments.set_storage_usage_bytes(&tenant, Some(storage_bytes))?;
             Ok(ControlReply::TenantQuotaRecalc {
-                aggregate_count: count,
+                aggregate_count,
+                storage_bytes,
             })
         }
         ControlCommand::TenantReload { token, tenant } => {

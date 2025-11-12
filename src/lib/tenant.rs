@@ -79,16 +79,20 @@ impl TenantRegistry {
     }
 
     fn build_core_context(&self, tenant: &str) -> Result<Arc<CoreContext>> {
-        let quota = self.assignments.quota_for(tenant)?;
+        let storage_quota_mb = self.assignments.quota_for(tenant)?;
         if self.multi_tenant {
             let shard = self.resolve_shard(tenant)?;
-            self.build_sharded_context(tenant, &shard, quota)
+            self.build_sharded_context(tenant, &shard, storage_quota_mb)
         } else {
-            self.build_legacy_context(tenant, quota)
+            self.build_legacy_context(tenant, storage_quota_mb)
         }
     }
 
-    fn build_legacy_context(&self, tenant: &str, quota: Option<u64>) -> Result<Arc<CoreContext>> {
+    fn build_legacy_context(
+        &self,
+        tenant: &str,
+        storage_quota_mb: Option<u64>,
+    ) -> Result<Arc<CoreContext>> {
         let tenant_dir = self.config.domain_data_dir_for(tenant);
         fs::create_dir_all(&tenant_dir)?;
 
@@ -107,6 +111,8 @@ impl TenantRegistry {
                 .counts()
                 .map(|counts| counts.total_aggregates() as u64)
         })?;
+        self.assignments
+            .ensure_storage_usage_bytes(tenant, || store.approximate_storage_bytes())?;
 
         Ok(Arc::new(CoreContext::new(
             Arc::clone(&self.tokens),
@@ -116,7 +122,7 @@ impl TenantRegistry {
             self.list_page_size,
             self.page_limit,
             tenant.to_string(),
-            quota,
+            storage_quota_mb,
             Arc::clone(&self.assignments),
         )))
     }
@@ -125,7 +131,7 @@ impl TenantRegistry {
         &self,
         tenant: &str,
         shard: &str,
-        quota: Option<u64>,
+        storage_quota_mb: Option<u64>,
     ) -> Result<Arc<CoreContext>> {
         let tenant_dir = self.config.tenant_shard_dir(shard, tenant);
         fs::create_dir_all(&tenant_dir)?;
@@ -144,6 +150,8 @@ impl TenantRegistry {
                 .counts()
                 .map(|counts| counts.total_aggregates() as u64)
         })?;
+        self.assignments
+            .ensure_storage_usage_bytes(tenant, || store.approximate_storage_bytes())?;
 
         Ok(Arc::new(CoreContext::new(
             Arc::clone(&self.tokens),
@@ -153,7 +161,7 @@ impl TenantRegistry {
             self.list_page_size,
             self.page_limit,
             tenant.to_string(),
-            quota,
+            storage_quota_mb,
             Arc::clone(&self.assignments),
         )))
     }

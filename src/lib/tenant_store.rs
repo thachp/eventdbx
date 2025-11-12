@@ -19,8 +19,10 @@ pub struct TenantAssignmentStore {
 pub struct TenantRecord {
     #[serde(default)]
     pub shard: Option<String>,
+    #[serde(default, alias = "aggregate_quota")]
+    pub storage_quota_mb: Option<u64>,
     #[serde(default)]
-    pub aggregate_quota: Option<u64>,
+    pub storage_usage_bytes: Option<u64>,
     #[serde(default)]
     pub aggregate_count: Option<u64>,
 }
@@ -38,11 +40,15 @@ impl TenantRecord {
     }
 
     fn is_empty(&self) -> bool {
-        self.shard.is_none() && self.aggregate_quota.is_none() && self.aggregate_count.is_none()
+        self.shard.is_none()
+            && self.storage_quota_mb.is_none()
+            && self.storage_usage_bytes.is_none()
+            && self.aggregate_count.is_none()
     }
 }
 
 pub const SHARD_PREFIX: &str = "shard-";
+pub const BYTES_PER_MEGABYTE: u64 = 1024 * 1024;
 
 impl TenantAssignmentStore {
     pub fn open(path: PathBuf) -> Result<Self> {
@@ -128,15 +134,41 @@ impl TenantAssignmentStore {
     pub fn quota_for(&self, tenant: &str) -> Result<Option<u64>> {
         Ok(self
             .read_record(tenant)?
-            .and_then(|record| record.aggregate_quota))
+            .and_then(|record| record.storage_quota_mb))
     }
 
     pub fn set_quota(&self, tenant: &str, quota: Option<u64>) -> Result<bool> {
         let mut record = self.read_record(tenant)?.unwrap_or_default();
-        let changed = record.aggregate_quota != quota;
-        record.aggregate_quota = quota;
+        let changed = record.storage_quota_mb != quota;
+        record.storage_quota_mb = quota;
         self.write_record(tenant, record)?;
         Ok(changed)
+    }
+
+    pub fn storage_usage_bytes(&self, tenant: &str) -> Result<Option<u64>> {
+        Ok(self
+            .read_record(tenant)?
+            .and_then(|record| record.storage_usage_bytes))
+    }
+
+    pub fn ensure_storage_usage_bytes<F>(&self, tenant: &str, initializer: F) -> Result<u64>
+    where
+        F: FnOnce() -> Result<u64>,
+    {
+        let mut record = self.read_record(tenant)?.unwrap_or_default();
+        if let Some(bytes) = record.storage_usage_bytes {
+            return Ok(bytes);
+        }
+        let usage = initializer()?;
+        record.storage_usage_bytes = Some(usage);
+        self.write_record(tenant, record)?;
+        Ok(usage)
+    }
+
+    pub fn set_storage_usage_bytes(&self, tenant: &str, usage: Option<u64>) -> Result<()> {
+        let mut record = self.read_record(tenant)?.unwrap_or_default();
+        record.storage_usage_bytes = usage;
+        self.write_record(tenant, record)
     }
 
     pub fn aggregate_count(&self, tenant: &str) -> Result<Option<u64>> {
@@ -206,7 +238,8 @@ fn decode_record(bytes: Vec<u8>) -> Result<TenantRecord> {
             } else {
                 Ok(TenantRecord {
                     shard: Some(shard.to_string()),
-                    aggregate_quota: None,
+                    storage_quota_mb: None,
+                    storage_usage_bytes: None,
                     aggregate_count: None,
                 })
             }
