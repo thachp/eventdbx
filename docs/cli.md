@@ -45,7 +45,7 @@ Run without flags to print the current configuration. The first invocation must 
 
 ## Tenants
 
-- `dbx tenant assign <tenant> --shard <shard-0001>` – Pin a tenant to an explicit shard label. Omit the command to continue using hash-based placement.
+- `dbx tenant assign <tenant> [--shard <shard-0001>]` – Pin a tenant to an explicit shard label. Omit `--shard` to keep the hash-based placement.
 - `dbx tenant unassign <tenant>` – Remove the explicit assignment so the tenant hashes across the configured shard count.
 - `dbx tenant list [--shard <shard-0001>] [--json]` – Display manual assignments (filters by shard and supports JSON output).
 - `dbx tenant stats [--json]` – Summarise explicit assignments per shard.

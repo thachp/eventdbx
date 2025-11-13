@@ -20,7 +20,7 @@ use eventdbx::{
     schema_history::SchemaAuditAction,
     store::EventStore,
     tenant::{normalize_shard_id, normalize_tenant_id},
-    tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
+    tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore, compute_default_shard},
 };
 
 #[derive(Subcommand)]
@@ -51,9 +51,9 @@ pub struct TenantAssignArgs {
     #[arg(value_name = "TENANT")]
     pub tenant: String,
 
-    /// Shard to assign the tenant to (format: shard-0001 or numeric index)
+    /// Shard to assign the tenant to (format: shard-0001 or numeric index). Defaults to hash-based placement.
     #[arg(long = "shard", value_name = "SHARD")]
-    pub shard: String,
+    pub shard: Option<String>,
 }
 
 #[derive(Args)]
@@ -98,7 +98,12 @@ pub struct TenantQuotaSetArgs {
     pub tenant: String,
 
     /// Maximum storage allocation in megabytes
-    #[arg(long = "max-storage-mb", alias = "max-aggregates", value_name = "MB")]
+    #[arg(
+        short = 'm',
+        long = "max-storage-mb",
+        alias = "max-aggregates",
+        value_name = "MB"
+    )]
     pub max_storage_mb: u64,
 }
 
@@ -161,8 +166,12 @@ pub fn execute(config_path: Option<PathBuf>, command: TenantCommands) -> Result<
 
 fn assign(config_path: Option<PathBuf>, args: TenantAssignArgs) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
-    let tenant = normalize_tenant_id(&args.tenant)?;
-    let shard = normalize_shard_id(&args.shard, config.shard_count())?;
+    let TenantAssignArgs { tenant, shard } = args;
+    let tenant = normalize_tenant_id(&tenant)?;
+    let shard = match shard {
+        Some(value) => normalize_shard_id(&value, config.shard_count())?,
+        None => compute_default_shard(&tenant, config.shard_count()),
+    };
     match try_assign_offline(&config, &tenant, &shard) {
         Ok(changed) => report_assign(&tenant, &shard, changed),
         Err(err) if is_lock_error(&err) => {

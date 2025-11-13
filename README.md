@@ -167,7 +167,8 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 Enable multi-tenant mode in `config.toml` (set `[tenants] multi_tenant = true`) to hash tenants across shard directories. EventDBX automatically hashes tenants when no manual assignment exists, and you can override placements with the `dbx tenant` commands:
 
 ```bash
-dbx tenant assign people --shard shard-0003
+dbx tenant assign people --shard shard-0003   # explicit override
+dbx tenant assign billing                     # hashed shard automatically
 dbx tenant unassign sandbox
 dbx tenant list --json
 dbx tenant stats

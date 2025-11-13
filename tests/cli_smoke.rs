@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use chrono::Utc;
-use eventdbx::{plugin::queue::PluginQueueStore, snowflake::SnowflakeId};
+use eventdbx::{
+    plugin::queue::PluginQueueStore, snowflake::SnowflakeId, tenant_store::compute_default_shard,
+};
 
 struct CliTest {
     _tmp: TempDir,
@@ -1254,6 +1256,27 @@ fn tenant_assign_list_and_unassign_flow() -> Result<()> {
     assert_eq!(remaining[0]["tenant"], json!("billing"));
     assert_eq!(remaining[0]["shard"], json!("shard-0004"));
     assert!(remaining[0]["quota_mb"].is_null());
+    Ok(())
+}
+
+#[test]
+fn tenant_assign_defaults_to_hash() -> Result<()> {
+    let cli = CliTest::new()?;
+    let tenant = "delta";
+    cli.run(&["tenant", "assign", tenant])?;
+
+    let config = cli.load_config()?;
+    let expected_shard = compute_default_shard(tenant, config.shard_count());
+
+    let list = cli.run_json(&["tenant", "list", "--json"])?;
+    let entry = list
+        .as_array()
+        .context("tenant list did not return an array")?
+        .iter()
+        .find(|entry| entry["tenant"] == json!(tenant))
+        .cloned()
+        .context("missing tenant entry after default assignment")?;
+    assert_eq!(entry["shard"], json!(expected_shard));
     Ok(())
 }
 
