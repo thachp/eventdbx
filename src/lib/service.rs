@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc, time::{Duration, Instant}};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::{
     error::{EventError, Result},
@@ -10,7 +14,7 @@ use crate::{
         AppendEvent, EventArchiveScope, EventCursor, EventQueryScope, EventRecord, EventStore,
         select_state_field,
     },
-    tenant_store::{TenantAssignmentStore, BYTES_PER_MEGABYTE},
+    tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
     token::{JwtClaims, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,

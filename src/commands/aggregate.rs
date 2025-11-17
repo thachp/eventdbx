@@ -27,7 +27,7 @@ use eventdbx::{
         self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateSortField,
         AggregateState, AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
     },
-    tenant_store::{TenantAssignmentStore, BYTES_PER_MEGABYTE},
+    tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
     token::{IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
@@ -1604,7 +1604,8 @@ fn enforce_offline_tenant_quota(
         if usage >= limit_bytes {
             bail!(
                 "tenant '{}' reached storage quota ({} MB)",
-                tenant, limit_mb
+                tenant,
+                limit_mb
             );
         }
     }

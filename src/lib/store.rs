@@ -2754,7 +2754,6 @@ impl EventStore {
     ) -> Result<BTreeMap<String, String>> {
         self.load_state_map_from(AggregateIndex::Active, aggregate_type, aggregate_id)
     }
-
 }
 
 fn meta_prefix_for(index: AggregateIndex) -> Vec<u8> {

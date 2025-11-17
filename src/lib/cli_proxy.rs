@@ -1892,9 +1892,9 @@ async fn execute_control_command(
             let store = target_core.store();
             let usage_bytes = spawn_blocking(move || store.storage_usage_bytes())
                 .await
-                .map_err(|err| EventError::Storage(format!(
-                    "storage usage task failed: {err}"
-                )))??;
+                .map_err(|err| {
+                    EventError::Storage(format!("storage usage task failed: {err}"))
+                })??;
             let assignments = target_core.assignments();
             assignments.update_storage_usage_bytes(&tenant, usage_bytes)?;
             Ok(ControlReply::TenantQuotaRecalc {

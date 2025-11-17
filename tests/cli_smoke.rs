@@ -8,9 +8,7 @@ use tempfile::TempDir;
 
 use chrono::Utc;
 use eventdbx::{
-    plugin::queue::PluginQueueStore,
-    snowflake::SnowflakeId,
-    validation::MAX_EVENT_PAYLOAD_BYTES,
+    plugin::queue::PluginQueueStore, snowflake::SnowflakeId, validation::MAX_EVENT_PAYLOAD_BYTES,
 };
 
 struct CliTest {
@@ -279,6 +277,52 @@ fn token_generate_requires_action_for_non_root() -> Result<()> {
             .contains("at least one --action must be provided"),
         "unexpected validation message:\n{}",
         failure.stderr
+    );
+    Ok(())
+}
+
+#[test]
+fn token_bootstrap_writes_file_by_default() -> Result<()> {
+    let cli = CliTest::new()?;
+    let token_path = cli.data_dir().join("cli.token");
+    if token_path.exists() {
+        fs::remove_file(&token_path).context("failed to remove existing cli.token")?;
+    }
+    let stdout = cli.run(&["token", "bootstrap"])?;
+    assert!(
+        stdout.contains("Bootstrap token stored at"),
+        "unexpected bootstrap output:\n{}",
+        stdout
+    );
+    let contents =
+        fs::read_to_string(&token_path).context("failed to read bootstrap token from disk")?;
+    let token = contents.trim();
+    assert!(
+        token.split('.').count() == 3,
+        "expected bootstrap token written to disk to contain three segments, got: {}",
+        token
+    );
+    Ok(())
+}
+
+#[test]
+fn token_bootstrap_stdout_prints_token_without_writing_file() -> Result<()> {
+    let cli = CliTest::new()?;
+    let token_path = cli.data_dir().join("cli.token");
+    if token_path.exists() {
+        fs::remove_file(&token_path).context("failed to remove existing cli.token")?;
+    }
+    let stdout = cli.run(&["token", "bootstrap", "--stdout"])?;
+    let token = stdout.trim();
+    assert!(
+        token.split('.').count() == 3,
+        "expected stdout bootstrap token to contain three segments, got: {}",
+        token
+    );
+    assert!(
+        !token_path.exists(),
+        "expected --stdout bootstrap to skip writing {}, but file exists",
+        token_path.display()
     );
     Ok(())
 }

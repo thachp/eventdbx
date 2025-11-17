@@ -741,12 +741,7 @@ impl ServerClient {
         )
     }
 
-    pub fn set_tenant_quota(
-        &self,
-        token: &str,
-        tenant: &str,
-        max_megabytes: u64,
-    ) -> Result<bool> {
+    pub fn set_tenant_quota(&self, token: &str, tenant: &str, max_megabytes: u64) -> Result<bool> {
         let request_id = next_request_id();
         send_control_request_blocking(
             &self.connect_addr,

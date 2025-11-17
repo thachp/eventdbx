@@ -20,7 +20,7 @@ use eventdbx::{
     schema_history::SchemaAuditAction,
     store::EventStore,
     tenant::{normalize_shard_id, normalize_tenant_id},
-    tenant_store::{TenantAssignmentStore, BYTES_PER_MEGABYTE},
+    tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
 };
 
 #[derive(Subcommand)]
@@ -211,9 +211,7 @@ fn list(config_path: Option<PathBuf>, args: TenantListArgs) -> Result<()> {
             }
         }
         let quota_mb = record.storage_quota_mb;
-        let usage_mb = record
-            .storage_usage_bytes
-            .map(bytes_to_megabytes);
+        let usage_mb = record.storage_usage_bytes.map(bytes_to_megabytes);
         if record.shard.is_none() && quota_mb.is_none() {
             continue;
         }

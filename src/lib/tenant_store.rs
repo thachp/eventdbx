@@ -21,11 +21,7 @@ pub struct TenantRecord {
     pub shard: Option<String>,
     #[serde(default, rename = "storage_quota_mb", alias = "aggregate_quota")]
     pub storage_quota_mb: Option<u64>,
-    #[serde(
-        default,
-        rename = "storage_usage_bytes",
-        alias = "aggregate_count"
-    )]
+    #[serde(default, rename = "storage_usage_bytes", alias = "aggregate_count")]
     pub storage_usage_bytes: Option<u64>,
 }
 
