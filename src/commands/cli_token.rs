@@ -19,19 +19,39 @@ const BOOTSTRAP_SUBJECT: &str = "cli:bootstrap";
 const BOOTSTRAP_ISSUER: &str = "cli-bootstrap";
 
 pub fn ensure_bootstrap_token(config: &Config) -> Result<String> {
-    let encryptor = config.encryption_key()?;
-    let jwt_config = config.jwt_manager_config()?;
-    let manager = TokenManager::load(
-        jwt_config,
-        config.tokens_path(),
-        config.jwt_revocations_path(),
-        encryptor,
-    )?;
-
+    let manager = open_token_manager(config)?;
     if let Some(token) = load_existing_token(config, &manager)? {
         return Ok(token);
     }
 
+    let token_value = issue_new_bootstrap_token(&manager)?;
+    let path = config.cli_token_path();
+    write_token_file(path.as_path(), &token_value)?;
+    info!(
+        "CLI bootstrap token generated with root privileges at {}",
+        path.display()
+    );
+
+    Ok(token_value)
+}
+
+pub fn issue_bootstrap_token(config: &Config) -> Result<String> {
+    let manager = open_token_manager(config)?;
+    issue_new_bootstrap_token(&manager)
+}
+
+fn open_token_manager(config: &Config) -> Result<TokenManager> {
+    let encryptor = config.encryption_key()?;
+    let jwt_config = config.jwt_manager_config()?;
+    Ok(TokenManager::load(
+        jwt_config,
+        config.tokens_path(),
+        config.jwt_revocations_path(),
+        encryptor,
+    )?)
+}
+
+fn issue_new_bootstrap_token(manager: &TokenManager) -> Result<String> {
     let record = manager.issue(IssueTokenInput {
         subject: BOOTSTRAP_SUBJECT.to_string(),
         group: BOOTSTRAP_GROUP.to_string(),
@@ -52,14 +72,6 @@ pub fn ensure_bootstrap_token(config: &Config) -> Result<String> {
         .token
         .clone()
         .ok_or_else(|| anyhow!("bootstrap token missing value"))?;
-
-    let path = config.cli_token_path();
-    write_token_file(path.as_path(), &token_value)?;
-    info!(
-        "CLI bootstrap token generated with root privileges at {}",
-        path.display()
-    );
-
     Ok(token_value)
 }
 

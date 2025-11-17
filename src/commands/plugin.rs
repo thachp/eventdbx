@@ -1743,7 +1743,7 @@ fn find_release_asset_download_url(
     }
 
     let releases: Vec<GitHubRelease> = client
-        .get("https://api.github.com/repos/thachp/dbx_plugins/releases")
+        .get("https://api.github.com/repos/eventdbx/dbx-plugins/releases")
         .header("Accept", "application/vnd.github+json")
         .send()
         .context("failed to list plugin releases from GitHub")?
@@ -1768,7 +1768,7 @@ fn find_release_asset_download_url(
 
 fn fetch_release_by_tag(client: &Client, tag: &str) -> Result<Option<GitHubRelease>> {
     let url = format!(
-        "https://api.github.com/repos/thachp/dbx_plugins/releases/tags/{}",
+        "https://api.github.com/repos/eventdbx/dbx-plugins/releases/tags/{}",
         tag
     );
     let response = client
@@ -1833,7 +1833,7 @@ fn registry_asset_candidates(name: &str, version: &str, release_target: &str) ->
     let asset_base = release_tag.clone();
     let asset_plain = format!("{}{}.zip", asset_base, release_target);
     let asset_with_dash = format!("{}-{}.zip", asset_base, release_target);
-    let base_url = "https://github.com/thachp/dbx_plugins/releases/download";
+    let base_url = "https://github.com/eventdbx/dbx-plugins/releases/download";
 
     let mut candidates = vec![
         format!("{base_url}/{}", asset_plain),
@@ -2491,7 +2491,7 @@ fn fetch_available_plugins(
     let client = github_api_client()?;
 
     let contents: Vec<GitHubContentItem> = client
-        .get("https://api.github.com/repos/thachp/dbx_plugins/contents/plugins")
+        .get("https://api.github.com/repos/eventdbx/dbx-plugins/contents/plugins")
         .header("Accept", "application/vnd.github+json")
         .send()
         .context("failed to request plugin catalog from GitHub")?
@@ -2593,7 +2593,7 @@ fn fetch_manifest_version(client: &Client, name: &str) -> Result<Option<String>>
     let mut last_error: Option<anyhow::Error> = None;
     for slug in slugs {
         let url = format!(
-            "https://raw.githubusercontent.com/thachp/dbx_plugins/main/plugins/{}/Cargo.toml",
+            "https://raw.githubusercontent.com/eventdbx/dbx-plugins/main/plugins/{}/Cargo.toml",
             slug
         );
         let response = match client

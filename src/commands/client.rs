@@ -741,7 +741,7 @@ impl ServerClient {
         )
     }
 
-    pub fn set_tenant_quota(&self, token: &str, tenant: &str, max_aggregates: u64) -> Result<bool> {
+    pub fn set_tenant_quota(&self, token: &str, tenant: &str, max_megabytes: u64) -> Result<bool> {
         let request_id = next_request_id();
         send_control_request_blocking(
             &self.connect_addr,
@@ -753,7 +753,7 @@ impl ServerClient {
                 let mut quota = payload_builder.init_tenant_quota_set();
                 quota.set_token(token);
                 quota.set_tenant_id(tenant);
-                quota.set_max_aggregates(max_aggregates);
+                quota.set_max_storage_mb(max_megabytes);
                 Ok(())
             },
             |response| {
@@ -828,7 +828,7 @@ impl ServerClient {
         )
     }
 
-    pub fn recalc_tenant_aggregates(&self, token: &str, tenant: &str) -> Result<u64> {
+    pub fn recalc_tenant_storage(&self, token: &str, tenant: &str) -> Result<u64> {
         let request_id = next_request_id();
         send_control_request_blocking(
             &self.connect_addr,
@@ -849,7 +849,7 @@ impl ServerClient {
                     .which()
                     .context("failed to decode tenant_quota_recalc response payload")?
                 {
-                    payload::TenantQuotaRecalc(Ok(reply)) => Ok(reply.get_aggregate_count()),
+                    payload::TenantQuotaRecalc(Ok(reply)) => Ok(reply.get_storage_bytes()),
                     payload::TenantQuotaRecalc(Err(err)) => Err(anyhow!(
                         "failed to decode tenant_quota_recalc response: {}",
                         err

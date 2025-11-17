@@ -244,12 +244,12 @@ struct TenantUnassignResponse {
 struct TenantQuotaSetRequest {
   token @0 :Text;
   tenantId @1 :Text;
-  maxAggregates @2 :UInt64;
+  maxStorageMb @2 :UInt64;
 }
 
 struct TenantQuotaSetResponse {
   changed @0 :Bool;
-  quota @1 :UInt64;
+  quotaMb @1 :UInt64;
   hasQuota @2 :Bool;
 }
 
@@ -268,7 +268,7 @@ struct TenantQuotaRecalcRequest {
 }
 
 struct TenantQuotaRecalcResponse {
-  aggregateCount @0 :UInt64;
+  storageBytes @0 :UInt64;
 }
 
 struct TenantReloadRequest {

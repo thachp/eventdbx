@@ -1,7 +1,7 @@
 # Surface Extraction Plan
 
 This note captures the shared service boundary and socket protocol changes
-needed to host REST / GraphQL / gRPC APIs in the `dbx_plugins` workspace
+needed to host REST / GraphQL / gRPC APIs in the `dbx-plugins` workspace
 while keeping the database core inside `eventdbx`.
 
 ## Core context
@@ -34,7 +34,7 @@ while keeping the database core inside `eventdbx`.
 
 ## Plugin workspace layout
 
-- `dbx_plugins/common/plugin_api` gains a lightweight async client for the new
+- `dbx-plugins/common/plugin_api` gains a lightweight async client for the new
   control protocol, including helpers to build requests and handle error codes.
 - Three new member crates (`plugins/rest_api`, `plugins/graphql_api`,
   `plugins/grpc_api`) depend on the control client and rehost the existing
@@ -57,8 +57,8 @@ while keeping the database core inside `eventdbx`.
    client helper instead of `AppState` (the GraphQL schema can be moved verbatim
    once the data access calls are swapped).
 5. Gate the in-repo REST/GraphQL/gRPC modules behind new Cargo features, default
-   them to `false`, and update documentation to point users at the plugin
-   workspace.
+  them to `false`, and update documentation to point users at the plugin
+  workspace.
 6. Provide launch scripts or documentation snippets demonstrating how to run the
    daemon alongside the new plugins (managed process plugins can be auto-started
    via `ProcessPlugin` once the Cap'n Proto handshake is shared).
@@ -80,7 +80,7 @@ while keeping the database core inside `eventdbx`.
   operations (list, get, append, verify). These can live under `tests/control`.
 - Port the existing API smoke tests into the plugin workspace so they execute
   against the new REST/GraphQL/gRPC binaries via `cargo test` inside
-  `dbx_plugins`.
+  `dbx-plugins`.
 - Ensure `ProcessPlugin` integration tests cover lifecycle management (install,
   restart) with the new Cap'n Proto flow to guard against regressions when
   plugins are upgraded.

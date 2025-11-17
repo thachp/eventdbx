@@ -12,8 +12,6 @@ use anyhow::{Result, anyhow};
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 
-use crate::commands::cli_token;
-
 use eventdbx::{
     config::{Config, ConfigUpdate, load_or_default},
     restrict::{self, RESTRICT_ENV},
@@ -365,7 +363,6 @@ fn load_and_update_config(
     let (mut config, path) = load_or_default(config_path)?;
     apply_start_overrides(&mut config, args);
     config.ensure_data_dir()?;
-    cli_token::ensure_bootstrap_token(&config)?;
     config.save(&path)?;
     Ok((config, path))
 }

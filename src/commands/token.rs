@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 
+use super::cli_token;
 use crate::commands::config::ensure_secrets_configured;
 use eventdbx::{
-    config::load_or_default,
+    config::{Config, load_or_default},
     tenant::normalize_tenant_list,
     token::{IssueTokenInput, JwtLimits, RevokeTokenInput, TokenManager, TokenRecord},
 };
@@ -21,6 +22,8 @@ pub enum TokenCommands {
     Revoke(TokenRevokeArgs),
     /// Refresh an existing token (revokes the prior token)
     Refresh(TokenRefreshArgs),
+    /// Issue a CLI bootstrap token
+    Bootstrap(TokenBootstrapArgs),
 }
 
 #[derive(Args)]
@@ -92,6 +95,17 @@ pub struct TokenRevokeArgs {
     /// Emit JSON output
     #[arg(long, default_value_t = false)]
     pub json: bool,
+}
+
+#[derive(Args, Default)]
+pub struct TokenBootstrapArgs {
+    /// Print the bootstrap token to stdout (skips writing cli.token unless --persist is set)
+    #[arg(long, default_value_t = false)]
+    pub stdout: bool,
+
+    /// Persist the token to cli.token even when printing to stdout
+    #[arg(long, requires = "stdout", default_value_t = false)]
+    pub persist: bool,
 }
 
 pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<()> {
@@ -186,6 +200,7 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
                 print_record(&record);
             }
         }
+        TokenCommands::Bootstrap(args) => handle_bootstrap_command(&config, args)?,
     }
 
     Ok(())
@@ -227,4 +242,22 @@ fn print_record(record: &TokenRecord) {
         resources,
         tenants
     );
+}
+
+fn handle_bootstrap_command(config: &Config, args: TokenBootstrapArgs) -> Result<()> {
+    if args.stdout {
+        let token = if args.persist {
+            cli_token::ensure_bootstrap_token(config)?
+        } else {
+            cli_token::issue_bootstrap_token(config)?
+        };
+        println!("{token}");
+    } else {
+        cli_token::ensure_bootstrap_token(config)?;
+        println!(
+            "Bootstrap token stored at {}",
+            config.cli_token_path().display()
+        );
+    }
+    Ok(())
 }
