@@ -8,7 +8,7 @@ const { spawnSync } = require('child_process');
 
 const pkg = require('../package.json');
 
-const DEFAULT_REPO = 'thachp/eventdbx';
+const DEFAULT_REPO = 'eventdbx/eventdbx';
 const MAX_REDIRECTS = 5;
 const TARGETS = {
   'darwin-arm64': { triple: 'aarch64-apple-darwin', archive: '.tar.xz', binary: 'dbx' },
@@ -23,8 +23,7 @@ function log(message) {
 }
 
 function shouldSkipInstall() {
-  const value =
-    process.env.EVENTDBX_SKIP_INSTALL ?? process.env.npm_config_eventdbx_skip_install;
+  const value = process.env.EVENTDBX_SKIP_INSTALL ?? process.env.npm_config_eventdbx_skip_install;
   if (!value) {
     return false;
   }
@@ -32,8 +31,7 @@ function shouldSkipInstall() {
 }
 
 function resolveVersionTag() {
-  const override =
-    process.env.EVENTDBX_VERSION || process.env.npm_config_eventdbx_version;
+  const override = process.env.EVENTDBX_VERSION || process.env.npm_config_eventdbx_version;
   const source = (override || pkg.version).trim();
   if (!source) {
     throw new Error('Missing version for EventDBX install.');
@@ -46,18 +44,22 @@ function resolveRepo() {
 }
 
 function resolveTarget() {
-  const platform =
-    (process.env.EVENTDBX_PLATFORM ||
-      process.env.npm_config_eventdbx_platform ||
-      os.platform()).toLowerCase();
-  const architecture =
-    (process.env.EVENTDBX_ARCH || process.env.npm_config_eventdbx_arch || os.arch()).toLowerCase();
+  const platform = (
+    process.env.EVENTDBX_PLATFORM ||
+    process.env.npm_config_eventdbx_platform ||
+    os.platform()
+  ).toLowerCase();
+  const architecture = (
+    process.env.EVENTDBX_ARCH ||
+    process.env.npm_config_eventdbx_arch ||
+    os.arch()
+  ).toLowerCase();
   const key = `${platform}-${architecture}`;
   const target = TARGETS[key];
   if (!target) {
     throw new Error(
       `Unsupported platform/architecture combination (${platform}-${architecture}). ` +
-        `Download binaries manually from https://github.com/${resolveRepo()}/releases instead.`,
+        `Download binaries manually from https://github.com/${resolveRepo()}/releases instead.`
     );
   }
   return target;
@@ -90,16 +92,16 @@ async function downloadFile(url, destination, redirects = 0) {
           }
           const nextUrl = response.headers.location;
           response.resume();
-          downloadFile(nextUrl, destination, redirects + 1).then(resolve).catch(reject);
+          downloadFile(nextUrl, destination, redirects + 1)
+            .then(resolve)
+            .catch(reject);
           return;
         }
 
         if (response.statusCode !== 200) {
           response.resume();
           reject(
-            new Error(
-              `Failed to download ${url} (status ${response.statusCode ?? 'unknown'})`,
-            ),
+            new Error(`Failed to download ${url} (status ${response.statusCode ?? 'unknown'})`)
           );
           return;
         }
@@ -113,7 +115,7 @@ async function downloadFile(url, destination, redirects = 0) {
           file.close();
           fs.rm(destination, { force: true }, () => reject(err));
         });
-      },
+      }
     );
 
     request.on('error', err => {
@@ -135,7 +137,7 @@ function runCommand(command, args, options = {}) {
   }
   if (result.status !== 0) {
     throw new Error(
-      `${command} ${args.join(' ')} exited with status ${result.status ?? 'unknown'}`,
+      `${command} ${args.join(' ')} exited with status ${result.status ?? 'unknown'}`
     );
   }
 }
@@ -230,8 +232,7 @@ async function install() {
 }
 
 install().catch(error => {
-  const message =
-    error && typeof error.message === 'string' ? error.message : String(error);
+  const message = error && typeof error.message === 'string' ? error.message : String(error);
   console.error(`[eventdbx] Failed to install the CLI: ${message}`);
   if (process.env.DEBUG_EVENTDBX_INSTALL) {
     console.error(error);
