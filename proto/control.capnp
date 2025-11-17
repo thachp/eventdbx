@@ -14,6 +14,13 @@ struct ControlRequest {
     setAggregateArchive @9 :SetAggregateArchiveRequest;
     listSchemas @10 :ListSchemasRequest;
     replaceSchemas @11 :ReplaceSchemasRequest;
+    tenantAssign @12 :TenantAssignRequest;
+    tenantUnassign @13 :TenantUnassignRequest;
+    tenantQuotaSet @14 :TenantQuotaSetRequest;
+    tenantQuotaClear @15 :TenantQuotaClearRequest;
+    tenantQuotaRecalc @16 :TenantQuotaRecalcRequest;
+    tenantReload @17 :TenantReloadRequest;
+    tenantSchemaPublish @18 :TenantSchemaPublishRequest;
   }
 }
 
@@ -31,12 +38,20 @@ struct ControlResponse {
     setAggregateArchive @9 :SetAggregateArchiveResponse;
     listSchemas @10 :ListSchemasResponse;
     replaceSchemas @11 :ReplaceSchemasResponse;
+    tenantAssign @12 :TenantAssignResponse;
+    tenantUnassign @13 :TenantUnassignResponse;
+    tenantQuotaSet @14 :TenantQuotaSetResponse;
+    tenantQuotaClear @15 :TenantQuotaClearResponse;
+    tenantQuotaRecalc @16 :TenantQuotaRecalcResponse;
+    tenantReload @17 :TenantReloadResponse;
+    tenantSchemaPublish @18 :TenantSchemaPublishResponse;
   }
 }
 
 struct ControlHello {
   protocolVersion @0 :UInt16;
   token @1 :Text;
+  tenantId @2 :Text;
 }
 
 struct ControlHelloResponse {
@@ -45,20 +60,23 @@ struct ControlHelloResponse {
 }
 
 struct ListAggregatesRequest {
-  skip @0 :UInt64;
-  take @1 :UInt64;
-  hasTake @2 :Bool;
-  filter @3 :Text;
-  hasFilter @4 :Bool;
-  sort @5 :List(AggregateSort);
-  hasSort @6 :Bool;
-  includeArchived @7 :Bool;
-  archivedOnly @8 :Bool;
-  token @9 :Text;
+  cursor @0 :Text;
+  hasCursor @1 :Bool;
+  take @2 :UInt64;
+  hasTake @3 :Bool;
+  filter @4 :Text;
+  hasFilter @5 :Bool;
+  sort @6 :List(AggregateSort);
+  hasSort @7 :Bool;
+  includeArchived @8 :Bool;
+  archivedOnly @9 :Bool;
+  token @10 :Text;
 }
 
 struct ListAggregatesResponse {
   aggregatesJson @0 :Text;
+  nextCursor @1 :Text;
+  hasNextCursor @2 :Bool;
 }
 
 struct GetAggregateRequest {
@@ -75,16 +93,19 @@ struct GetAggregateResponse {
 struct ListEventsRequest {
   aggregateType @0 :Text;
   aggregateId @1 :Text;
-  skip @2 :UInt64;
-  take @3 :UInt64;
-  hasTake @4 :Bool;
-  filter @5 :Text;
-  hasFilter @6 :Bool;
-  token @7 :Text;
+  cursor @2 :Text;
+  hasCursor @3 :Bool;
+  take @4 :UInt64;
+  hasTake @5 :Bool;
+  filter @6 :Text;
+  hasFilter @7 :Bool;
+  token @8 :Text;
 }
 
 struct ListEventsResponse {
   eventsJson @0 :Text;
+  nextCursor @1 :Text;
+  hasNextCursor @2 :Bool;
 }
 
 struct AppendEventRequest {
@@ -198,4 +219,82 @@ enum AggregateSortField {
 struct ControlError {
   code @0 :Text;
   message @1 :Text;
+}
+
+struct TenantAssignRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+  shardId @2 :Text;
+}
+
+struct TenantAssignResponse {
+  changed @0 :Bool;
+  shardId @1 :Text;
+}
+
+struct TenantUnassignRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+}
+
+struct TenantUnassignResponse {
+  changed @0 :Bool;
+}
+
+struct TenantQuotaSetRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+  maxAggregates @2 :UInt64;
+}
+
+struct TenantQuotaSetResponse {
+  changed @0 :Bool;
+  quota @1 :UInt64;
+  hasQuota @2 :Bool;
+}
+
+struct TenantQuotaClearRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+}
+
+struct TenantQuotaClearResponse {
+  changed @0 :Bool;
+}
+
+struct TenantQuotaRecalcRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+}
+
+struct TenantQuotaRecalcResponse {
+  aggregateCount @0 :UInt64;
+}
+
+struct TenantReloadRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+}
+
+struct TenantReloadResponse {
+  reloaded @0 :Bool;
+}
+
+struct TenantSchemaPublishRequest {
+  token @0 :Text;
+  tenantId @1 :Text;
+  reason @2 :Text;
+  hasReason @3 :Bool;
+  actor @4 :Text;
+  hasActor @5 :Bool;
+  labels @6 :List(Text);
+  activate @7 :Bool;
+  force @8 :Bool;
+  reload @9 :Bool;
+}
+
+struct TenantSchemaPublishResponse {
+  versionId @0 :Text;
+  activated @1 :Bool;
+  skipped @2 :Bool;
 }

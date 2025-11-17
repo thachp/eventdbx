@@ -18,6 +18,8 @@ use super::{
     encryption::Encryptor,
     error::{EventError, Result},
     restrict::{self, RestrictMode},
+    store::EventStore,
+    tenant_store::{TenantAssignmentStore, compute_default_shard},
     token::JwtManagerConfig,
 };
 
@@ -118,6 +120,26 @@ pub struct PluginQueueConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantRoutingConfig {
+    #[serde(default)]
+    pub multi_tenant: bool,
+    #[serde(default = "default_tenant_shard_count")]
+    pub shard_count: u16,
+    #[serde(default)]
+    pub shard_map_path: Option<PathBuf>,
+}
+
+impl Default for TenantRoutingConfig {
+    fn default() -> Self {
+        Self {
+            multi_tenant: false,
+            shard_count: default_tenant_shard_count(),
+            shard_map_path: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginQueuePruneConfig {
     #[serde(default = "default_queue_prune_done_ttl_secs")]
     pub done_ttl_secs: u64,
@@ -135,6 +157,10 @@ impl Default for PluginQueuePruneConfig {
             max_done_jobs: None,
         }
     }
+}
+
+fn default_tenant_shard_count() -> u16 {
+    16
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +193,8 @@ pub struct Config {
     pub plugin_queue: PluginQueueConfig,
     #[serde(default)]
     pub socket: SocketConfig,
+    #[serde(default)]
+    pub tenants: TenantRoutingConfig,
     #[serde(default = "default_verbose_responses")]
     pub verbose_responses: bool,
     #[serde(default)]
@@ -194,6 +222,7 @@ impl Default for Config {
             plugin_max_attempts: default_plugin_max_attempts(),
             plugin_queue: PluginQueueConfig::default(),
             socket: SocketConfig::default(),
+            tenants: TenantRoutingConfig::default(),
             verbose_responses: default_verbose_responses(),
             auth: AuthConfig::default(),
             snowflake_worker_id: default_snowflake_worker_id(),
@@ -214,7 +243,15 @@ pub struct ConfigUpdate {
     pub verbose_responses: Option<bool>,
     pub plugin_max_attempts: Option<u32>,
     pub socket: Option<SocketConfigUpdate>,
+    pub tenants: Option<TenantRoutingConfigUpdate>,
     pub snowflake_worker_id: Option<u16>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TenantRoutingConfigUpdate {
+    pub multi_tenant: Option<bool>,
+    pub shard_count: Option<u16>,
+    pub shard_map_path: Option<PathBuf>,
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
@@ -325,12 +362,39 @@ impl Config {
                 self.socket.bind_addr = bind_addr;
             }
         }
+        if let Some(tenant_update) = update.tenants {
+            if let Some(enabled) = tenant_update.multi_tenant {
+                self.tenants.multi_tenant = enabled;
+            }
+            if let Some(shards) = tenant_update.shard_count {
+                self.tenants.shard_count = shards.max(1);
+            }
+            if let Some(path) = tenant_update.shard_map_path {
+                self.tenants.shard_map_path = Some(path);
+            }
+        }
         self.updated_at = Utc::now();
     }
 
     pub fn ensure_data_dir(&self) -> Result<()> {
         fs::create_dir_all(&self.data_dir)?;
         fs::create_dir_all(self.domain_data_dir().as_path())?;
+        if self.multi_tenant() {
+            fs::create_dir_all(self.shards_root())?;
+        }
+        self.ensure_event_store_initialized()?;
+        Ok(())
+    }
+
+    pub fn ensure_event_store_initialized(&self) -> Result<()> {
+        let path = self.event_store_path();
+        if path.join("CURRENT").exists() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let _store = EventStore::open(path, self.encryption_key()?, self.snowflake_worker_id)?;
         Ok(())
     }
 
@@ -347,11 +411,50 @@ impl Config {
     }
 
     pub fn domain_data_dir(&self) -> PathBuf {
-        if self.is_default_domain() {
-            self.data_dir.clone()
-        } else {
-            self.domains_root().join(&self.domain)
+        self.domain_data_dir_for(&self.domain)
+    }
+
+    pub fn domain_data_dir_for(&self, domain: &str) -> PathBuf {
+        let tenant = domain.to_ascii_lowercase();
+        if let Some(shard) = self.lookup_assigned_shard(&tenant) {
+            return self.tenant_shard_dir(&shard, &tenant);
         }
+        let shard = compute_default_shard(&tenant, self.shard_count());
+        self.tenant_shard_dir(&shard, &tenant)
+    }
+
+    pub fn shards_root(&self) -> PathBuf {
+        self.data_dir.join("shards")
+    }
+
+    pub fn tenant_shard_dir(&self, shard: &str, tenant: &str) -> PathBuf {
+        self.shards_root().join(shard).join("tenants").join(tenant)
+    }
+
+    pub fn tenant_meta_path(&self) -> PathBuf {
+        if let Some(path) = &self.tenants.shard_map_path {
+            path.clone()
+        } else {
+            self.data_dir.join("tenant_meta")
+        }
+    }
+
+    pub fn multi_tenant(&self) -> bool {
+        self.tenants.multi_tenant
+    }
+
+    pub fn shard_count(&self) -> u16 {
+        self.tenants.shard_count.max(1)
+    }
+
+    pub fn shard_map_path(&self) -> Option<PathBuf> {
+        self.tenants.shard_map_path.clone()
+    }
+
+    fn lookup_assigned_shard(&self, tenant: &str) -> Option<String> {
+        let path = self.tenant_meta_path();
+        let store = TenantAssignmentStore::open_read_only(path).ok()?;
+        store.shard_for(tenant).ok()?
     }
 
     pub fn ensure_encryption_key(&mut self) -> bool {
@@ -402,12 +505,16 @@ impl Config {
         self.domain_data_dir().join("event_store")
     }
 
+    pub fn event_store_path_for(&self, domain: &str) -> PathBuf {
+        self.domain_data_dir_for(domain).join("event_store")
+    }
+
     pub fn tokens_path(&self) -> PathBuf {
         self.domain_data_dir().join("tokens.json")
     }
 
     pub fn cli_token_path(&self) -> PathBuf {
-        self.domain_data_dir().join("cli.token")
+        self.data_dir.join("cli.token")
     }
 
     pub fn jwt_revocations_path(&self) -> PathBuf {
@@ -466,6 +573,10 @@ impl Config {
         self.domain_data_dir().join("schemas.json")
     }
 
+    pub fn schema_store_path_for(&self, domain: &str) -> PathBuf {
+        self.domain_data_dir_for(domain).join("schemas.json")
+    }
+
     pub fn staging_path(&self) -> PathBuf {
         self.domain_data_dir().join("staged_events.json")
     }
@@ -483,7 +594,7 @@ impl Config {
     }
 
     pub fn pid_file_path(&self) -> PathBuf {
-        self.domain_data_dir().join("eventdbx.pid")
+        self.data_dir.join("eventdbx.pid")
     }
 
     pub fn verbose_responses(&self) -> bool {

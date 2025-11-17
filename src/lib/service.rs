@@ -6,9 +6,11 @@ use crate::{
     restrict::{self, RestrictMode},
     schema::SchemaManager,
     store::{
-        ActorClaims, AggregateQueryScope, AggregateSort, AggregateState, AppendEvent, EventRecord,
-        EventStore, select_state_field,
+        ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState,
+        AppendEvent, EventArchiveScope, EventCursor, EventQueryScope, EventRecord, EventStore,
+        select_state_field,
     },
+    tenant_store::TenantAssignmentStore,
     token::{JwtClaims, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
@@ -27,6 +29,9 @@ pub struct CoreContext {
     restrict: RestrictMode,
     list_page_size: usize,
     page_limit: usize,
+    tenant_id: String,
+    aggregate_quota: Option<u64>,
+    assignments: Arc<TenantAssignmentStore>,
 }
 
 impl CoreContext {
@@ -37,6 +42,9 @@ impl CoreContext {
         restrict: RestrictMode,
         list_page_size: usize,
         page_limit: usize,
+        tenant_id: impl Into<String>,
+        aggregate_quota: Option<u64>,
+        assignments: Arc<TenantAssignmentStore>,
     ) -> Self {
         Self {
             tokens,
@@ -45,6 +53,9 @@ impl CoreContext {
             restrict,
             list_page_size,
             page_limit,
+            tenant_id: tenant_id.into(),
+            aggregate_quota,
+            assignments,
         }
     }
 
@@ -58,6 +69,14 @@ impl CoreContext {
 
     pub fn store(&self) -> Arc<EventStore> {
         Arc::clone(&self.store)
+    }
+
+    pub fn assignments(&self) -> Arc<TenantAssignmentStore> {
+        Arc::clone(&self.assignments)
+    }
+
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
     }
 
     pub fn restrict(&self) -> RestrictMode {
@@ -84,18 +103,41 @@ impl CoreContext {
         aggregate
     }
 
+    fn ensure_tenant_count_initialized(&self) -> Result<u64> {
+        let store = Arc::clone(&self.store);
+        self.assignments
+            .ensure_aggregate_count(&self.tenant_id, || {
+                store
+                    .counts()
+                    .map(|counts| counts.total_aggregates() as u64)
+            })
+    }
+
+    fn enforce_aggregate_quota(&self) -> Result<()> {
+        let current = self.ensure_tenant_count_initialized()?;
+        if let Some(limit) = self.aggregate_quota {
+            if current >= limit {
+                return Err(EventError::TenantQuotaExceeded(format!(
+                    "tenant '{}' reached aggregate quota ({limit})",
+                    self.tenant_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn list_aggregates(
         &self,
         token: &str,
-        skip: usize,
+        cursor: Option<&AggregateCursor>,
         take: Option<usize>,
         filter: Option<FilterExpr>,
         sort: Option<&[AggregateSort]>,
         scope: AggregateQueryScope,
-    ) -> Result<Vec<AggregateState>> {
+    ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)> {
         let mut effective_take = take.unwrap_or(self.list_page_size);
         if effective_take == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
         if effective_take > self.page_limit {
             effective_take = self.page_limit;
@@ -105,30 +147,44 @@ impl CoreContext {
             .tokens()
             .authorize_action(token, "aggregate.read", None)?;
         let filter_ref = filter.as_ref();
-        let aggregates = self.store.aggregates_paginated_with_transform(
-            skip,
-            Some(effective_take),
-            sort,
-            scope,
-            |aggregate| {
-                if self.is_hidden_aggregate(&aggregate.aggregate_type) {
+
+        let mut transform = |aggregate: AggregateState| {
+            if self.is_hidden_aggregate(&aggregate.aggregate_type) {
+                return None;
+            }
+            let resource =
+                Self::aggregate_resource(&aggregate.aggregate_type, &aggregate.aggregate_id);
+            if !claims.allows_resource(Some(resource.as_str())) {
+                return None;
+            }
+            let sanitized = self.sanitize_aggregate(aggregate);
+            if let Some(expr) = filter_ref {
+                if !expr.matches_aggregate(&sanitized) {
                     return None;
                 }
-                let resource =
-                    Self::aggregate_resource(&aggregate.aggregate_type, &aggregate.aggregate_id);
-                if !claims.allows_resource(Some(resource.as_str())) {
-                    return None;
-                }
-                let sanitized = self.sanitize_aggregate(aggregate);
-                if let Some(expr) = filter_ref {
-                    if !expr.matches_aggregate(&sanitized) {
-                        return None;
-                    }
-                }
-                Some(sanitized)
-            },
-        );
-        Ok(aggregates)
+            }
+            Some(sanitized)
+        };
+
+        if cursor.is_some() && sort.is_some() {
+            return Err(EventError::InvalidCursor(
+                "cursor cannot be combined with sort directives".into(),
+            ));
+        }
+
+        if let Some(keys) = sort {
+            let aggregates = self.store.aggregates_paginated_with_transform(
+                0,
+                Some(effective_take),
+                Some(keys),
+                scope,
+                &mut transform,
+            );
+            return Ok((aggregates, None));
+        }
+
+        self.store
+            .aggregates_page_with_transform(cursor, effective_take, scope, &mut transform)
     }
 
     pub fn get_aggregate(
@@ -190,9 +246,9 @@ impl CoreContext {
         token: &str,
         aggregate_type: &str,
         aggregate_id: &str,
-        skip: usize,
+        cursor: Option<&EventCursor>,
         take: Option<usize>,
-    ) -> Result<Vec<EventRecord>> {
+    ) -> Result<(Vec<EventRecord>, Option<EventCursor>)> {
         let resource = Self::aggregate_resource(aggregate_type, aggregate_id);
         self.tokens()
             .authorize_action(token, "aggregate.read", Some(resource.as_str()))?;
@@ -203,19 +259,22 @@ impl CoreContext {
 
         let mut effective_take = take.unwrap_or(self.page_limit);
         if effective_take == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
         if effective_take > self.page_limit {
             effective_take = self.page_limit;
         }
 
-        let events = self.store.list_events_paginated(
-            aggregate_type,
-            aggregate_id,
-            skip,
-            Some(effective_take),
-        )?;
-        Ok(events)
+        self.store.events_page(
+            EventQueryScope::Aggregate {
+                aggregate_type,
+                aggregate_id,
+            },
+            EventArchiveScope::ActiveOnly,
+            cursor,
+            effective_take,
+            None,
+        )
     }
 
     pub fn verify_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<String> {
@@ -255,6 +314,8 @@ impl CoreContext {
             )));
         }
 
+        self.enforce_aggregate_quota()?;
+
         let resource = format!("aggregate:{}:{}", aggregate_type, aggregate_id);
         let claims =
             self.tokens()
@@ -275,6 +336,8 @@ impl CoreContext {
             note,
         };
         let _record = self.append_event_internal(append_input, true)?;
+        self.assignments
+            .increment_aggregate_count(&self.tenant_id, 1)?;
 
         let aggregate = store.get_aggregate_state(&aggregate_type, &aggregate_id)?;
         Ok(self.sanitize_aggregate(aggregate))

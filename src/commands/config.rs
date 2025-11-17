@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use clap::Args;
 
-use eventdbx::config::{Config, ConfigUpdate, load_or_default};
+use eventdbx::config::{Config, ConfigUpdate, TenantRoutingConfigUpdate, load_or_default};
 
 #[derive(Args)]
 pub struct ConfigArgs {
@@ -41,6 +41,15 @@ pub struct ConfigArgs {
     pub clear_snapshot_threshold: bool,
     #[arg(long = "snowflake-worker-id")]
     pub snowflake_worker_id: Option<u16>,
+
+    #[arg(long = "multi-tenant")]
+    pub multi_tenant: Option<bool>,
+
+    #[arg(long = "shard-count")]
+    pub shard_count: Option<u16>,
+
+    #[arg(long = "shard-map-path")]
+    pub shard_map_path: Option<PathBuf>,
 }
 
 pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
@@ -64,6 +73,9 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         snapshot_threshold,
         clear_snapshot_threshold,
         snowflake_worker_id,
+        multi_tenant,
+        shard_count,
+        shard_map_path,
     } = args;
 
     let data_encryption_key = normalize_secret(data_encryption_key);
@@ -72,6 +84,17 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
     } else {
         snapshot_threshold.map(Some)
     };
+    let tenant_update =
+        if multi_tenant.is_some() || shard_count.is_some() || shard_map_path.is_some() {
+            Some(TenantRoutingConfigUpdate {
+                multi_tenant,
+                shard_count,
+                shard_map_path,
+            })
+        } else {
+            None
+        };
+
     config.apply_update(ConfigUpdate {
         port,
         data_dir,
@@ -85,6 +108,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         plugin_max_attempts,
         socket: None,
         snowflake_worker_id,
+        tenants: tenant_update,
     });
 
     if !was_initialized && !config.is_initialized() {
@@ -137,4 +161,7 @@ fn has_updates(args: &ConfigArgs) -> bool {
         || args.snapshot_threshold.is_some()
         || args.clear_snapshot_threshold
         || args.snowflake_worker_id.is_some()
+        || args.multi_tenant.is_some()
+        || args.shard_count.is_some()
+        || args.shard_map_path.is_some()
 }

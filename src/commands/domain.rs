@@ -28,11 +28,12 @@ use eventdbx::{
     merkle::{compute_merkle_root, empty_root},
     schema::{AggregateSchema, SchemaManager},
     store::{AggregateQueryScope, AggregateState, EventStore},
+    tenant::normalize_tenant_id,
     validation::{ensure_aggregate_id, ensure_snake_case},
 };
 use std::io::{self, Write};
 
-use crate::commands::client::ServerClient;
+use crate::commands::{client::ServerClient, resolve_actor_name};
 
 #[derive(Args)]
 #[command(arg_required_else_help = true)]
@@ -73,6 +74,10 @@ pub struct DomainCheckoutArgs {
     /// Authorization token used when syncing with the remote domain
     #[arg(long = "token", value_name = "TOKEN")]
     pub remote_token: Option<String>,
+
+    /// Tenant identifier to associate with the remote endpoint
+    #[arg(long = "remote-tenant", value_name = "TENANT")]
+    pub remote_tenant: Option<String>,
 }
 
 #[derive(Args)]
@@ -96,12 +101,15 @@ struct DomainRemoteConfig {
     connect_addr: Option<String>,
     #[serde(default)]
     token: Option<String>,
+    #[serde(default)]
+    tenant: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct DomainRemoteEndpoint {
     connect_addr: String,
     token: String,
+    tenant: String,
 }
 
 #[derive(Args)]
@@ -111,11 +119,59 @@ pub struct SchemaSyncArgs {
     pub domain: String,
 }
 
+#[derive(Args)]
+pub struct PushSchemaArgs {
+    /// Domain to synchronise
+    #[arg(value_name = "DOMAIN")]
+    pub domain: String,
+
+    /// Publish and activate the schemas on the remote after pushing
+    #[arg(long, default_value_t = false)]
+    pub publish: bool,
+
+    /// Reason recorded in the remote schema manifest (requires --publish)
+    #[arg(long = "publish-reason", value_name = "TEXT", requires = "publish")]
+    pub publish_reason: Option<String>,
+
+    /// Actor recorded in the remote schema manifest (requires --publish)
+    #[arg(long = "publish-actor", value_name = "NAME", requires = "publish")]
+    pub publish_actor: Option<String>,
+
+    /// Optional labels stored alongside the remote schema version (requires --publish)
+    #[arg(
+        long = "publish-label",
+        value_name = "LABEL",
+        value_delimiter = ',',
+        requires = "publish"
+    )]
+    pub publish_labels: Vec<String>,
+
+    /// Skip activating the published version on the remote (requires --publish)
+    #[arg(
+        long = "publish-no-activate",
+        default_value_t = false,
+        requires = "publish"
+    )]
+    pub publish_no_activate: bool,
+
+    /// Skip reloading the remote daemon after publishing (requires --publish)
+    #[arg(
+        long = "publish-no-reload",
+        default_value_t = false,
+        requires = "publish"
+    )]
+    pub publish_no_reload: bool,
+
+    /// Publish a new remote version even if the schemas did not change (requires --publish)
+    #[arg(long = "publish-force", default_value_t = false, requires = "publish")]
+    pub publish_force: bool,
+}
+
 #[derive(Subcommand)]
 pub enum PushCommand {
     /// Push schemas to the remote endpoint
     #[command(name = "schema")]
-    Schema(SchemaSyncArgs),
+    Schema(PushSchemaArgs),
     /// Push domain data (domain name as positional argument)
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -218,12 +274,13 @@ pub fn checkout(config_path: Option<PathBuf>, args: DomainCheckoutArgs) -> Resul
         None
     };
 
-    if args.remote_addr.is_some() || args.remote_token.is_some() {
+    if args.remote_addr.is_some() || args.remote_token.is_some() || args.remote_tenant.is_some() {
         update_domain_remote_config(
             &config,
             args.remote_addr.as_deref(),
             remote_port,
             args.remote_token.as_deref(),
+            args.remote_tenant.as_deref(),
         )?;
     }
 
@@ -436,6 +493,7 @@ fn push_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
         let aggregates = Arc::clone(&aggregates);
         let token = remote.token.clone();
         let connect_addr = remote.connect_addr.clone();
+        let remote_tenant = remote.tenant.clone();
         let next_index = Arc::clone(&next_index);
         let failure_flag = Arc::clone(&failure_flag);
         let output_lock = Arc::clone(&output_lock);
@@ -445,7 +503,8 @@ fn push_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
         let total = total_aggregates;
 
         handles.push(thread::spawn(move || -> Result<()> {
-            let client = ServerClient::with_addr(connect_addr);
+            let client =
+                ServerClient::with_addr_and_tenant(connect_addr, Some(remote_tenant.clone()));
             loop {
                 if failure_flag.load(Ordering::Relaxed) {
                     break;
@@ -757,7 +816,10 @@ fn pull_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
     ensure_existing_domain(&config, &domain)?;
 
     let remote = load_remote_endpoint_for_domain(&config, &domain)?;
-    let client = ServerClient::with_addr(remote.connect_addr.clone());
+    let client = ServerClient::with_addr_and_tenant(
+        remote.connect_addr.clone(),
+        Some(remote.tenant.clone()),
+    );
 
     let remote_aggregates_list = collect_remote_aggregates(
         &client,
@@ -798,6 +860,7 @@ fn pull_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
         let remote_aggregates = Arc::clone(&remote_aggregates);
         let token = remote.token.clone();
         let connect_addr = remote.connect_addr.clone();
+        let remote_tenant = remote.tenant.clone();
         let next_index = Arc::clone(&next_index);
         let failure_flag = Arc::clone(&failure_flag);
         let output_lock = Arc::clone(&output_lock);
@@ -807,7 +870,8 @@ fn pull_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
         let total = total_remote;
 
         handles.push(thread::spawn(move || -> Result<()> {
-            let client = ServerClient::with_addr(connect_addr);
+            let client =
+                ServerClient::with_addr_and_tenant(connect_addr, Some(remote_tenant.clone()));
             loop {
                 if failure_flag.load(Ordering::Relaxed) {
                     break;
@@ -988,7 +1052,13 @@ fn process_pull_aggregate(
     let new_events_total = (remote_version - local_version) as usize;
     let new_events = if new_events_total > 0 {
         client
-            .list_events_since(token, aggregate_type, aggregate_id, local_version)
+            .list_events_since(
+                token,
+                aggregate_type,
+                aggregate_id,
+                local_version,
+                remote_state.archived,
+            )
             .with_context(|| {
                 format!(
                     "failed to fetch remote events for '{}::{}' starting at version {}",
@@ -1092,13 +1162,16 @@ fn process_pull_aggregate(
     })
 }
 
-fn push_schema(config_path: Option<PathBuf>, args: SchemaSyncArgs) -> Result<()> {
+fn push_schema(config_path: Option<PathBuf>, args: PushSchemaArgs) -> Result<()> {
     let domain = normalize_domain_name(&args.domain)?;
     let (config, _) = load_or_default(config_path)?;
     ensure_existing_domain(&config, &domain)?;
 
     let remote = load_remote_endpoint_for_domain(&config, &domain)?;
-    let client = ServerClient::with_addr(remote.connect_addr.clone());
+    let client = ServerClient::with_addr_and_tenant(
+        remote.connect_addr.clone(),
+        Some(remote.tenant.clone()),
+    );
 
     let mut domain_config = config.clone();
     domain_config.domain = domain.clone();
@@ -1122,6 +1195,56 @@ fn push_schema(config_path: Option<PathBuf>, args: SchemaSyncArgs) -> Result<()>
         domain,
         remote.connect_addr
     );
+
+    if args.publish {
+        let actor_value = resolve_actor_name(
+            args.publish_actor.as_deref(),
+            Some(remote.token.as_str()),
+            "dbx push",
+        );
+        let publish_result = client
+            .publish_tenant_schemas(
+                &remote.token,
+                &remote.tenant,
+                args.publish_reason.as_deref(),
+                Some(actor_value.as_str()),
+                &args.publish_labels,
+                !args.publish_no_activate,
+                args.publish_force,
+                !args.publish_no_reload,
+            )
+            .with_context(|| {
+                format!(
+                    "remote publish failed for tenant '{}' on {}",
+                    remote.tenant, remote.connect_addr
+                )
+            })?;
+
+        if publish_result.skipped {
+            println!(
+                "Remote tenant '{}' schemas unchanged; publish skipped.",
+                remote.tenant
+            );
+        } else if publish_result.activated {
+            println!(
+                "Remote tenant '{}' published version {} (activated).",
+                remote.tenant, publish_result.version_id
+            );
+        } else {
+            println!(
+                "Remote tenant '{}' published version {} (inactive).",
+                remote.tenant, publish_result.version_id
+            );
+        }
+
+        if args.publish_no_reload {
+            println!(
+                "Remote daemon reload skipped for tenant '{}' (--publish-no-reload).",
+                remote.tenant
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -1131,7 +1254,10 @@ fn pull_schema(config_path: Option<PathBuf>, args: SchemaSyncArgs) -> Result<()>
     ensure_existing_domain(&config, &domain)?;
 
     let remote = load_remote_endpoint_for_domain(&config, &domain)?;
-    let client = ServerClient::with_addr(remote.connect_addr.clone());
+    let client = ServerClient::with_addr_and_tenant(
+        remote.connect_addr.clone(),
+        Some(remote.tenant.clone()),
+    );
 
     let remote_snapshot = client.list_schemas(&remote.token).with_context(|| {
         format!(
@@ -1178,11 +1304,7 @@ fn ensure_existing_domain(config: &Config, domain: &str) -> Result<PathBuf> {
 }
 
 fn domain_data_dir_for(config: &Config, domain: &str) -> PathBuf {
-    if domain.eq_ignore_ascii_case(DEFAULT_DOMAIN_NAME) {
-        config.data_dir.clone()
-    } else {
-        config.domains_root().join(domain)
-    }
+    config.domain_data_dir_for(domain)
 }
 
 fn load_remote_endpoint_for_domain(config: &Config, domain: &str) -> Result<DomainRemoteEndpoint> {
@@ -1203,9 +1325,14 @@ fn load_remote_endpoint_for_domain(config: &Config, domain: &str) -> Result<Doma
             domain
         )
     })?;
+    let tenant = remote
+        .tenant
+        .clone()
+        .unwrap_or(normalize_tenant_id(domain)?);
     Ok(DomainRemoteEndpoint {
         connect_addr,
         token,
+        tenant,
     })
 }
 
@@ -1303,6 +1430,7 @@ fn update_domain_remote_config(
     remote: Option<&str>,
     remote_port: Option<u16>,
     token: Option<&str>,
+    tenant: Option<&str>,
 ) -> Result<()> {
     let domain_dir = config.domain_data_dir();
     if !domain_dir.exists() {
@@ -1346,6 +1474,19 @@ fn update_domain_remote_config(
         };
         if current.token != normalized {
             current.token = normalized;
+            changed = true;
+        }
+    }
+
+    if let Some(raw_tenant) = tenant {
+        let trimmed = raw_tenant.trim();
+        let normalized = if trimmed.is_empty() {
+            None
+        } else {
+            Some(normalize_tenant_id(trimmed)?)
+        };
+        if current.tenant != normalized {
+            current.tenant = normalized;
             changed = true;
         }
     }
@@ -1813,6 +1954,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         let result = resolve_checkout_domain(&args).expect("flag domain should resolve");
         assert_eq!(result, "herds");
@@ -1829,6 +1971,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         let result = resolve_checkout_domain(&args).expect("positional domain should resolve");
         assert_eq!(result, "herds_01");
@@ -1845,6 +1988,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         assert!(resolve_checkout_domain(&args).is_err());
     }
@@ -1875,6 +2019,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
 
         let err = checkout(Some(config_path.clone()), args)
@@ -1916,6 +2061,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         checkout(Some(config_path.clone()), create_args).expect("domain creation should succeed");
 
@@ -1928,6 +2074,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         checkout(Some(config_path.clone()), default_args)
             .expect("switching to default domain should succeed");
@@ -1941,6 +2088,7 @@ mod tests {
             remote_addr: None,
             remote_port: None,
             remote_token: None,
+            remote_tenant: None,
         };
         checkout(Some(config_path.clone()), switch_args)
             .expect("switching to an existing domain should succeed");

@@ -6,7 +6,9 @@ use eventdbx::{
     config::load_or_default,
     filter,
     snowflake::SnowflakeId,
-    store::{EventArchiveScope, EventQueryScope, EventSort, EventSortField, EventStore},
+    store::{
+        EventArchiveScope, EventCursor, EventQueryScope, EventSort, EventSortField, EventStore,
+    },
 };
 
 #[derive(Args)]
@@ -23,9 +25,9 @@ pub struct EventsArgs {
     #[arg(long = "event", short = 'e', value_name = "EVENT_ID")]
     pub event_id: Option<String>,
 
-    /// Number of events to skip
+    /// Resume listing after the provided cursor (`a:type:id:version`)
     #[arg(long)]
-    pub skip: Option<usize>,
+    pub cursor: Option<String>,
 
     /// Maximum number of events to return
     #[arg(long)]
@@ -86,8 +88,10 @@ pub fn list(config_path: Option<PathBuf>, args: EventsArgs) -> Result<()> {
         EventArchiveScope::ActiveOnly
     };
 
-    let take = args.take.or(Some(config.list_page_size));
-    let skip = args.skip.unwrap_or(0);
+    let take = args.take.unwrap_or(config.list_page_size);
+    if take == 0 {
+        bail!("--take must be greater than zero");
+    }
 
     let scope = match (&args.aggregate, &args.aggregate_id) {
         (Some(aggregate), Some(aggregate_id)) => EventQueryScope::Aggregate {
@@ -98,16 +102,38 @@ pub fn list(config_path: Option<PathBuf>, args: EventsArgs) -> Result<()> {
         (None, _) => EventQueryScope::All,
     };
 
-    let events = store.events_paginated(
-        scope,
-        archive_scope,
-        skip,
-        take,
-        sort_directives
-            .as_ref()
-            .map(|directives| directives.as_slice()),
-        filter_expr.as_ref(),
-    )?;
+    if args.cursor.is_some() && sort_directives.is_some() {
+        bail!("--cursor cannot be combined with --sort");
+    }
+
+    let events = if let Some(directives) = sort_directives.as_ref() {
+        store.events_paginated(
+            scope,
+            archive_scope,
+            0,
+            Some(take),
+            Some(directives.as_slice()),
+            filter_expr.as_ref(),
+        )?
+    } else {
+        let cursor = match args.cursor.as_deref() {
+            Some(raw) => Some(EventCursor::from_str(raw).with_context(|| {
+                format!(
+                    "invalid cursor '{}'; expected format a:aggregate_type:aggregate_id:version",
+                    raw
+                )
+            })?),
+            None => None,
+        };
+        let (events, _next_cursor) = store.events_page(
+            scope,
+            archive_scope,
+            cursor.as_ref(),
+            take,
+            filter_expr.as_ref(),
+        )?;
+        events
+    };
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&events)?);
@@ -185,7 +211,7 @@ fn show_event(config_path: Option<PathBuf>, event_id_raw: &str, json: bool) -> R
 }
 
 fn selected_event_id(args: &EventsArgs) -> Result<Option<String>> {
-    let listing_options_used = args.skip.is_some()
+    let listing_options_used = args.cursor.is_some()
         || args.take.is_some()
         || args.filter.is_some()
         || args.sort.is_some()

@@ -17,9 +17,7 @@ use super::{
     config::Config,
     error::{EventError, Result},
     observability,
-    schema::SchemaManager,
-    service::CoreContext,
-    store::EventStore,
+    tenant::{CoreProvider, TenantRegistry},
     token::TokenManager,
 };
 
@@ -100,21 +98,19 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         config_snapshot.jwt_revocations_path(),
         encryption.clone(),
     )?);
-    let store = Arc::new(EventStore::open(
-        config_snapshot.event_store_path(),
-        encryption.clone(),
-        config_snapshot.snowflake_worker_id,
-    )?);
-    let schemas = Arc::new(SchemaManager::load(config_snapshot.schema_store_path())?);
-
-    let core = CoreContext::new(
+    let tenant_registry = Arc::new(TenantRegistry::new(
+        config_snapshot.clone(),
         Arc::clone(&tokens),
-        Arc::clone(&schemas),
-        Arc::clone(&store),
-        config_snapshot.restrict,
-        config_snapshot.list_page_size,
-        config_snapshot.page_limit,
-    );
+        encryption,
+    )?);
+    tenant_registry
+        .core_for(config_snapshot.active_domain())
+        .map_err(|err| {
+            EventError::Config(format!(
+                "failed to initialize tenant '{}': {err}",
+                config_snapshot.active_domain()
+            ))
+        })?;
 
     let cli_bind_addr = config_snapshot.socket.bind_addr.clone();
     let addr_store =
@@ -127,7 +123,8 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     let cli_proxy_handle = cli_proxy::start(
         &cli_bind_addr,
         Arc::clone(&config_path),
-        core.clone(),
+        Arc::clone(&tokens),
+        Arc::clone(&tenant_registry) as Arc<dyn CoreProvider>,
         Arc::clone(&shared_config),
     )
     .await

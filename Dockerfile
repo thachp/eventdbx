@@ -2,8 +2,12 @@
 
 ARG BUILDER_IMAGE=rustlang/rust:nightly
 ARG RUNTIME_IMAGE=debian:stable-slim
-ARG RUNTIME_PACKAGES="ca-certificates curl tzdata libstdc++6 libsnappy1v5 liblz4-1 libzstd1 zlib1g libbz2-1.0 xz-utils"
+ARG RUNTIME_PACKAGES="ca-certificates tzdata libstdc++6 libsnappy1v5 liblz4-1 libzstd1 zlib1g libbz2-1.0 xz-utils"
 ARG BUILD_PACKAGES="build-essential clang cmake pkg-config libsnappy-dev liblz4-dev libzstd-dev libbz2-dev zlib1g-dev capnproto"
+ARG APP_USER=eventdbx
+ARG APP_GROUP=eventdbx
+ARG APP_UID=65532
+ARG APP_GID=65532
 
 FROM ${BUILDER_IMAGE} as builder
 
@@ -33,6 +37,10 @@ ARG RUNTIME_IMAGE=debian:stable-slim
 FROM ${RUNTIME_IMAGE}
 
 ARG RUNTIME_PACKAGES
+ARG APP_USER
+ARG APP_GROUP
+ARG APP_UID
+ARG APP_GID
 
 LABEL org.opencontainers.image.source="https://github.com/thachp/eventdbx" \
       org.opencontainers.image.description="EventDBX server and CLI" \
@@ -50,13 +58,22 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends $RUNTIME_PACKAGES \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder --chmod=755 /app/target/release/dbx /usr/local/bin/dbx
+COPY --from=builder --chown=${APP_UID}:${APP_GID} --chmod=750 /app/target/release/dbx /usr/local/bin/dbx
 
-RUN useradd --system --home "${EVENTDBX_DATA_DIR}" --shell /usr/sbin/nologin eventdbx \
- && mkdir -p "${EVENTDBX_DATA_DIR}" "${EVENTDBX_DATA_DIR}/.eventdbx/logs" /var/log/eventdbx \
- && chown -R eventdbx:eventdbx "${EVENTDBX_DATA_DIR}" /var/log/eventdbx
+RUN groupadd --system --gid "${APP_GID}" "${APP_GROUP}" \
+ && useradd --system \
+    --home "${EVENTDBX_DATA_DIR}" \
+    --shell /usr/sbin/nologin \
+    --uid "${APP_UID}" \
+    --gid "${APP_GID}" \
+    "${APP_USER}" \
+ && install -d -m 750 -o "${APP_USER}" -g "${APP_GROUP}" \
+      "${EVENTDBX_DATA_DIR}" \
+      "${EVENTDBX_DATA_DIR}/.eventdbx/logs" \
+      /var/log/eventdbx \
+ && chown -R "${APP_USER}:${APP_GROUP}" "${EVENTDBX_DATA_DIR}" /var/log/eventdbx
 
-USER eventdbx
+USER ${APP_USER}
 WORKDIR ${EVENTDBX_DATA_DIR}
 VOLUME ["${EVENTDBX_DATA_DIR}"]
 

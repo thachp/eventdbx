@@ -38,6 +38,7 @@ pub fn ensure_bootstrap_token(config: &Config) -> Result<String> {
         user: BOOTSTRAP_USER.to_string(),
         actions: vec![ROOT_ACTION.to_string()],
         resources: vec![ROOT_RESOURCE.to_string()],
+        tenants: Vec::new(),
         ttl_secs: Some(0),
         not_before: None,
         issued_by: BOOTSTRAP_ISSUER.to_string(),

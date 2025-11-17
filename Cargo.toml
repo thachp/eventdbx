@@ -1,7 +1,7 @@
 [package]
 name = "eventdbx"
 description = "A memory-safe, event-sourced, nosql, write-side database system."
-version = "3.12.0"
+version = "3.15.1"
 edition = "2024"
 homepage = "https://github.com/thachp/eventdbx"
 repository = "https://github.com/thachp/eventdbx"
@@ -81,6 +81,7 @@ snow = "0.9"
 semver = "1.0"
 validator = { version = "0.16", features = ["card"] }
 json-patch = "1.2"
+similar = "2.7"
 jsonwebtoken = "9.3"
 once_cell = "1.19"
 metrics = "0.22"

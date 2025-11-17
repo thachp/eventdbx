@@ -24,9 +24,10 @@ use eventdbx::{
     restrict,
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
-        self, ActorClaims, AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState,
-        AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
+        self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateSortField,
+        AggregateState, AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
     },
+    tenant_store::TenantAssignmentStore,
     token::{IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
@@ -288,9 +289,9 @@ pub struct AggregateListArgs {
     #[arg(value_name = "AGGREGATE")]
     pub aggregate: Option<String>,
 
-    /// Number of aggregates to skip
-    #[arg(long, default_value_t = 0)]
-    pub skip: usize,
+    /// Resume listing after the provided cursor (`a:type:id`)
+    #[arg(long)]
+    pub cursor: Option<String>,
 
     /// Maximum number of aggregates to return
     #[arg(long)]
@@ -481,7 +482,10 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 }
             }
 
-            let take = args.take.or(Some(config.list_page_size));
+            let take = args.take.unwrap_or(config.list_page_size);
+            if take == 0 {
+                bail!("--take must be greater than zero");
+            }
             let sort_directives = if let Some(spec) = args.sort.as_deref() {
                 Some(
                     parse_sort_directives(spec)
@@ -491,10 +495,69 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 None
             };
             let sort_keys = sort_directives.as_ref().map(|keys| keys.as_slice());
-            let aggregates = store.aggregates_paginated_with_transform(
-                args.skip,
+            if args.cursor.is_some() && sort_directives.is_some() {
+                bail!("--cursor cannot be combined with --sort");
+            }
+
+            if let Some(keys) = sort_keys {
+                let aggregates = store.aggregates_paginated_with_transform(
+                    0,
+                    Some(take),
+                    Some(keys),
+                    scope,
+                    |aggregate| {
+                        if let Some(expr) = filter_expr.as_ref() {
+                            if !expr.matches_aggregate(&aggregate) {
+                                return None;
+                            }
+                        }
+                        Some(aggregate)
+                    },
+                );
+                if args.json {
+                    println!("{}", serde_json::to_string_pretty(&aggregates)?);
+                } else {
+                    let show_archived = matches!(
+                        scope,
+                        AggregateQueryScope::IncludeArchived | AggregateQueryScope::ArchivedOnly
+                    );
+                    for aggregate in aggregates {
+                        if show_archived {
+                            println!(
+                                "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
+                                aggregate.aggregate_type,
+                                aggregate.aggregate_id,
+                                aggregate.version,
+                                aggregate.merkle_root,
+                                aggregate.archived
+                            );
+                        } else {
+                            println!(
+                                "aggregate_type={} aggregate_id={} version={} merkle_root={}",
+                                aggregate.aggregate_type,
+                                aggregate.aggregate_id,
+                                aggregate.version,
+                                aggregate.merkle_root
+                            );
+                        }
+                    }
+                }
+                return Ok(());
+            }
+
+            let cursor = match args.cursor.as_deref() {
+                Some(raw) => Some(AggregateCursor::from_str(raw).with_context(|| {
+                    format!(
+                        "invalid cursor '{}'; expected format a:aggregate_type:aggregate_id",
+                        raw
+                    )
+                })?),
+                None => None,
+            };
+
+            let (aggregates, _next_cursor) = store.aggregates_page_with_transform(
+                cursor.as_ref(),
                 take,
-                sort_keys,
                 scope,
                 |aggregate| {
                     if let Some(expr) = filter_expr.as_ref() {
@@ -504,7 +567,8 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     }
                     Some(aggregate)
                 },
-            );
+            )?;
+
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&aggregates)?);
             } else {
@@ -541,6 +605,13 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 config.snowflake_worker_id,
             )?;
             store.remove_aggregate(&args.aggregate, &args.aggregate_id)?;
+            let assignments = TenantAssignmentStore::open(config.tenant_meta_path())?;
+            assignments.ensure_aggregate_count(config.active_domain(), || {
+                store
+                    .counts()
+                    .map(|counts| counts.total_aggregates() as u64)
+            })?;
+            assignments.increment_aggregate_count(config.active_domain(), -1)?;
             println!(
                 "aggregate_type={} aggregate_id={} removed",
                 args.aggregate, args.aggregate_id
@@ -981,6 +1052,7 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
         schema_manager.validate_event(&aggregate, &event, &payload)?;
     }
 
+    let assignments = TenantAssignmentStore::open(config.tenant_meta_path())?;
     let encryption = config.encryption_key()?;
     match EventStore::open(
         config.event_store_path(),
@@ -995,6 +1067,8 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
                 bail!("aggregate {}::{} already exists", aggregate, aggregate_id);
             }
 
+            enforce_offline_tenant_quota(config, &store, &assignments)?;
+
             let plugins = PluginManager::from_config(&config)?;
             let record = store.append(AppendEvent {
                 aggregate_type: aggregate.clone(),
@@ -1007,6 +1081,8 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
             })?;
 
             maybe_auto_snapshot(&store, &schema_manager, &record);
+
+            assignments.increment_aggregate_count(config.active_domain(), 1)?;
 
             if !plugins.is_empty() {
                 let schema = schema_manager.get(&record.aggregate_type).ok();
@@ -1418,6 +1494,7 @@ fn issue_ephemeral_token(config: &Config) -> Result<String> {
         user,
         actions: vec![ROOT_ACTION.to_string()],
         resources: vec![ROOT_RESOURCE.to_string()],
+        tenants: Vec::new(),
         ttl_secs: Some(120),
         not_before: None,
         issued_by: "cli".to_string(),
@@ -1510,6 +1587,26 @@ fn export_aggregates(config: &Config, args: AggregateExportArgs) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn enforce_offline_tenant_quota(
+    config: &Config,
+    store: &EventStore,
+    assignments: &TenantAssignmentStore,
+) -> Result<()> {
+    let tenant = config.active_domain();
+    assignments.ensure_aggregate_count(tenant, || {
+        store
+            .counts()
+            .map(|counts| counts.total_aggregates() as u64)
+    })?;
+    if let Some(limit) = assignments.quota_for(tenant)? {
+        let current = assignments.aggregate_count(tenant)?.unwrap_or_default();
+        if current >= limit {
+            bail!("tenant '{}' reached aggregate quota ({})", tenant, limit);
+        }
+    }
     Ok(())
 }
 

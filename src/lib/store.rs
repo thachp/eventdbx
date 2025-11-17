@@ -1,6 +1,7 @@
 use std::{
     cmp::Ordering as StdOrdering,
     collections::{BTreeMap, BTreeSet},
+    fmt,
     path::PathBuf,
     str,
     time::Instant,
@@ -369,6 +370,241 @@ pub struct StoreCounts {
     pub archived_events: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorIndex {
+    Active,
+    Archived,
+}
+
+impl CursorIndex {
+    fn code(self) -> char {
+        match self {
+            CursorIndex::Active => 'a',
+            CursorIndex::Archived => 'r',
+        }
+    }
+
+    fn from_str_tag(tag: &str) -> Result<Self> {
+        match tag {
+            "a" | "active" => Ok(CursorIndex::Active),
+            "r" | "archived" => Ok(CursorIndex::Archived),
+            other => Err(EventError::InvalidCursor(format!(
+                "unknown cursor segment '{other}'"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for CursorIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CursorIndex::Active => write!(f, "active"),
+            CursorIndex::Archived => write!(f, "archived"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateCursor {
+    index: CursorIndex,
+    aggregate_type: String,
+    aggregate_id: String,
+}
+
+impl AggregateCursor {
+    pub fn new(
+        index: CursorIndex,
+        aggregate_type: impl Into<String>,
+        aggregate_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            index,
+            aggregate_type: aggregate_type.into(),
+            aggregate_id: aggregate_id.into(),
+        }
+    }
+
+    pub fn index(&self) -> CursorIndex {
+        self.index
+    }
+
+    pub fn aggregate_type(&self) -> &str {
+        &self.aggregate_type
+    }
+
+    pub fn aggregate_id(&self) -> &str {
+        &self.aggregate_id
+    }
+
+    pub fn encode(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.index.code(),
+            self.aggregate_type,
+            self.aggregate_id
+        )
+    }
+}
+
+impl fmt::Display for AggregateCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}",
+            self.index.code(),
+            self.aggregate_type,
+            self.aggregate_id
+        )
+    }
+}
+
+impl std::str::FromStr for AggregateCursor {
+    type Err = EventError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(EventError::InvalidCursor("cursor cannot be empty".into()));
+        }
+        let mut segments = trimmed.split(':');
+        let Some(index_tag) = segments.next() else {
+            return Err(EventError::InvalidCursor("cursor is incomplete".into()));
+        };
+        let index = CursorIndex::from_str_tag(index_tag)?;
+        let aggregate_type = segments
+            .next()
+            .ok_or_else(|| EventError::InvalidCursor("cursor missing aggregate_type".into()))?;
+        if aggregate_type.is_empty() {
+            return Err(EventError::InvalidCursor(
+                "cursor aggregate_type cannot be empty".into(),
+            ));
+        }
+        let aggregate_id = segments
+            .next()
+            .ok_or_else(|| EventError::InvalidCursor("cursor missing aggregate_id".into()))?;
+        if aggregate_id.is_empty() {
+            return Err(EventError::InvalidCursor(
+                "cursor aggregate_id cannot be empty".into(),
+            ));
+        }
+        if segments.next().is_some() {
+            return Err(EventError::InvalidCursor(
+                "cursor has too many segments".into(),
+            ));
+        }
+
+        Ok(Self::new(index, aggregate_type, aggregate_id))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventCursor {
+    index: CursorIndex,
+    aggregate_type: String,
+    aggregate_id: String,
+    version: u64,
+}
+
+impl EventCursor {
+    pub fn new(
+        index: CursorIndex,
+        aggregate_type: impl Into<String>,
+        aggregate_id: impl Into<String>,
+        version: u64,
+    ) -> Self {
+        Self {
+            index,
+            aggregate_type: aggregate_type.into(),
+            aggregate_id: aggregate_id.into(),
+            version,
+        }
+    }
+
+    pub fn index(&self) -> CursorIndex {
+        self.index
+    }
+
+    pub fn aggregate_type(&self) -> &str {
+        &self.aggregate_type
+    }
+
+    pub fn aggregate_id(&self) -> &str {
+        &self.aggregate_id
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn encode(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.index.code(),
+            self.aggregate_type,
+            self.aggregate_id,
+            self.version
+        )
+    }
+}
+
+impl fmt::Display for EventCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}:{}",
+            self.index.code(),
+            self.aggregate_type,
+            self.aggregate_id,
+            self.version
+        )
+    }
+}
+
+impl std::str::FromStr for EventCursor {
+    type Err = EventError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(EventError::InvalidCursor("cursor cannot be empty".into()));
+        }
+        let mut segments = trimmed.split(':');
+        let Some(index_tag) = segments.next() else {
+            return Err(EventError::InvalidCursor("cursor is incomplete".into()));
+        };
+        let index = CursorIndex::from_str_tag(index_tag)?;
+        let aggregate_type = segments
+            .next()
+            .ok_or_else(|| EventError::InvalidCursor("cursor missing aggregate_type".into()))?;
+        if aggregate_type.is_empty() {
+            return Err(EventError::InvalidCursor(
+                "cursor aggregate_type cannot be empty".into(),
+            ));
+        }
+        let aggregate_id = segments
+            .next()
+            .ok_or_else(|| EventError::InvalidCursor("cursor missing aggregate_id".into()))?;
+        if aggregate_id.is_empty() {
+            return Err(EventError::InvalidCursor(
+                "cursor aggregate_id cannot be empty".into(),
+            ));
+        }
+        let version_str = segments
+            .next()
+            .ok_or_else(|| EventError::InvalidCursor("cursor missing version".into()))?;
+        if segments.next().is_some() {
+            return Err(EventError::InvalidCursor(
+                "cursor has too many segments".into(),
+            ));
+        }
+        let version = version_str.parse::<u64>().map_err(|_| {
+            EventError::InvalidCursor(format!("cursor version '{}' is not a number", version_str))
+        })?;
+
+        Ok(Self::new(index, aggregate_type, aggregate_id, version))
+    }
+}
+
 impl StoreCounts {
     pub fn total_aggregates(&self) -> usize {
         self.active_aggregates + self.archived_aggregates
@@ -440,6 +676,24 @@ pub enum EventArchiveScope {
 enum AggregateIndex {
     Active,
     Archived,
+}
+
+impl From<AggregateIndex> for CursorIndex {
+    fn from(value: AggregateIndex) -> Self {
+        match value {
+            AggregateIndex::Active => CursorIndex::Active,
+            AggregateIndex::Archived => CursorIndex::Archived,
+        }
+    }
+}
+
+impl From<CursorIndex> for AggregateIndex {
+    fn from(value: CursorIndex) -> Self {
+        match value {
+            CursorIndex::Active => AggregateIndex::Active,
+            CursorIndex::Archived => AggregateIndex::Archived,
+        }
+    }
 }
 
 impl AggregateSortField {
@@ -1749,6 +2003,205 @@ impl EventStore {
         items
     }
 
+    pub fn aggregates_page_with_transform<F>(
+        &self,
+        cursor: Option<&AggregateCursor>,
+        take: usize,
+        scope: AggregateQueryScope,
+        mut transform: F,
+    ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
+        if take == 0 {
+            return Ok((Vec::new(), None));
+        }
+
+        match scope {
+            AggregateQueryScope::ActiveOnly => {
+                self.collect_index_page(AggregateIndex::Active, cursor, take, &mut transform)
+            }
+            AggregateQueryScope::ArchivedOnly => {
+                if let Some(cursor) = cursor {
+                    if cursor.index() != CursorIndex::Archived {
+                        return Err(EventError::InvalidCursor(
+                            "archived listings require archived cursor values".into(),
+                        ));
+                    }
+                }
+                self.collect_index_page(AggregateIndex::Archived, cursor, take, &mut transform)
+            }
+            AggregateQueryScope::IncludeArchived => {
+                let mut remaining = take;
+                let mut items = Vec::new();
+
+                if let Some(cursor) = cursor {
+                    if cursor.index() == CursorIndex::Archived {
+                        let (mut archived, next) = self.collect_index_page(
+                            AggregateIndex::Archived,
+                            Some(cursor),
+                            remaining,
+                            &mut transform,
+                        )?;
+                        items.append(&mut archived);
+                        return Ok((items, next));
+                    }
+                }
+
+                let (mut active_items, active_cursor) = self.collect_index_page(
+                    AggregateIndex::Active,
+                    cursor,
+                    remaining,
+                    &mut transform,
+                )?;
+                remaining = remaining.saturating_sub(active_items.len());
+                items.append(&mut active_items);
+                if let Some(next) = active_cursor {
+                    return Ok((items, Some(next)));
+                }
+                if remaining == 0 {
+                    return Ok((items, None));
+                }
+                let (mut archived_items, archived_cursor) = self.collect_index_page(
+                    AggregateIndex::Archived,
+                    None,
+                    remaining,
+                    &mut transform,
+                )?;
+                items.append(&mut archived_items);
+                Ok((items, archived_cursor))
+            }
+        }
+    }
+
+    pub fn aggregates_page(
+        &self,
+        cursor: Option<&AggregateCursor>,
+        take: usize,
+        scope: AggregateQueryScope,
+    ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)> {
+        self.aggregates_page_with_transform(cursor, take, scope, |aggregate| Some(aggregate))
+    }
+
+    fn collect_index_page<F>(
+        &self,
+        index: AggregateIndex,
+        cursor: Option<&AggregateCursor>,
+        take: usize,
+        transform: &mut F,
+    ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
+        let start = Instant::now();
+        let prefix = meta_prefix_for(index);
+        let mut start_key = prefix.clone();
+        let mut skip_current = false;
+        if let Some(position) = cursor {
+            if position.index() != CursorIndex::from(index) {
+                return Err(EventError::InvalidCursor(format!(
+                    "cursor points to {} aggregates but scope uses {} records",
+                    position.index(),
+                    CursorIndex::from(index)
+                )));
+            }
+            start_key = meta_key_for(index, position.aggregate_type(), position.aggregate_id());
+            skip_current = true;
+        }
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(start_key.as_slice(), Direction::Forward));
+        let mut items = Vec::new();
+        let mut status = "ok";
+        let mut last_cursor = None;
+
+        for item in iter {
+            let Ok((key, value)) = item else {
+                status = "err";
+                continue;
+            };
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            if key.len() > prefix.len() && key[prefix.len()] != SEP {
+                break;
+            }
+            if skip_current && key.as_ref() == start_key.as_slice() {
+                skip_current = false;
+                continue;
+            } else if skip_current {
+                skip_current = false;
+            }
+
+            let meta: AggregateMeta = match serde_json::from_slice(&value) {
+                Ok(meta) => meta,
+                Err(_) => {
+                    status = "err";
+                    continue;
+                }
+            };
+
+            let AggregateMeta {
+                aggregate_type,
+                aggregate_id,
+                version,
+                merkle_root,
+                archived,
+                created_at,
+                updated_at,
+                ..
+            } = meta;
+            let state = match self.load_state_map_from(index, &aggregate_type, &aggregate_id) {
+                Ok(state) => state,
+                Err(_) => {
+                    status = "err";
+                    continue;
+                }
+            };
+
+            let aggregate = AggregateState {
+                aggregate_type,
+                aggregate_id,
+                version,
+                state,
+                merkle_root,
+                created_at,
+                updated_at,
+                archived,
+            };
+
+            let Some(aggregate) = transform(aggregate) else {
+                continue;
+            };
+
+            last_cursor = Some(AggregateCursor::new(
+                CursorIndex::from(index),
+                aggregate.aggregate_type.clone(),
+                aggregate.aggregate_id.clone(),
+            ));
+            items.push(aggregate);
+
+            if items.len() >= take {
+                break;
+            }
+        }
+
+        let duration = start.elapsed().as_secs_f64();
+        let metric = match index {
+            AggregateIndex::Active => "rocksdb_iter_meta",
+            AggregateIndex::Archived => "rocksdb_iter_meta_archived",
+        };
+        record_store_op(metric, status, duration);
+
+        let next_cursor = if items.len() >= take {
+            last_cursor
+        } else {
+            None
+        };
+
+        Ok((items, next_cursor))
+    }
+
     fn collect_events_paginated(
         &self,
         index: AggregateIndex,
@@ -1842,6 +2295,172 @@ impl EventStore {
         };
         record_store_op(metric, status, duration);
         items
+    }
+
+    pub fn events_page(
+        &self,
+        scope: EventQueryScope<'_>,
+        archive_scope: EventArchiveScope,
+        cursor: Option<&EventCursor>,
+        take: usize,
+        filter: Option<&FilterExpr>,
+    ) -> Result<(Vec<EventRecord>, Option<EventCursor>)> {
+        if take == 0 {
+            return Ok((Vec::new(), None));
+        }
+
+        match archive_scope {
+            EventArchiveScope::ActiveOnly => {
+                self.collect_events_page(AggregateIndex::Active, scope, cursor, take, filter)
+            }
+            EventArchiveScope::ArchivedOnly => {
+                if let Some(cursor) = cursor {
+                    if cursor.index() != CursorIndex::Archived {
+                        return Err(EventError::InvalidCursor(
+                            "archived listings require archived cursor values".into(),
+                        ));
+                    }
+                }
+                self.collect_events_page(AggregateIndex::Archived, scope, cursor, take, filter)
+            }
+            EventArchiveScope::IncludeArchived => {
+                if let Some(cursor) = cursor {
+                    if cursor.index() == CursorIndex::Archived {
+                        return self.collect_events_page(
+                            AggregateIndex::Archived,
+                            scope,
+                            Some(cursor),
+                            take,
+                            filter,
+                        );
+                    }
+                }
+
+                let (mut active, next_active) =
+                    self.collect_events_page(AggregateIndex::Active, scope, cursor, take, filter)?;
+                if let Some(cursor) = next_active {
+                    return Ok((active, Some(cursor)));
+                }
+                if active.len() >= take {
+                    return Ok((active, None));
+                }
+                let remaining = take.saturating_sub(active.len());
+                let (mut archived, next_archived) = self.collect_events_page(
+                    AggregateIndex::Archived,
+                    scope,
+                    None,
+                    remaining,
+                    filter,
+                )?;
+                active.append(&mut archived);
+                Ok((active, next_archived))
+            }
+        }
+    }
+
+    fn collect_events_page(
+        &self,
+        index: AggregateIndex,
+        scope: EventQueryScope<'_>,
+        cursor: Option<&EventCursor>,
+        take: usize,
+        filter: Option<&FilterExpr>,
+    ) -> Result<(Vec<EventRecord>, Option<EventCursor>)> {
+        let start = Instant::now();
+        let prefix = event_prefix_for_scope(index, scope);
+        let mut start_key = prefix.clone();
+        let mut skip_current = false;
+        if let Some(token) = cursor {
+            if token.index() != CursorIndex::from(index) {
+                return Err(EventError::InvalidCursor(format!(
+                    "cursor points to {} events but scope uses {} records",
+                    token.index(),
+                    CursorIndex::from(index)
+                )));
+            }
+            if !event_cursor_matches_scope(token, scope) {
+                return Err(EventError::InvalidCursor(
+                    "cursor does not match the requested event scope".into(),
+                ));
+            }
+            start_key = event_key_for(
+                index,
+                token.aggregate_type(),
+                token.aggregate_id(),
+                token.version(),
+            );
+            skip_current = true;
+        }
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(start_key.as_slice(), Direction::Forward));
+        let mut items = Vec::new();
+        let mut status = "ok";
+        let mut last_cursor = None;
+
+        for item in iter {
+            let Ok((key, value)) = item else {
+                status = "err";
+                continue;
+            };
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+            if skip_current && key.as_ref() == start_key.as_slice() {
+                skip_current = false;
+                continue;
+            } else if skip_current {
+                skip_current = false;
+            }
+
+            let raw: EventRecord = match serde_json::from_slice(&value) {
+                Ok(record) => record,
+                Err(_) => {
+                    status = "err";
+                    continue;
+                }
+            };
+            let record = match self.decode_record(raw) {
+                Ok(record) => record,
+                Err(_) => {
+                    status = "err";
+                    continue;
+                }
+            };
+
+            if let Some(expr) = filter {
+                if !expr.matches_event(&record) {
+                    continue;
+                }
+            }
+
+            last_cursor = Some(EventCursor::new(
+                CursorIndex::from(index),
+                record.aggregate_type.clone(),
+                record.aggregate_id.clone(),
+                record.version,
+            ));
+            items.push(record);
+
+            if items.len() >= take {
+                break;
+            }
+        }
+
+        let duration = start.elapsed().as_secs_f64();
+        let metric = match index {
+            AggregateIndex::Active => "rocksdb_iter_events",
+            AggregateIndex::Archived => "rocksdb_iter_events_archived",
+        };
+        record_store_op(metric, status, duration);
+
+        let next_cursor = if items.len() >= take {
+            last_cursor
+        } else {
+            None
+        };
+
+        Ok((items, next_cursor))
     }
 
     fn find_event_by_id_in_index(
@@ -2192,6 +2811,17 @@ fn event_prefix_for_scope(index: AggregateIndex, scope: EventQueryScope<'_>) -> 
             aggregate_type,
             aggregate_id,
         } => key_with_segments(&[index.event_prefix(), aggregate_type, aggregate_id]),
+    }
+}
+
+fn event_cursor_matches_scope(cursor: &EventCursor, scope: EventQueryScope<'_>) -> bool {
+    match scope {
+        EventQueryScope::All => true,
+        EventQueryScope::AggregateType(aggregate_type) => cursor.aggregate_type() == aggregate_type,
+        EventQueryScope::Aggregate {
+            aggregate_type,
+            aggregate_id,
+        } => cursor.aggregate_type() == aggregate_type && cursor.aggregate_id() == aggregate_id,
     }
 }
 

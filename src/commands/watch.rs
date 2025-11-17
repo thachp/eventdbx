@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env, fmt, fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -9,7 +10,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand, ValueEnum};
-use eventdbx::config::{Config, DEFAULT_DOMAIN_NAME, load_or_default};
+use eventdbx::config::{Config, load_or_default};
 #[cfg(unix)]
 use libc;
 use serde::{Deserialize, Serialize};
@@ -71,9 +72,13 @@ pub struct WatchRunArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct WatchSelectionArgs {
-    /// Domain to replicate
-    #[arg(value_name = "DOMAIN")]
+    /// Tenant to replicate (legacy positional domain argument)
+    #[arg(value_name = "TENANT", conflicts_with = "tenant")]
     pub domain: Option<String>,
+
+    /// Tenant to replicate (preferred flag; overrides positional argument)
+    #[arg(long = "tenant", value_name = "TENANT")]
+    pub tenant: Option<String>,
 
     /// Aggregate type to limit the operation to
     #[arg(long = "aggregate", value_name = "AGGREGATE")]
@@ -94,9 +99,13 @@ pub struct WatchSelectionArgs {
 
 #[derive(Args, Debug)]
 pub struct WatchStatusArgs {
-    /// Domain to inspect (omit when using --all)
-    #[arg(value_name = "DOMAIN", required_unless_present = "all")]
+    /// Tenant to inspect (omit when using --all)
+    #[arg(value_name = "TENANT", conflicts_with = "tenant")]
     pub domain: Option<String>,
+
+    /// Tenant to inspect (preferred flag; overrides positional argument)
+    #[arg(long = "tenant", value_name = "TENANT")]
+    pub tenant: Option<String>,
 
     /// Show every watch entry found under the data directory
     #[arg(long, default_value_t = false)]
@@ -136,10 +145,9 @@ pub fn execute(config_path: Option<PathBuf>, args: WatchArgs) -> Result<()> {
 fn run_watch_entry(config_path: Option<PathBuf>, args: WatchRunArgs) -> Result<()> {
     let domain = args
         .selection
-        .domain
-        .as_ref()
-        .ok_or_else(|| anyhow!("domain must be provided when running watch cycles"))?
-        .clone();
+        .resolved_tenant()
+        .ok_or_else(|| anyhow!("tenant (or domain) must be provided when running watch cycles"))?
+        .to_string();
     let (config, _) = load_or_default(config_path.clone())?;
     let interval_secs = args.interval_secs.max(1);
     let state_path = watch_state_path(&config, &domain);
@@ -332,25 +340,23 @@ fn run_cycle(
 }
 
 fn run_push(config_path: Option<PathBuf>, selection: &WatchSelectionArgs) -> Result<()> {
-    let domain = selection
-        .domain
-        .as_deref()
-        .ok_or_else(|| anyhow!("domain must be provided when running watch cycles"))?;
-    let mut argv = vec![domain.to_string()];
+    let tenant = selection
+        .resolved_tenant()
+        .ok_or_else(|| anyhow!("tenant (or domain) must be provided when running watch cycles"))?;
+    let mut argv = vec![tenant.to_string()];
     argv.extend(selection.additional_cli_args());
     domain::push(config_path, PushCommand::External(argv))
-        .with_context(|| format!("failed to push domain '{domain}'"))
+        .with_context(|| format!("failed to push tenant '{tenant}'"))
 }
 
 fn run_pull(config_path: Option<PathBuf>, selection: &WatchSelectionArgs) -> Result<()> {
-    let domain = selection
-        .domain
-        .as_deref()
-        .ok_or_else(|| anyhow!("domain must be provided when running watch cycles"))?;
-    let mut argv = vec![domain.to_string()];
+    let tenant = selection
+        .resolved_tenant()
+        .ok_or_else(|| anyhow!("tenant (or domain) must be provided when running watch cycles"))?;
+    let mut argv = vec![tenant.to_string()];
     argv.extend(selection.additional_cli_args());
     domain::pull(config_path, PullCommand::External(argv))
-        .with_context(|| format!("failed to pull domain '{domain}'"))
+        .with_context(|| format!("failed to pull tenant '{tenant}'"))
 }
 
 impl WatchSelectionArgs {
@@ -369,6 +375,10 @@ impl WatchSelectionArgs {
             argv.push(concurrency.to_string());
         }
         argv
+    }
+
+    fn resolved_tenant(&self) -> Option<&str> {
+        self.tenant.as_deref().or_else(|| self.domain.as_deref())
     }
 }
 
@@ -460,9 +470,10 @@ fn watch_status(config_path: Option<PathBuf>, args: WatchStatusArgs) -> Result<(
         }
     } else {
         let domain = args
-            .domain
+            .tenant
             .as_deref()
-            .ok_or_else(|| anyhow!("domain must be provided unless --all is specified"))?;
+            .or_else(|| args.domain.as_deref())
+            .ok_or_else(|| anyhow!("tenant must be provided unless --all is specified"))?;
         let path = watch_state_path(&config, domain);
         let state = read_watch_state(&path)?
             .ok_or_else(|| anyhow!("watch state not found for domain '{}'", domain))?;
@@ -481,7 +492,7 @@ fn watch_status(config_path: Option<PathBuf>, args: WatchStatusArgs) -> Result<(
 }
 
 fn print_state(state: &WatchState) {
-    println!("Domain: {}", state.domain);
+    println!("Tenant: {}", state.domain);
     match state.pid {
         Some(pid) => println!("  PID: {pid}"),
         None => println!("  PID: <not running>"),
@@ -528,21 +539,32 @@ fn print_state(state: &WatchState) {
 
 fn collect_all_states(config: &Config) -> Result<Vec<WatchState>> {
     let mut entries = Vec::new();
-    let default_path = watch_state_path(config, DEFAULT_DOMAIN_NAME);
-    if let Some(state) = read_watch_state(&default_path)? {
-        entries.push(state);
-    }
-
-    let root = config.domains_root();
-    if root.is_dir() {
-        for entry in fs::read_dir(&root).context("failed to read domains directory")? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+    let mut seen = HashSet::new();
+    let shards_root = config.shards_root();
+    if shards_root.is_dir() {
+        for shard in fs::read_dir(&shards_root).context("failed to read shard directory")? {
+            let shard = shard?;
+            if !shard.file_type()?.is_dir() {
                 continue;
             }
-            let path = entry.path().join(STATE_FILE_NAME);
-            if let Some(state) = read_watch_state(&path)? {
-                entries.push(state);
+            let tenants_dir = shard.path().join("tenants");
+            if !tenants_dir.is_dir() {
+                continue;
+            }
+            for tenant in fs::read_dir(&tenants_dir).with_context(|| {
+                format!("failed to read tenants under {}", tenants_dir.display())
+            })? {
+                let tenant = tenant?;
+                if !tenant.file_type()?.is_dir() {
+                    continue;
+                }
+                let path = tenant.path().join(STATE_FILE_NAME);
+                if !seen.insert(path.clone()) {
+                    continue;
+                }
+                if let Some(state) = read_watch_state(&path)? {
+                    entries.push(state);
+                }
             }
         }
     }
@@ -551,9 +573,5 @@ fn collect_all_states(config: &Config) -> Result<Vec<WatchState>> {
 }
 
 fn domain_data_dir_for(config: &Config, domain: &str) -> PathBuf {
-    if domain.eq_ignore_ascii_case(DEFAULT_DOMAIN_NAME) {
-        config.data_dir.clone()
-    } else {
-        config.domains_root().join(domain)
-    }
+    config.domain_data_dir_for(domain)
 }

@@ -11,12 +11,12 @@ use crate::commands::{
     aggregate::AggregateCommands,
     config::ConfigArgs,
     domain::{DomainCheckoutArgs, DomainMergeArgs, PullCommand, PushCommand},
-    list::ListArgs,
     plugin::{PluginCommands, PluginWorkerArgs},
     queue::QueueArgs,
     schema::SchemaCommands,
     start::{DestroyArgs, StartArgs},
     system::{BackupArgs, RestoreArgs},
+    tenant::TenantCommands as TenantSubcommands,
     token::TokenCommands,
     upgrade::UpgradeArgs,
     watch::WatchArgs,
@@ -41,8 +41,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List domains with aggregate and event counts
-    List(ListArgs),
     /// Start the EventDBX server
     Start(StartArgs),
     /// Stop the EventDBX server
@@ -90,6 +88,11 @@ enum Commands {
     Events(commands::events::EventsArgs),
     /// Show or manage the plugin retry queue
     Queue(QueueArgs),
+    /// Manage tenant shard assignments
+    Tenant {
+        #[command(subcommand)]
+        command: TenantSubcommands,
+    },
     /// Manage aggregates
     Aggregate {
         #[command(subcommand)]
@@ -127,7 +130,6 @@ async fn main() -> Result<()> {
     }
 
     match command {
-        Commands::List(args) => commands::list::execute(config, args)?,
         Commands::Start(args) => commands::start::execute(config, args).await?,
         Commands::Stop => commands::start::stop(config)?,
         Commands::Status => commands::start::status(config)?,
@@ -144,6 +146,7 @@ async fn main() -> Result<()> {
         Commands::Plugin { command } => commands::plugin::execute(config, command)?,
         Commands::Events(args) => commands::events::list(config, args)?,
         Commands::Queue(args) => commands::queue::execute(config, args)?,
+        Commands::Tenant { command } => commands::tenant::execute(config, command)?,
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
         Commands::Upgrade(args) => commands::upgrade::execute(args).await?,
         Commands::Backup(args) => commands::system::backup(config, args)?,
