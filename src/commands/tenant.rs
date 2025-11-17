@@ -283,11 +283,7 @@ struct TenantSummary {
 }
 
 fn bytes_to_megabytes(bytes: u64) -> u64 {
-    if bytes == 0 {
-        0
-    } else {
-        ((bytes - 1) / BYTES_PER_MEGABYTE) + 1
-    }
+    (bytes + BYTES_PER_MEGABYTE - 1) / BYTES_PER_MEGABYTE
 }
 
 fn print_table(entries: Vec<TenantSummary>) {

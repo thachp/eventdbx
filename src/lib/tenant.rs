@@ -102,7 +102,8 @@ impl TenantRegistry {
             self.snowflake_worker_id,
         )?);
         let schemas = Arc::new(SchemaManager::load(tenant_config.schema_store_path())?);
-        self.assignments
+        let usage = self
+            .assignments
             .ensure_storage_usage_bytes(tenant, || store.storage_usage_bytes())?;
 
         Ok(Arc::new(CoreContext::new(
@@ -114,6 +115,7 @@ impl TenantRegistry {
             self.page_limit,
             tenant.to_string(),
             quota,
+            Some(usage),
             Arc::clone(&self.assignments),
         )))
     }
@@ -136,7 +138,8 @@ impl TenantRegistry {
             self.snowflake_worker_id,
         )?);
         let schemas = Arc::new(SchemaManager::load(schemas_path)?);
-        self.assignments
+        let usage = self
+            .assignments
             .ensure_storage_usage_bytes(tenant, || store.storage_usage_bytes())?;
 
         Ok(Arc::new(CoreContext::new(
@@ -148,6 +151,7 @@ impl TenantRegistry {
             self.page_limit,
             tenant.to_string(),
             quota,
+            Some(usage),
             Arc::clone(&self.assignments),
         )))
     }

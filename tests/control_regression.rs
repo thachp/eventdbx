@@ -104,7 +104,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         config.snowflake_worker_id,
     )?);
     let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
-    assignments.ensure_storage_usage_bytes("default", || store.storage_usage_bytes())?;
+    let usage = assignments.ensure_storage_usage_bytes("default", || store.storage_usage_bytes())?;
 
     let core = CoreContext::new(
         Arc::clone(&tokens),
@@ -115,6 +115,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         config.page_limit,
         "default",
         None,
+        Some(usage),
         Arc::clone(&assignments),
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
@@ -654,7 +655,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         config.snowflake_worker_id,
     )?);
     let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
-    assignments.ensure_storage_usage_bytes("default", || store.storage_usage_bytes())?;
+    let usage = assignments.ensure_storage_usage_bytes("default", || store.storage_usage_bytes())?;
 
     let core = CoreContext::new(
         Arc::clone(&tokens),
@@ -665,6 +666,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         config.page_limit,
         "default",
         None,
+        Some(usage),
         Arc::clone(&assignments),
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
@@ -1342,7 +1344,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
         config.snowflake_worker_id,
     )?);
     let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
-    assignments.ensure_storage_usage_bytes("default", || store.storage_usage_bytes())?;
+    let usage = assignments.ensure_storage_usage_bytes("default", || store.storage_usage_bytes())?;
 
     let core = CoreContext::new(
         Arc::clone(&tokens),
@@ -1353,6 +1355,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
         config.page_limit,
         "default",
         None,
+        Some(usage),
         Arc::clone(&assignments),
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
