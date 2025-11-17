@@ -1,10 +1,10 @@
 [package]
 name = "eventdbx"
 description = "Immutable, event-sourced, nosql, write-side database system."
-version = "3.16.3"
+version = "3.16.4"
 edition = "2024"
-homepage = "https://github.com/thachp/eventdbx"
-repository = "https://github.com/thachp/eventdbx"
+homepage = "https://github.com/eventdbx/eventdbx"
+repository = "https://github.com/eventdbx/eventdbx"
 keywords = [
   "immutable",
   "events",

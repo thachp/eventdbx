@@ -1,15 +1,15 @@
 {
   "name": "eventdbx",
-  "version": "3.16.3",
+  "version": "3.16.4",
   "description": "Immutable, event-sourced, nosql, write-side database system.",
   "license": "MIT",
-  "homepage": "https://github.com/thachp/eventdbx#readme",
+  "homepage": "https://github.com/eventdbx/eventdbx#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/thachp/eventdbx.git"
+    "url": "git+https://github.com/eventdbx/eventdbx.git"
   },
   "bugs": {
-    "url": "https://github.com/thachp/eventdbx/issues"
+    "url": "https://github.com/eventdbx/eventdbx/issues"
   },
   "author": "Patrick Thach <thachp@gmail.com>",
   "keywords": [
