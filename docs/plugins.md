@@ -43,7 +43,7 @@ Plugins receive payloads as JSON envelopes (HTTP/TCP) or Cap’n Proto messages 
 - **Log** – Writes event/state/schema data to the EventDBX log sink for debugging or audit transcripts.
 - **Process** – Supervises an executable installed via `dbx plugin install`; the binary receives Cap'n Proto frames on stdin/stdout.
 
-All of these live in the [dbx_plugins workspace](https://github.com/thachp/dbx_plugins). Use those implementations as templates for new connectors.
+All of these live in the [dbx-plugins workspace](https://github.com/eventdbx/dbx-plugins). Use those implementations as templates for new connectors.
 
 Need the binary running but don't want it to consume events (for example, the REST surface that simply exposes state)? Configure the process plugin with `--emit-events=false`. The supervisor still keeps the worker alive, but the queue will skip enqueuing payloads for that instance.
 
@@ -79,7 +79,7 @@ Use `dbx queue clear-done --older-than-hours <hours>` for an ad-hoc cleanup when
 You can extend EventDBX in two ways:
 
 1. **Custom process plugin** – Package your service as an executable, install it with `dbx plugin install`, and configure it with `dbx plugin config process … --payload …`. Your binary speaks the same Cap’n Proto protocol as the built-in process plugin.
-2. **Native Rust plugin** – Fork the [dbx_plugins workspace](https://github.com/thachp/dbx_plugins) and add a crate that implements the `Plugin` trait. Ship your crate (e.g., `search_api`, `sql_gateway`), then run it alongside the daemon.
+2. **Native Rust plugin** – Fork the [dbx-plugins workspace](https://github.com/eventdbx/dbx-plugins) and add a crate that implements the `Plugin` trait. Ship your crate (e.g., `search_api`, `sql_gateway`), then run it alongside the daemon.
 
 Ideas:
 
@@ -98,4 +98,4 @@ EventDBX remains the source of truth; plugins consume the append-only log and bu
 - **Upgrades** – Plugins can be deployed independently. When you introduce a new connector, install it, configure payload mode, and watch the queue drain.
 - **Schema changes** – If your read model depends on schemas, set the plugin to `event-and-schema` or `schema-only` so it always receives the latest contracts.
 
-Need a refresher on CLI commands? Head back to the [CLI reference]({{ '/cli/' | relative_url }}). Ready to build? Start with the examples in `dbx_plugins` and customize from there.
+Need a refresher on CLI commands? Head back to the [CLI reference]({{ '/cli/' | relative_url }}). Ready to build? Start with the examples in `dbx-plugins` and customize from there.

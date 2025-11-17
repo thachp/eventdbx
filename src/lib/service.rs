@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::{
     error::{EventError, Result},
@@ -10,13 +14,14 @@ use crate::{
         AppendEvent, EventArchiveScope, EventCursor, EventQueryScope, EventRecord, EventStore,
         select_state_field,
     },
-    tenant_store::TenantAssignmentStore,
+    tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
     token::{JwtClaims, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
         ensure_payload_size, ensure_snake_case,
     },
 };
+use parking_lot::Mutex;
 use serde_json::Value;
 /// Shared context exposing the core store, schema, and token managers so
 /// higher-level surfaces (REST, GraphQL, gRPC, plugins) can be layered on
@@ -30,8 +35,42 @@ pub struct CoreContext {
     list_page_size: usize,
     page_limit: usize,
     tenant_id: String,
-    aggregate_quota: Option<u64>,
+    storage_quota_mb: Option<u64>,
     assignments: Arc<TenantAssignmentStore>,
+    usage_cache: Arc<Mutex<StorageUsageCache>>,
+}
+
+const STORAGE_USAGE_REFRESH_EVENTS: u64 = 128;
+const STORAGE_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+struct StorageUsageCache {
+    bytes: u64,
+    last_refresh: Instant,
+    events_since_refresh: u64,
+    initialized: bool,
+    dirty: bool,
+}
+
+impl StorageUsageCache {
+    fn new(initial: Option<u64>) -> Self {
+        let now = Instant::now();
+        match initial {
+            Some(bytes) => Self {
+                bytes,
+                last_refresh: now,
+                events_since_refresh: 0,
+                initialized: true,
+                dirty: false,
+            },
+            None => Self {
+                bytes: 0,
+                last_refresh: now,
+                events_since_refresh: 0,
+                initialized: false,
+                dirty: false,
+            },
+        }
+    }
 }
 
 impl CoreContext {
@@ -43,7 +82,8 @@ impl CoreContext {
         list_page_size: usize,
         page_limit: usize,
         tenant_id: impl Into<String>,
-        aggregate_quota: Option<u64>,
+        storage_quota_mb: Option<u64>,
+        initial_usage_bytes: Option<u64>,
         assignments: Arc<TenantAssignmentStore>,
     ) -> Self {
         Self {
@@ -54,8 +94,9 @@ impl CoreContext {
             list_page_size,
             page_limit,
             tenant_id: tenant_id.into(),
-            aggregate_quota,
+            storage_quota_mb,
             assignments,
+            usage_cache: Arc::new(Mutex::new(StorageUsageCache::new(initial_usage_bytes))),
         }
     }
 
@@ -103,22 +144,18 @@ impl CoreContext {
         aggregate
     }
 
-    fn ensure_tenant_count_initialized(&self) -> Result<u64> {
-        let store = Arc::clone(&self.store);
-        self.assignments
-            .ensure_aggregate_count(&self.tenant_id, || {
-                store
-                    .counts()
-                    .map(|counts| counts.total_aggregates() as u64)
-            })
+    #[allow(dead_code)]
+    fn storage_usage_bytes(&self) -> Result<u64> {
+        self.maybe_refresh_usage(false)
     }
 
-    fn enforce_aggregate_quota(&self) -> Result<()> {
-        let current = self.ensure_tenant_count_initialized()?;
-        if let Some(limit) = self.aggregate_quota {
-            if current >= limit {
+    fn enforce_storage_quota(&self) -> Result<()> {
+        if let Some(limit_mb) = self.storage_quota_mb {
+            let usage = self.maybe_refresh_usage(false)?;
+            let limit_bytes = limit_mb.saturating_mul(BYTES_PER_MEGABYTE);
+            if usage >= limit_bytes {
                 return Err(EventError::TenantQuotaExceeded(format!(
-                    "tenant '{}' reached aggregate quota ({limit})",
+                    "tenant '{}' reached storage quota ({limit_mb} MB)",
                     self.tenant_id
                 )));
             }
@@ -314,8 +351,6 @@ impl CoreContext {
             )));
         }
 
-        self.enforce_aggregate_quota()?;
-
         let resource = format!("aggregate:{}:{}", aggregate_type, aggregate_id);
         let claims =
             self.tokens()
@@ -336,8 +371,6 @@ impl CoreContext {
             note,
         };
         let _record = self.append_event_internal(append_input, true)?;
-        self.assignments
-            .increment_aggregate_count(&self.tenant_id, 1)?;
 
         let aggregate = store.get_aggregate_state(&aggregate_type, &aggregate_id)?;
         Ok(self.sanitize_aggregate(aggregate))
@@ -419,6 +452,8 @@ impl CoreContext {
             ensure_metadata_extensions(metadata)?;
         }
 
+        self.enforce_storage_quota()?;
+
         let aggregate_version = self
             .store
             .aggregate_version(&aggregate_type, &aggregate_id)?;
@@ -489,6 +524,7 @@ impl CoreContext {
             issued_by,
             note,
         })?;
+        self.note_storage_mutation()?;
         Ok(record)
     }
 
@@ -507,6 +543,58 @@ impl CoreContext {
             }
         }
         state
+    }
+
+    fn maybe_refresh_usage(&self, force: bool) -> Result<u64> {
+        let (needs_refresh, current_bytes) = {
+            let cache = self.usage_cache.lock();
+            let refresh = force
+                || !cache.initialized
+                || cache.events_since_refresh >= STORAGE_USAGE_REFRESH_EVENTS
+                || cache.last_refresh.elapsed() >= STORAGE_USAGE_REFRESH_INTERVAL
+                || cache.dirty;
+            (refresh, cache.bytes)
+        };
+        if needs_refresh {
+            self.refresh_usage_from_store()
+        } else {
+            Ok(current_bytes)
+        }
+    }
+
+    fn refresh_usage_from_store(&self) -> Result<u64> {
+        let store = self.store();
+        let usage = store.storage_usage_bytes()?;
+        self.assignments
+            .update_storage_usage_bytes(&self.tenant_id, usage)?;
+        let mut cache = self.usage_cache.lock();
+        cache.bytes = usage;
+        cache.last_refresh = Instant::now();
+        cache.events_since_refresh = 0;
+        cache.initialized = true;
+        cache.dirty = false;
+        Ok(usage)
+    }
+
+    fn note_storage_mutation(&self) -> Result<()> {
+        let should_refresh = {
+            let mut cache = self.usage_cache.lock();
+            if !cache.initialized {
+                true
+            } else {
+                cache.events_since_refresh = cache.events_since_refresh.saturating_add(1);
+                if cache.events_since_refresh >= STORAGE_USAGE_REFRESH_EVENTS {
+                    true
+                } else {
+                    cache.dirty = true;
+                    false
+                }
+            }
+        };
+        if should_refresh {
+            self.refresh_usage_from_store()?;
+        }
+        Ok(())
     }
 }
 

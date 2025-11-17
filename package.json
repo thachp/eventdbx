@@ -1,7 +1,7 @@
 {
   "name": "eventdbx",
-  "version": "3.15.1",
-  "description": "A memory-safe, event-sourced, nosql, write-side database system.",
+  "version": "3.16.3",
+  "description": "Immutable, event-sourced, nosql, write-side database system.",
   "license": "MIT",
   "homepage": "https://github.com/thachp/eventdbx#readme",
   "repository": {

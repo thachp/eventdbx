@@ -59,6 +59,10 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "Refresh an existing token",
     },
     HelpCase {
+        path: &["token", "bootstrap"],
+        expected_snippet: "Issue a CLI bootstrap token",
+    },
+    HelpCase {
         path: &["schema"],
         expected_snippet: "Manage schemas",
     },

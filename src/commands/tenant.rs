@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
@@ -20,7 +20,7 @@ use eventdbx::{
     schema_history::SchemaAuditAction,
     store::EventStore,
     tenant::{normalize_shard_id, normalize_tenant_id},
-    tenant_store::TenantAssignmentStore,
+    tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
 };
 
 #[derive(Subcommand)]
@@ -33,7 +33,7 @@ pub enum TenantCommands {
     List(TenantListArgs),
     /// Show shard allocation statistics
     Stats(TenantStatsArgs),
-    /// Manage tenant aggregate quotas
+    /// Manage tenant storage quotas
     Quota {
         #[command(subcommand)]
         command: TenantQuotaCommands,
@@ -83,11 +83,11 @@ pub struct TenantStatsArgs {
 
 #[derive(Subcommand)]
 pub enum TenantQuotaCommands {
-    /// Set an aggregate quota for a tenant
+    /// Set a storage quota (in MB) for a tenant
     Set(TenantQuotaSetArgs),
-    /// Clear an aggregate quota for a tenant
+    /// Clear a storage quota for a tenant
     Clear(TenantQuotaClearArgs),
-    /// Recalculate aggregate counts for a tenant
+    /// Recalculate storage usage for a tenant
     Recalc(TenantQuotaRecalcArgs),
 }
 
@@ -97,9 +97,9 @@ pub struct TenantQuotaSetArgs {
     #[arg(value_name = "TENANT")]
     pub tenant: String,
 
-    /// Maximum number of aggregates the tenant may create
-    #[arg(long = "max-aggregates", value_name = "COUNT")]
-    pub max_aggregates: u64,
+    /// Maximum storage in megabytes the tenant may use
+    #[arg(long = "max-mb", value_name = "MB", alias = "max-aggregates")]
+    pub max_megabytes: u64,
 }
 
 #[derive(Args)]
@@ -111,7 +111,7 @@ pub struct TenantQuotaClearArgs {
 
 #[derive(Args)]
 pub struct TenantQuotaRecalcArgs {
-    /// Tenant identifier whose aggregate count should be recomputed
+    /// Tenant identifier whose storage usage should be recomputed
     #[arg(value_name = "TENANT")]
     pub tenant: String,
 }
@@ -197,31 +197,37 @@ fn list(config_path: Option<PathBuf>, args: TenantListArgs) -> Result<()> {
         .map(|value| normalize_shard_id(value, config.shard_count()))
         .transpose()?;
 
-    let mut entries: Vec<_> = store
-        .list()?
-        .into_iter()
-        .filter_map(|(tenant, record)| {
-            if let Some(filter) = shard_filter.as_ref() {
-                if record
-                    .shard
-                    .as_ref()
-                    .map(|value| !value.eq_ignore_ascii_case(filter))
-                    .unwrap_or(true)
-                {
-                    return None;
-                }
+    let mut entries = Vec::new();
+    let mut shard_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for (tenant, record) in store.list()? {
+        if let Some(filter) = shard_filter.as_ref() {
+            if record
+                .shard
+                .as_ref()
+                .map(|value| !value.eq_ignore_ascii_case(filter))
+                .unwrap_or(true)
+            {
+                continue;
             }
-            if record.shard.is_none() && record.aggregate_quota.is_none() {
-                return None;
-            }
-            Some(TenantSummary {
-                tenant,
-                shard: record.shard,
-                quota: record.aggregate_quota,
-                count: record.aggregate_count,
-            })
-        })
-        .collect();
+        }
+        let quota_mb = record.storage_quota_mb;
+        let usage_mb = record.storage_usage_bytes.map(bytes_to_megabytes);
+        if record.shard.is_none() && quota_mb.is_none() {
+            continue;
+        }
+        let shard_count = record.shard.as_ref().map(|value| {
+            let entry = shard_counts.entry(value.clone()).or_insert(0);
+            *entry += 1;
+            *entry
+        });
+        entries.push(TenantSummary {
+            tenant,
+            shard: record.shard,
+            quota_mb,
+            usage_mb,
+            shard_count,
+        });
+    }
     entries.sort_by(|a, b| a.tenant.cmp(&b.tenant));
 
     if args.json {
@@ -245,7 +251,7 @@ fn list(config_path: Option<PathBuf>, args: TenantListArgs) -> Result<()> {
 fn stats(config_path: Option<PathBuf>, args: TenantStatsArgs) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let store = TenantAssignmentStore::open_read_only(config.tenant_meta_path())?;
-    let mut counts = std::collections::BTreeMap::new();
+    let mut counts = BTreeMap::new();
     for (_, record) in store.list()? {
         if let Some(shard) = record.shard {
             *counts.entry(shard).or_insert(0usize) += 1;
@@ -257,14 +263,99 @@ fn stats(config_path: Option<PathBuf>, args: TenantStatsArgs) -> Result<()> {
         return Ok(());
     }
 
+    print_shard_counts(&counts);
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct TenantSummary {
+    tenant: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shard: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quota_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shard_count: Option<usize>,
+}
+
+fn bytes_to_megabytes(bytes: u64) -> u64 {
+    (bytes + BYTES_PER_MEGABYTE - 1) / BYTES_PER_MEGABYTE
+}
+
+fn print_table(entries: Vec<TenantSummary>) {
+    let mut tenant_width = "tenant".len();
+    let mut shard_width = "shard".len();
+    let mut quota_width = "quota_mb".len();
+    let mut usage_width = "usage_mb".len();
+    let mut count_width = "count".len();
+    for entry in &entries {
+        tenant_width = tenant_width.max(entry.tenant.len());
+        shard_width = shard_width.max(entry.shard.as_deref().unwrap_or("-").len());
+        if let Some(quota) = entry.quota_mb {
+            quota_width = quota_width.max(quota.to_string().len());
+        }
+        if let Some(usage) = entry.usage_mb {
+            usage_width = usage_width.max(usage.to_string().len());
+        }
+        if let Some(count) = entry.shard_count {
+            count_width = count_width.max(count.to_string().len());
+        }
+    }
+
+    println!(
+        "{:tenant_width$}  {:shard_width$}  {:>quota_width$}  {:>usage_width$}  {:>count_width$}",
+        "tenant",
+        "shard",
+        "quota_mb",
+        "usage_mb",
+        "count",
+        tenant_width = tenant_width,
+        shard_width = shard_width,
+        quota_width = quota_width,
+        usage_width = usage_width,
+        count_width = count_width,
+    );
+    for entry in entries {
+        let shard_display = entry.shard.as_deref().unwrap_or("-");
+        let quota_display = entry
+            .quota_mb
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let usage_display = entry
+            .usage_mb
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let count_display = entry
+            .shard_count
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:tenant_width$}  {:shard_width$}  {:>quota_width$}  {:>usage_width$}  {:>count_width$}",
+            entry.tenant,
+            shard_display,
+            quota_display,
+            usage_display,
+            count_display,
+            tenant_width = tenant_width,
+            shard_width = shard_width,
+            quota_width = quota_width,
+            usage_width = usage_width,
+            count_width = count_width,
+        );
+    }
+}
+
+fn print_shard_counts(counts: &BTreeMap<String, usize>) {
     if counts.is_empty() {
         println!("no explicit tenant assignments; shards fall back to hash-based placement");
-        return Ok(());
+        return;
     }
 
     let mut shard_width = "shard".len();
     let mut count_width = "count".len();
-    for (shard, count) in &counts {
+    for (shard, count) in counts {
         shard_width = shard_width.max(shard.len());
         count_width = count_width.max(count.to_string().len());
     }
@@ -284,82 +375,19 @@ fn stats(config_path: Option<PathBuf>, args: TenantStatsArgs) -> Result<()> {
             count_width = count_width
         );
     }
-    Ok(())
-}
-
-#[derive(Serialize)]
-struct TenantSummary {
-    tenant: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    shard: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    quota: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    count: Option<u64>,
-}
-
-fn print_table(entries: Vec<TenantSummary>) {
-    let mut tenant_width = "tenant".len();
-    let mut shard_width = "shard".len();
-    let mut quota_width = "quota".len();
-    let mut count_width = "count".len();
-    for entry in &entries {
-        tenant_width = tenant_width.max(entry.tenant.len());
-        shard_width = shard_width.max(entry.shard.as_deref().unwrap_or("-").len());
-        if let Some(quota) = entry.quota {
-            quota_width = quota_width.max(quota.to_string().len());
-        }
-        if let Some(count) = entry.count {
-            count_width = count_width.max(count.to_string().len());
-        }
-    }
-
-    println!(
-        "{:tenant_width$}  {:shard_width$}  {:>quota_width$}  {:>count_width$}",
-        "tenant",
-        "shard",
-        "quota",
-        "count",
-        tenant_width = tenant_width,
-        shard_width = shard_width,
-        quota_width = quota_width,
-        count_width = count_width,
-    );
-    for entry in entries {
-        let shard_display = entry.shard.as_deref().unwrap_or("-");
-        let quota_display = entry
-            .quota
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let count_display = entry
-            .count
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        println!(
-            "{:tenant_width$}  {:shard_width$}  {:>quota_width$}  {:>count_width$}",
-            entry.tenant,
-            shard_display,
-            quota_display,
-            count_display,
-            tenant_width = tenant_width,
-            shard_width = shard_width,
-            quota_width = quota_width,
-            count_width = count_width,
-        );
-    }
 }
 
 fn quota_set(config_path: Option<PathBuf>, args: TenantQuotaSetArgs) -> Result<()> {
-    if args.max_aggregates == 0 {
-        bail!("--max-aggregates must be greater than zero");
+    if args.max_megabytes == 0 {
+        bail!("--max-mb must be greater than zero");
     }
     let (config, _) = load_or_default(config_path)?;
     let tenant = normalize_tenant_id(&args.tenant)?;
-    match try_set_quota_offline(&config, &tenant, args.max_aggregates) {
-        Ok(changed) => report_quota_set(&tenant, args.max_aggregates, changed),
+    match try_set_quota_offline(&config, &tenant, args.max_megabytes) {
+        Ok(changed) => report_quota_set(&tenant, args.max_megabytes, changed),
         Err(err) if is_lock_error(&err) => {
-            let changed = quota_set_online(&config, &tenant, args.max_aggregates)?;
-            report_quota_set(&tenant, args.max_aggregates, changed);
+            let changed = quota_set_online(&config, &tenant, args.max_megabytes)?;
+            report_quota_set(&tenant, args.max_megabytes, changed);
         }
         Err(err) => return Err(err.into()),
     }
@@ -429,11 +457,9 @@ fn try_quota_recalc_offline(config: &Config, tenant: &str) -> std::result::Resul
         config.encryption_key()?,
         config.snowflake_worker_id,
     )?;
-    let counts = tenant_event_store
-        .counts()
-        .map(|counts| counts.total_aggregates() as u64)?;
-    store.ensure_aggregate_count(tenant, || Ok(counts))?;
-    Ok(counts)
+    let bytes = tenant_event_store.storage_usage_bytes()?;
+    store.update_storage_usage_bytes(tenant, bytes)?;
+    Ok(bytes)
 }
 
 fn assign_online(config: &Config, tenant: &str, shard: &str) -> Result<bool> {
@@ -458,7 +484,7 @@ fn quota_clear_online(config: &Config, tenant: &str) -> Result<bool> {
 
 fn quota_recalc_online(config: &Config, tenant: &str) -> Result<u64> {
     let (client, token) = prepare_remote_client(config, tenant)?;
-    client.recalc_tenant_aggregates(&token, tenant)
+    client.recalc_tenant_storage(&token, tenant)
 }
 
 pub(crate) fn prepare_remote_client(
@@ -505,28 +531,32 @@ fn report_unassign(tenant: &str, changed: bool) {
     }
 }
 
-fn report_quota_set(tenant: &str, quota: u64, changed: bool) {
+fn report_quota_set(tenant: &str, quota_mb: u64, changed: bool) {
     if changed {
-        println!("Set aggregate quota for tenant '{}' to {}.", tenant, quota);
+        println!(
+            "Set storage quota for tenant '{}' to {} MB.",
+            tenant, quota_mb
+        );
     } else {
         println!(
-            "Aggregate quota for tenant '{}' already set to {}.",
-            tenant, quota
+            "Storage quota for tenant '{}' already set to {} MB.",
+            tenant, quota_mb
         );
     }
 }
 
 fn report_quota_clear(tenant: &str, changed: bool) {
     if changed {
-        println!("Cleared aggregate quota for tenant '{}'.", tenant);
+        println!("Cleared storage quota for tenant '{}'.", tenant);
     } else {
-        println!("No aggregate quota configured for tenant '{}'.", tenant);
+        println!("No storage quota configured for tenant '{}'.", tenant);
     }
 }
 
-fn report_quota_recalc(tenant: &str, count: u64) {
+fn report_quota_recalc(tenant: &str, bytes: u64) {
+    let mb = bytes_to_megabytes(bytes);
     println!(
-        "Recalculated aggregate count for tenant '{}' ({} aggregate(s)).",
-        tenant, count
+        "Recalculated storage usage for tenant '{}' ({} byte(s) ~= {} MB).",
+        tenant, bytes, mb
     );
 }

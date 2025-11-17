@@ -69,7 +69,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='A memory-safe, event-sourced, nosql, write-side database system.'
+            Description='Immutable, event-sourced, nosql, write-side database system.'
             Manufacturer='Patrick Thach'
             InstallerVersion='450'
             Languages='1033'

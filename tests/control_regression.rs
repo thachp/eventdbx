@@ -104,11 +104,8 @@ async fn control_capnp_regression_flows() -> Result<()> {
         config.snowflake_worker_id,
     )?);
     let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
-    assignments.ensure_aggregate_count("default", || {
-        store
-            .counts()
-            .map(|counts| counts.total_aggregates() as u64)
-    })?;
+    let usage =
+        assignments.ensure_storage_usage_bytes("default", || store.storage_usage_bytes())?;
 
     let core = CoreContext::new(
         Arc::clone(&tokens),
@@ -119,6 +116,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
         config.page_limit,
         "default",
         None,
+        Some(usage),
         Arc::clone(&assignments),
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
@@ -658,11 +656,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         config.snowflake_worker_id,
     )?);
     let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
-    assignments.ensure_aggregate_count("default", || {
-        store
-            .counts()
-            .map(|counts| counts.total_aggregates() as u64)
-    })?;
+    let usage =
+        assignments.ensure_storage_usage_bytes("default", || store.storage_usage_bytes())?;
 
     let core = CoreContext::new(
         Arc::clone(&tokens),
@@ -673,6 +668,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         config.page_limit,
         "default",
         None,
+        Some(usage),
         Arc::clone(&assignments),
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
@@ -1350,11 +1346,8 @@ async fn control_tenant_admin_commands() -> Result<()> {
         config.snowflake_worker_id,
     )?);
     let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
-    assignments.ensure_aggregate_count("default", || {
-        store
-            .counts()
-            .map(|counts| counts.total_aggregates() as u64)
-    })?;
+    let usage =
+        assignments.ensure_storage_usage_bytes("default", || store.storage_usage_bytes())?;
 
     let core = CoreContext::new(
         Arc::clone(&tokens),
@@ -1365,6 +1358,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
         config.page_limit,
         "default",
         None,
+        Some(usage),
         Arc::clone(&assignments),
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
@@ -1485,7 +1479,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
             let mut quota = payload.init_tenant_quota_set();
             quota.set_token(&token_value);
             quota.set_tenant_id("default");
-            quota.set_max_aggregates(5);
+            quota.set_max_storage_mb(5);
         },
         |response| match response
             .get_payload()
@@ -1524,7 +1518,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
     assert!(quota_clear);
     next_request_id += 1;
 
-    let aggregate_count = send_control_request(
+    let storage_bytes = send_control_request(
         &mut writer,
         &mut reader,
         &mut noise,
@@ -1541,13 +1535,14 @@ async fn control_tenant_admin_commands() -> Result<()> {
             .context("payload decode failed")?
         {
             control_response::payload::TenantQuotaRecalc(Ok(result)) => {
-                Ok(result.get_aggregate_count())
+                Ok(result.get_storage_bytes())
             }
             _ => Err(anyhow!("unexpected response variant")),
         },
     )
     .await?;
-    assert_eq!(aggregate_count, 0);
+    let local_usage = store.storage_usage_bytes()?;
+    assert_eq!(storage_bytes, local_usage);
 
     drop(writer);
     drop(reader);
