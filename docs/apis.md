@@ -6,7 +6,7 @@ nav_id: apis
 
 # API Reference
 
-EventDBX exposes multiple surfaces so you can choose the right tool for each integration. Tokens issued by the CLI are accepted everywhere unless specifically noted. REST/GraphQL/gRPC are now provided by companion binaries in the [dbx_plugins](https://github.com/thachp/dbx_plugins) workspace.
+EventDBX exposes multiple surfaces so you can choose the right tool for each integration. Tokens issued by the CLI are accepted everywhere unless specifically noted. REST/GraphQL/gRPC are now provided by companion binaries in the [dbx-plugins](https://github.com/eventdbx/dbx-plugins) workspace.
 
 ## REST
 
@@ -51,7 +51,7 @@ Event writes enforce a few key rules:
 - `aggregate_id` accepts letters, numbers, underscores, and hyphens (max 128 characters) with no surrounding whitespace.
 - Payload JSON is limited to 256 KiB, and optional `metadata` objects (keys prefixed with `@`) are capped at 64 KiB so plugins can react without overwhelming the bus.
 - `event_id` values are Snowflake IDs encoded as strings; assign each node a unique `snowflake_worker_id` (0-1023) in `config.toml` to avoid collisions across nodes.
-- Plugins receive the event envelope with `metadata.event_id` as a stringified Snowflake and (optionally) an `extensions` object; ensure the [dbx_plugins](https://github.com/thachp/dbx_plugins) repo or any custom adapters tolerate the new fields.
+- Plugins receive the event envelope with `metadata.event_id` as a stringified Snowflake and (optionally) an `extensions` object; ensure the [dbx-plugins](https://github.com/eventdbx/dbx-plugins) repo or any custom adapters tolerate the new fields.
 
 ## GraphQL
 

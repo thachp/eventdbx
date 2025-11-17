@@ -20,7 +20,7 @@ use zip::ZipArchive;
 use eventdbx::config::default_config_path;
 
 const USER_AGENT: &str = concat!("eventdbx-cli/", env!("CARGO_PKG_VERSION"));
-const RELEASES_API: &str = "https://api.github.com/repos/thachp/eventdbx/releases";
+const RELEASES_API: &str = "https://api.github.com/repos/eventdbx/eventdbx/releases";
 const MIN_UPGRADE_VERSION: &str = "1.13.2";
 const UPDATE_CHECK_INTERVAL_HOURS: i64 = 6;
 

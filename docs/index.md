@@ -32,7 +32,7 @@ EventDBX keeps every change as an immutable event so you can replay history, aud
    dbx start --foreground
    ```
 
-   The daemon owns the write-side RocksDB store and exposes a Cap'n Proto control socket on `6363`. Read surfaces (REST, GraphQL, gRPC, search, etc.) run as plugins in the [dbx_plugins workspace](https://github.com/thachp/dbx_plugins); deploy the ones you need alongside the server.
+   The daemon owns the write-side RocksDB store and exposes a Cap'n Proto control socket on `6363`. Read surfaces (REST, GraphQL, gRPC, search, etc.) run as plugins in the [dbx-plugins workspace](https://github.com/eventdbx/dbx-plugins); deploy the ones you need alongside the server.
 
 3. **Append your first event**
 
