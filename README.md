@@ -88,11 +88,21 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    - `field_locks` and `hidden_fields` control which fields can be updated or returned in aggregate detail calls.
    - `locked: true` freezes the schema to prevent further event writes until it is unlocked.
 
+   When you need hot reloads or historical context, snapshot schema changes per tenant:
+
+   - `dbx tenant schema publish <tenant> [--activate] [--reason <text>]` captures the current `schemas.json`, writes it to `schemas/versions/<id>.json`, and records metadata in `schemas/schema_manifest.json` under the tenant’s data directory. (Omit `<tenant>` to target whichever domain is currently active.) Prefer `dbx schema publish …` if you’re already in the schema workflow—the commands are identical and simply default the tenant from the active domain.
+   - `dbx tenant schema history <tenant> [--json] [--audit]` prints every recorded version plus the audit trail of publish/activate/rollback events.
+  - `dbx tenant schema diff <tenant> --from <version> --to <version> [--json] [--style patch|unified|split] [--color auto|always|never]` emits either a JSON Patch, a GitHub-style unified diff, or a side-by-side split view. Use `--color always` to force green additions / red removals (default `auto` enables color only when stdout is a TTY).
+   - `dbx tenant schema activate|rollback <tenant> --version <id>` advances or rewinds the active pointer. Include `--no-reload` if the daemon is offline; otherwise the CLI tells the server to evict and reload that tenant’s schema cache immediately.
+   - `dbx tenant schema reload <tenant>` forces the running daemon to drop its cached schema/context for that tenant—useful after manual edits or when you disable automatic reloads.
+
 4. **Issue a token for CLI access**
 
    ```bash
    dbx token generate --group admin --user jane --expiration 3600
    ```
+
+   - Add `--tenant <id>` (repeat the flag for multiple tenants) to bind the token to specific tenant ids. The server rejects any request where the supplied `tenantId` does not appear in the token’s claims.
 
 5. **Append an event**
 
@@ -114,11 +124,15 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    ```
 
    - `dbx checkout` stores remote settings per domain (`remote.json` under the domain data directory). You can re-run the command with just `--remote` or `--token` to rotate either value.
+   - When the remote hosts multiple tenants, pass `--remote-tenant <id>` so subsequent `dbx push`/`dbx pull` calls know which tenant to target.
    - Push schemas first so the destination validates incoming events with the same rules:
 
      ```bash
      dbx push schema remote1
+     dbx push schema remote1 --publish --publish-reason "rollout #42"
      ```
+
+     Add `--publish` to snapshot and activate the schemas on the remote immediately (with optional `--publish-label`, `--publish-force`, or `--publish-no-reload` flags).
 
    - Mirror domain data to the remote. Limit the sync to a specific aggregate type or identifier when you need a targeted replication:
 
@@ -147,6 +161,19 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
      ```
 
      `watch` loops forever (or until `--run-once`), triggering a push, pull, or bidirectional cycle every `--interval` seconds. Pass `--background` to daemonize, `--skip-if-active` to avoid overlapping runs when another watcher is working on the same domain, and inspect persisted state at any time with `dbx watch status <domain>` (use `--all` for a summary of every watcher).
+
+## Manage tenants (multi-tenant mode)
+
+Enable multi-tenant mode in `config.toml` (set `[tenants] multi_tenant = true`) to hash tenants across shard directories. EventDBX automatically hashes tenants when no manual assignment exists, and you can override placements with the `dbx tenant` commands:
+
+```bash
+dbx tenant assign people --shard shard-0003
+dbx tenant unassign sandbox
+dbx tenant list --json
+dbx tenant stats
+```
+
+Assignments live in a dedicated RocksDB directory (`tenant_meta/` under your data root). Unassigned tenants continue to hash across the configured shard count.
 
 You now have a working EventDBX instance with an initial aggregate. Explore the [Command-Line Reference](#command-line-reference) for the full set of supported operations.
 
@@ -281,7 +308,7 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
   Appends an event immediately—use `--stage` to queue it for a later commit.
 - `dbx aggregate patch --aggregate <type> --aggregate-id <id> --event <name> --patch <json> [--stage] [--token <value>] [--metadata <json>] [--note <text>]`  
   Applies an RFC 6902 JSON Patch to the current state and persists the delta as a new event.
-- `dbx aggregate list [--skip <n>] [--take <n>] [--stage]`  
+- `dbx aggregate list [--cursor <token>] [--take <n>] [--stage]`  
   Lists aggregates with version, Merkle root, and archive status; pass `--stage` to display queued events instead.
 - `dbx aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
 - `dbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
@@ -293,9 +320,11 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 - `dbx aggregate commit`  
   Flushes all staged events in a single atomic transaction.
 
+Cursor pagination tokens are human-readable: active aggregates encode as `a:<aggregate_type>:<aggregate_id>` (`r:` for archived), and event cursors append the event version (`a:<aggregate_type>:<aggregate_id>:<version>`). Grab the last row from a page, form its token, and pass it via `--cursor` to resume listing.
+
 ### Events
 
-- `dbx events [--aggregate <type>] [--aggregate-id <id>] [--skip <n>] [--take <n>] [--filter <expr>] [--sort <field[:order],...>] [--json] [--include-archived|--archived-only]`  
+- `dbx events [--aggregate <type>] [--aggregate-id <id>] [--cursor <token>] [--take <n>] [--filter <expr>] [--sort <field[:order],...>] [--json] [--include-archived|--archived-only]`  
   Streams events with optional aggregate scoping, SQL-like filters (e.g. `payload.status = "open" AND metadata.note LIKE "retry%"`), and multi-key sorting. Prefix fields with `payload.`, `metadata.`, or `extensions.` to target nested JSON; `created_at`, `event_id`, `version`, and other top-level keys are also available.
 - `dbx events --event <snowflake_id> [--json]`  
   Displays a single event by Snowflake identifier, including payload, metadata, and extensions. You can also omit `--event` when the first positional argument is a valid Snowflake id.
@@ -459,6 +488,18 @@ Rules are optional and can be combined when the target type supports them:
 - `length`: `{ "min": <usize>, "max": <usize> }` bounds the length of `text` (characters) or `binary` (decoded bytes).
 - `range`: `{ "min": <value>, "max": <value> }` for numeric and temporal types (`integer`, `float`, `decimal`, `timestamp`, `date`). Boundary values must parse to the column’s type.
 - `properties`: nested `column_types` definitions for `object` columns, enabling recursion with the same rule set as top-level fields.
+
+Use `dbx schema field <aggregate> <field> …` to manage types and rules without editing `schemas.json`. It can set `--type <text|integer|…>`, toggle `--required/--not-required`, enforce `--format <email|url|…>`, swap `--regex` / `--contains` lists, adjust `--length-min` / `--length-max`, feed JSON rule blocks via `--rules @rules.json` or `--properties @object_rules.json`, and clear definitions (`--clear-type`, `--clear-rules`, `--clear-format`, etc.). Pair it with `dbx schema alter <aggregate> <event>` to append/remove event field allow-lists or replace them entirely via `--set`/`--clear`.
+
+```bash
+dbx schema field person email --type text --format email --required
+dbx schema field person status --regex '^(pending|active|blocked)$'
+dbx schema field person profile --type object --properties @profile_rules.json
+
+dbx schema alter person person_created --add first_name,last_name
+dbx schema alter person person_updated --set status,comment
+dbx schema alter person person_updated --clear
+```
 
 ## Performance Testing
 

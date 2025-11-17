@@ -27,19 +27,42 @@ const DEFAULT_PAGE_SIZE: usize = 256;
 #[derive(Clone)]
 pub struct ServerClient {
     connect_addr: String,
+    tenant: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TenantSchemaPublishResult {
+    pub version_id: String,
+    pub activated: bool,
+    pub skipped: bool,
 }
 
 impl ServerClient {
     pub fn new(config: &Config) -> Result<Self> {
         let connect_addr = normalize_connect_addr(&config.socket.bind_addr);
 
-        Ok(Self { connect_addr })
+        Ok(Self {
+            connect_addr,
+            tenant: Some(config.active_domain().to_string()),
+        })
     }
 
+    #[allow(dead_code)]
     pub fn with_addr<S: Into<String>>(connect_addr: S) -> Self {
+        Self::with_addr_and_tenant(connect_addr, None)
+    }
+
+    pub fn with_addr_and_tenant<S: Into<String>>(connect_addr: S, tenant: Option<String>) -> Self {
         Self {
             connect_addr: connect_addr.into(),
+            tenant,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_tenant(mut self, tenant: Option<String>) -> Self {
+        self.tenant = tenant;
+        self
     }
 
     pub fn create_aggregate(
@@ -53,6 +76,7 @@ impl ServerClient {
         note: Option<&str>,
     ) -> Result<Option<AggregateState>> {
         let connect_addr = self.connect_addr.clone();
+        let tenant = self.tenant.clone();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
@@ -65,6 +89,7 @@ impl ServerClient {
             return tokio::task::block_in_place(move || {
                 create_aggregate_blocking(
                     connect_addr,
+                    tenant.clone(),
                     token,
                     aggregate_type,
                     aggregate_id,
@@ -78,6 +103,7 @@ impl ServerClient {
 
         create_aggregate_blocking(
             connect_addr,
+            tenant,
             token,
             aggregate_type,
             aggregate_id,
@@ -99,6 +125,7 @@ impl ServerClient {
         note: Option<&str>,
     ) -> Result<Option<EventRecord>> {
         let connect_addr = self.connect_addr.clone();
+        let tenant = self.tenant.clone();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
@@ -111,6 +138,7 @@ impl ServerClient {
             return tokio::task::block_in_place(move || {
                 append_event_blocking(
                     connect_addr,
+                    tenant.clone(),
                     token,
                     aggregate_type,
                     aggregate_id,
@@ -124,6 +152,7 @@ impl ServerClient {
 
         append_event_blocking(
             connect_addr,
+            tenant,
             token,
             aggregate_type,
             aggregate_id,
@@ -145,6 +174,7 @@ impl ServerClient {
         note: Option<&str>,
     ) -> Result<Option<EventRecord>> {
         let connect_addr = self.connect_addr.clone();
+        let tenant = self.tenant.clone();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
@@ -157,6 +187,7 @@ impl ServerClient {
             return tokio::task::block_in_place(move || {
                 patch_event_blocking(
                     connect_addr,
+                    tenant.clone(),
                     token,
                     aggregate_type,
                     aggregate_id,
@@ -170,6 +201,7 @@ impl ServerClient {
 
         patch_event_blocking(
             connect_addr,
+            tenant,
             token,
             aggregate_type,
             aggregate_id,
@@ -190,6 +222,7 @@ impl ServerClient {
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -244,23 +277,22 @@ impl ServerClient {
         include_archived: bool,
         archived_only: bool,
     ) -> Result<Vec<AggregateState>> {
-        let mut skip = 0usize;
+        let mut cursor: Option<String> = None;
         let mut results = Vec::new();
         loop {
-            let page = self.list_aggregates_page(
+            let (page, next_cursor) = self.list_aggregates_page(
                 token,
-                skip,
+                cursor.as_deref(),
                 DEFAULT_PAGE_SIZE,
                 filter,
                 include_archived,
                 archived_only,
             )?;
-            let count = page.len();
-            if count == 0 {
+            results.extend(page);
+            cursor = next_cursor;
+            if cursor.is_none() {
                 break;
             }
-            skip += count;
-            results.extend(page);
         }
         Ok(results)
     }
@@ -268,22 +300,29 @@ impl ServerClient {
     fn list_aggregates_page(
         &self,
         token: &str,
-        skip: usize,
+        cursor: Option<&str>,
         take: usize,
         filter: Option<&str>,
         include_archived: bool,
         archived_only: bool,
-    ) -> Result<Vec<AggregateState>> {
+    ) -> Result<(Vec<AggregateState>, Option<String>)> {
         let request_id = next_request_id();
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
                 let mut list = payload_builder.init_list_aggregates();
                 list.set_token(token);
-                list.set_skip(skip as u64);
+                if let Some(cursor) = cursor {
+                    list.set_has_cursor(true);
+                    list.set_cursor(cursor);
+                } else {
+                    list.set_has_cursor(false);
+                    list.set_cursor("");
+                }
                 list.set_has_take(true);
                 list.set_take(take as u64);
                 list.set_include_archived(include_archived);
@@ -307,13 +346,18 @@ impl ServerClient {
                 {
                     payload::ListAggregates(Ok(result)) => {
                         let json = read_text(result.get_aggregates_json(), "aggregates_json")?;
-                        if json.trim().is_empty() {
-                            Ok(Vec::new())
+                        let aggregates = if json.trim().is_empty() {
+                            Vec::new()
                         } else {
-                            let aggregates: Vec<AggregateState> = serde_json::from_str(&json)
-                                .context("failed to parse list_aggregates payload")?;
-                            Ok(aggregates)
-                        }
+                            serde_json::from_str(&json)
+                                .context("failed to parse list_aggregates payload")?
+                        };
+                        let next_cursor = if result.get_has_next_cursor() {
+                            Some(read_text(result.get_next_cursor(), "next_cursor")?)
+                        } else {
+                            None
+                        };
+                        Ok((aggregates, next_cursor))
                     }
                     payload::Error(Ok(error)) => {
                         let code = read_text(error.get_code(), "code")?;
@@ -339,22 +383,21 @@ impl ServerClient {
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Vec<EventRecord>> {
-        let mut skip = 0usize;
+        let mut cursor: Option<String> = None;
         let mut results = Vec::new();
         loop {
-            let page = self.list_events_page(
+            let (page, next_cursor) = self.list_events_page(
                 token,
                 aggregate_type,
                 aggregate_id,
-                skip,
+                cursor.as_deref(),
                 DEFAULT_PAGE_SIZE,
             )?;
-            let count = page.len();
-            if count == 0 {
+            results.extend(page);
+            cursor = next_cursor;
+            if cursor.is_none() {
                 break;
             }
-            skip += count;
-            results.extend(page);
         }
         Ok(results)
     }
@@ -365,23 +408,31 @@ impl ServerClient {
         aggregate_type: &str,
         aggregate_id: &str,
         start_version: u64,
+        archived: bool,
     ) -> Result<Vec<EventRecord>> {
-        let mut skip = start_version as usize;
+        let mut cursor = if start_version == 0 {
+            None
+        } else {
+            let prefix = if archived { 'r' } else { 'a' };
+            Some(format!(
+                "{}:{}:{}:{}",
+                prefix, aggregate_type, aggregate_id, start_version
+            ))
+        };
         let mut results = Vec::new();
         loop {
-            let page = self.list_events_page(
+            let (page, next_cursor) = self.list_events_page(
                 token,
                 aggregate_type,
                 aggregate_id,
-                skip,
+                cursor.as_deref(),
                 DEFAULT_PAGE_SIZE,
             )?;
-            let count = page.len();
-            if count == 0 {
+            results.extend(page);
+            cursor = next_cursor;
+            if cursor.is_none() {
                 break;
             }
-            skip += count;
-            results.extend(page);
         }
         Ok(results)
     }
@@ -391,13 +442,14 @@ impl ServerClient {
         token: &str,
         aggregate_type: &str,
         aggregate_id: &str,
-        skip: usize,
+        cursor: Option<&str>,
         take: usize,
-    ) -> Result<Vec<EventRecord>> {
+    ) -> Result<(Vec<EventRecord>, Option<String>)> {
         let request_id = next_request_id();
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -405,7 +457,13 @@ impl ServerClient {
                 list.set_token(token);
                 list.set_aggregate_type(aggregate_type);
                 list.set_aggregate_id(aggregate_id);
-                list.set_skip(skip as u64);
+                if let Some(cursor) = cursor {
+                    list.set_has_cursor(true);
+                    list.set_cursor(cursor);
+                } else {
+                    list.set_has_cursor(false);
+                    list.set_cursor("");
+                }
                 list.set_has_take(true);
                 list.set_take(take as u64);
                 list.set_has_filter(false);
@@ -421,18 +479,23 @@ impl ServerClient {
                 {
                     payload::ListEvents(Ok(result)) => {
                         let json = read_text(result.get_events_json(), "events_json")?;
-                        if json.trim().is_empty() {
-                            Ok(Vec::new())
+                        let events = if json.trim().is_empty() {
+                            Vec::new()
                         } else {
-                            let events: Vec<EventRecord> = serde_json::from_str(&json)
-                                .context("failed to parse list_events payload")?;
-                            Ok(events)
-                        }
+                            serde_json::from_str(&json)
+                                .context("failed to parse list_events payload")?
+                        };
+                        let next_cursor = if result.get_has_next_cursor() {
+                            Some(read_text(result.get_next_cursor(), "next_cursor")?)
+                        } else {
+                            None
+                        };
+                        Ok((events, next_cursor))
                     }
                     payload::Error(Ok(error)) => {
                         let code = read_text(error.get_code(), "code")?;
                         if code == "aggregate_not_found" {
-                            return Ok(Vec::new());
+                            return Ok((Vec::new(), None));
                         }
                         let message = read_text(error.get_message(), "message")?;
                         Err(anyhow!("server returned {}: {}", code, message))
@@ -460,6 +523,7 @@ impl ServerClient {
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -502,6 +566,7 @@ impl ServerClient {
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -555,6 +620,7 @@ impl ServerClient {
         send_control_request_blocking(
             &self.connect_addr,
             token,
+            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -588,10 +654,350 @@ impl ServerClient {
             },
         )
     }
+
+    pub fn assign_tenant(&self, token: &str, tenant: &str, shard: &str) -> Result<bool> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut assign = payload_builder.init_tenant_assign();
+                assign.set_token(token);
+                assign.set_tenant_id(tenant);
+                assign.set_shard_id(shard);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_assign response payload")?
+                {
+                    payload::TenantAssign(Ok(reply)) => Ok(reply.get_changed()),
+                    payload::TenantAssign(Err(err)) => {
+                        Err(anyhow!("failed to decode tenant_assign response: {}", err))
+                    }
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn unassign_tenant(&self, token: &str, tenant: &str) -> Result<bool> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut unassign = payload_builder.init_tenant_unassign();
+                unassign.set_token(token);
+                unassign.set_tenant_id(tenant);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_unassign response payload")?
+                {
+                    payload::TenantUnassign(Ok(reply)) => Ok(reply.get_changed()),
+                    payload::TenantUnassign(Err(err)) => Err(anyhow!(
+                        "failed to decode tenant_unassign response: {}",
+                        err
+                    )),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn set_tenant_quota(&self, token: &str, tenant: &str, max_aggregates: u64) -> Result<bool> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut quota = payload_builder.init_tenant_quota_set();
+                quota.set_token(token);
+                quota.set_tenant_id(tenant);
+                quota.set_max_aggregates(max_aggregates);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_quota_set response payload")?
+                {
+                    payload::TenantQuotaSet(Ok(reply)) => Ok(reply.get_changed()),
+                    payload::TenantQuotaSet(Err(err)) => Err(anyhow!(
+                        "failed to decode tenant_quota_set response: {}",
+                        err
+                    )),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn clear_tenant_quota(&self, token: &str, tenant: &str) -> Result<bool> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut quota = payload_builder.init_tenant_quota_clear();
+                quota.set_token(token);
+                quota.set_tenant_id(tenant);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_quota_clear response payload")?
+                {
+                    payload::TenantQuotaClear(Ok(reply)) => Ok(reply.get_changed()),
+                    payload::TenantQuotaClear(Err(err)) => Err(anyhow!(
+                        "failed to decode tenant_quota_clear response: {}",
+                        err
+                    )),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn recalc_tenant_aggregates(&self, token: &str, tenant: &str) -> Result<u64> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut quota = payload_builder.init_tenant_quota_recalc();
+                quota.set_token(token);
+                quota.set_tenant_id(tenant);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_quota_recalc response payload")?
+                {
+                    payload::TenantQuotaRecalc(Ok(reply)) => Ok(reply.get_aggregate_count()),
+                    payload::TenantQuotaRecalc(Err(err)) => Err(anyhow!(
+                        "failed to decode tenant_quota_recalc response: {}",
+                        err
+                    )),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn reload_tenant(&self, token: &str, tenant: &str) -> Result<bool> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut reload = payload_builder.init_tenant_reload();
+                reload.set_token(token);
+                reload.set_tenant_id(tenant);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_reload response payload")?
+                {
+                    payload::TenantReload(Ok(reply)) => Ok(reply.get_reloaded()),
+                    payload::TenantReload(Err(err)) => {
+                        Err(anyhow!("failed to decode tenant_reload response: {}", err))
+                    }
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    pub fn publish_tenant_schemas(
+        &self,
+        token: &str,
+        tenant: &str,
+        reason: Option<&str>,
+        actor: Option<&str>,
+        labels: &[String],
+        activate: bool,
+        force: bool,
+        reload: bool,
+    ) -> Result<TenantSchemaPublishResult> {
+        let request_id = next_request_id();
+        send_control_request_blocking(
+            &self.connect_addr,
+            token,
+            self.tenant.as_deref(),
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut publish = payload_builder.init_tenant_schema_publish();
+                publish.set_token(token);
+                publish.set_tenant_id(tenant);
+                if let Some(text) = reason {
+                    publish.set_has_reason(true);
+                    publish.set_reason(text);
+                } else {
+                    publish.set_has_reason(false);
+                    publish.set_reason("");
+                }
+                if let Some(text) = actor {
+                    publish.set_has_actor(true);
+                    publish.set_actor(text);
+                } else {
+                    publish.set_has_actor(false);
+                    publish.set_actor("");
+                }
+                publish.set_activate(activate);
+                publish.set_force(force);
+                publish.set_reload(reload);
+                let mut labels_builder = publish.init_labels(labels.len() as u32);
+                for (idx, label) in labels.iter().enumerate() {
+                    labels_builder.set(idx as u32, label);
+                }
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode tenant_schema_publish response payload")?
+                {
+                    payload::TenantSchemaPublish(Ok(reply)) => {
+                        let version_id = read_text(reply.get_version_id(), "version_id")?;
+                        Ok(TenantSchemaPublishResult {
+                            version_id,
+                            activated: reply.get_activated(),
+                            skipped: reply.get_skipped(),
+                        })
+                    }
+                    payload::TenantSchemaPublish(Err(err)) => Err(anyhow!(
+                        "failed to decode tenant_schema_publish response: {}",
+                        err
+                    )),
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
 }
 
 fn create_aggregate_blocking(
     connect_addr: String,
+    tenant: Option<String>,
     token: String,
     aggregate_type: String,
     aggregate_id: String,
@@ -619,6 +1025,7 @@ fn create_aggregate_blocking(
     send_control_request_blocking(
         &connect_addr,
         &token,
+        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -675,6 +1082,7 @@ fn create_aggregate_blocking(
 
 fn append_event_blocking(
     connect_addr: String,
+    tenant: Option<String>,
     token: String,
     aggregate_type: String,
     aggregate_id: String,
@@ -705,6 +1113,7 @@ fn append_event_blocking(
     send_control_request_blocking(
         &connect_addr,
         &token,
+        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -761,6 +1170,7 @@ fn append_event_blocking(
 
 fn patch_event_blocking(
     connect_addr: String,
+    tenant: Option<String>,
     token: String,
     aggregate_type: String,
     aggregate_id: String,
@@ -788,6 +1198,7 @@ fn patch_event_blocking(
     send_control_request_blocking(
         &connect_addr,
         &token,
+        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -845,6 +1256,7 @@ fn patch_event_blocking(
 fn send_control_request_blocking<Build, Handle, T>(
     connect_addr: &str,
     handshake_token: &str,
+    handshake_tenant: Option<&str>,
     request_id: u64,
     build: Build,
     handle: Handle,
@@ -867,6 +1279,11 @@ where
         let mut hello = hello_message.init_root::<control_hello::Builder>();
         hello.set_protocol_version(CONTROL_PROTOCOL_VERSION);
         hello.set_token(handshake_token);
+        if let Some(tenant) = handshake_tenant {
+            hello.set_tenant_id(tenant);
+        } else {
+            hello.set_tenant_id("");
+        }
     }
     serialize::write_message(&mut stream, &hello_message)
         .context("failed to send control hello")?;

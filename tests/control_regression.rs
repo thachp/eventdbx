@@ -13,6 +13,8 @@ use eventdbx::{
     schema::{CreateSchemaInput, SchemaManager},
     service::CoreContext,
     store::EventStore,
+    tenant::{CoreProvider, StaticCoreProvider},
+    tenant_store::TenantAssignmentStore,
     token::{IssueTokenInput, JwtLimits, TokenManager},
 };
 use futures::AsyncWriteExt;
@@ -24,22 +26,26 @@ use tokio_util::compat::Compat;
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
 
 async fn open_control_session(
-    core: CoreContext,
+    core_provider: Arc<dyn CoreProvider>,
+    tokens: Arc<TokenManager>,
     shared_config: Arc<RwLock<Config>>,
     token: &str,
+    tenant: &str,
 ) -> Result<(
     Compat<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
     Compat<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
     TransportState,
     tokio::task::JoinHandle<Result<()>>,
 )> {
-    let (mut writer, mut reader, task) = spawn_control_session(core, shared_config);
+    let (mut writer, mut reader, task) =
+        spawn_control_session(core_provider, tokens, shared_config);
 
     let mut hello_message = Builder::new_default();
     {
         let mut hello = hello_message.init_root::<control_hello::Builder>();
         hello.set_protocol_version(CONTROL_PROTOCOL_VERSION);
         hello.set_token(token);
+        hello.set_tenant_id(tenant);
     }
     let hello_bytes = write_message_to_words(&hello_message);
     writer
@@ -97,6 +103,12 @@ async fn control_capnp_regression_flows() -> Result<()> {
         None,
         config.snowflake_worker_id,
     )?);
+    let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
+    assignments.ensure_aggregate_count("default", || {
+        store
+            .counts()
+            .map(|counts| counts.total_aggregates() as u64)
+    })?;
 
     let core = CoreContext::new(
         Arc::clone(&tokens),
@@ -105,8 +117,12 @@ async fn control_capnp_regression_flows() -> Result<()> {
         config.restrict,
         config.list_page_size,
         config.page_limit,
+        "default",
+        None,
+        Arc::clone(&assignments),
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
+    let core_provider: Arc<dyn CoreProvider> = Arc::new(StaticCoreProvider::new(core.clone()));
 
     let token_record = tokens.issue(IssueTokenInput {
         subject: "system:admin".into(),
@@ -119,6 +135,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
             "aggregate.read".into(),
         ],
         resources: vec!["*".to_string()],
+        tenants: Vec::new(),
         ttl_secs: Some(3_600),
         not_before: None,
         issued_by: "control-test".into(),
@@ -129,8 +146,14 @@ async fn control_capnp_regression_flows() -> Result<()> {
         .clone()
         .expect("issued token missing value");
 
-    let (mut writer, mut reader, mut noise, server_task) =
-        open_control_session(core.clone(), Arc::clone(&shared_config), &token_value).await?;
+    let (mut writer, mut reader, mut noise, server_task) = open_control_session(
+        Arc::clone(&core_provider),
+        Arc::clone(&tokens),
+        Arc::clone(&shared_config),
+        &token_value,
+        config.active_domain(),
+    )
+    .await?;
 
     let mut next_request_id: u64 = 1;
 
@@ -143,7 +166,8 @@ async fn control_capnp_regression_flows() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(0);
             list.set_has_take(false);
             list.set_has_sort(false);
@@ -274,7 +298,8 @@ async fn control_capnp_regression_flows() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_sort(false);
@@ -317,7 +342,8 @@ async fn control_capnp_regression_flows() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_sort(false);
@@ -452,7 +478,8 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_token(&token_value);
             list.set_aggregate_type("order");
             list.set_aggregate_id("order-1");
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(25);
             list.set_has_take(true);
         },
@@ -630,6 +657,12 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         None,
         config.snowflake_worker_id,
     )?);
+    let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
+    assignments.ensure_aggregate_count("default", || {
+        store
+            .counts()
+            .map(|counts| counts.total_aggregates() as u64)
+    })?;
 
     let core = CoreContext::new(
         Arc::clone(&tokens),
@@ -638,8 +671,12 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         config.restrict,
         config.list_page_size,
         config.page_limit,
+        "default",
+        None,
+        Arc::clone(&assignments),
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
+    let core_provider: Arc<dyn CoreProvider> = Arc::new(StaticCoreProvider::new(core.clone()));
 
     let token_record = tokens.issue(IssueTokenInput {
         subject: "system:admin".into(),
@@ -652,6 +689,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             "aggregate.read".into(),
         ],
         resources: vec!["*".to_string()],
+        tenants: Vec::new(),
         ttl_secs: Some(3_600),
         not_before: None,
         issued_by: "control-batch-test".into(),
@@ -662,8 +700,14 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         .clone()
         .expect("issued token missing value");
 
-    let (mut writer, mut reader, mut noise, server_task) =
-        open_control_session(core.clone(), Arc::clone(&shared_config), &token_value).await?;
+    let (mut writer, mut reader, mut noise, server_task) = open_control_session(
+        Arc::clone(&core_provider),
+        Arc::clone(&tokens),
+        Arc::clone(&shared_config),
+        &token_value,
+        config.active_domain(),
+    )
+    .await?;
 
     let mut next_request_id: u64 = 1;
 
@@ -887,7 +931,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             list.set_token(&token_value);
             list.set_aggregate_type("order");
             list.set_aggregate_id("order-1");
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(25);
             list.set_has_take(true);
         },
@@ -1090,7 +1135,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_filter(false);
@@ -1136,7 +1182,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_filter(false);
@@ -1228,7 +1275,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             let payload = request.reborrow().init_payload();
             let mut list = payload.init_list_aggregates();
             list.set_token(&token_value);
-            list.set_skip(0);
+            list.set_has_cursor(false);
+            list.set_cursor("");
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_filter(false);
@@ -1267,6 +1315,239 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         !restored_entry_archived,
         "active aggregates should not report archived flag"
     );
+
+    drop(writer);
+    drop(reader);
+
+    let outcome = server_task.await.context("control handler task panicked")?;
+    outcome.context("control handler returned error")?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn control_tenant_admin_commands() -> Result<()> {
+    let tempdir = tempdir().context("failed to create temp dir")?;
+    let mut config = Config::default();
+    config.data_dir = tempdir.path().to_path_buf();
+    config.data_encryption_key = None;
+
+    let tokens = Arc::new(TokenManager::load(
+        config.jwt_manager_config()?,
+        config.tokens_path(),
+        config.jwt_revocations_path(),
+        None,
+    )?);
+    let schemas = Arc::new(SchemaManager::load(config.schema_store_path())?);
+    schemas.create(CreateSchemaInput {
+        aggregate: "order".into(),
+        events: vec!["order_created".into()],
+        snapshot_threshold: None,
+    })?;
+    let store = Arc::new(EventStore::open(
+        config.event_store_path(),
+        None,
+        config.snowflake_worker_id,
+    )?);
+    let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
+    assignments.ensure_aggregate_count("default", || {
+        store
+            .counts()
+            .map(|counts| counts.total_aggregates() as u64)
+    })?;
+
+    let core = CoreContext::new(
+        Arc::clone(&tokens),
+        Arc::clone(&schemas),
+        Arc::clone(&store),
+        config.restrict,
+        config.list_page_size,
+        config.page_limit,
+        "default",
+        None,
+        Arc::clone(&assignments),
+    );
+    let shared_config = Arc::new(RwLock::new(config.clone()));
+    let core_provider: Arc<dyn CoreProvider> = Arc::new(StaticCoreProvider::new(core.clone()));
+
+    let token_record = tokens.issue(IssueTokenInput {
+        subject: "system:admin".into(),
+        group: "system".into(),
+        user: "admin".into(),
+        actions: vec!["tenant.manage".into()],
+        resources: vec!["*".to_string()],
+        tenants: Vec::new(),
+        ttl_secs: Some(3_600),
+        not_before: None,
+        issued_by: "control-tenant-test".into(),
+        limits: JwtLimits::default(),
+    })?;
+    let token_value = token_record
+        .token
+        .clone()
+        .expect("issued token missing value");
+
+    let (mut writer, mut reader, mut noise, server_task) = open_control_session(
+        Arc::clone(&core_provider),
+        Arc::clone(&tokens),
+        Arc::clone(&shared_config),
+        &token_value,
+        config.active_domain(),
+    )
+    .await?;
+
+    let mut next_request_id: u64 = 1;
+
+    let assign_changed = send_control_request(
+        &mut writer,
+        &mut reader,
+        &mut noise,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut assign = payload.init_tenant_assign();
+            assign.set_token(&token_value);
+            assign.set_tenant_id("default");
+            assign.set_shard_id("shard-0007");
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::TenantAssign(Ok(result)) => Ok(result.get_changed()),
+            control_response::payload::TenantAssign(Err(err)) => {
+                Err(anyhow!("failed to decode tenant_assign response: {err}"))
+            }
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert!(assign_changed);
+    next_request_id += 1;
+
+    let duplicate_assign = send_control_request(
+        &mut writer,
+        &mut reader,
+        &mut noise,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut assign = payload.init_tenant_assign();
+            assign.set_token(&token_value);
+            assign.set_tenant_id("default");
+            assign.set_shard_id("shard-0007");
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::TenantAssign(Ok(result)) => Ok(result.get_changed()),
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert!(!duplicate_assign);
+    next_request_id += 1;
+
+    let unassign_changed = send_control_request(
+        &mut writer,
+        &mut reader,
+        &mut noise,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut unassign = payload.init_tenant_unassign();
+            unassign.set_token(&token_value);
+            unassign.set_tenant_id("default");
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::TenantUnassign(Ok(result)) => Ok(result.get_changed()),
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert!(unassign_changed);
+    next_request_id += 1;
+
+    let quota_set = send_control_request(
+        &mut writer,
+        &mut reader,
+        &mut noise,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut quota = payload.init_tenant_quota_set();
+            quota.set_token(&token_value);
+            quota.set_tenant_id("default");
+            quota.set_max_aggregates(5);
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::TenantQuotaSet(Ok(result)) => Ok(result.get_changed()),
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert!(quota_set);
+    next_request_id += 1;
+
+    let quota_clear = send_control_request(
+        &mut writer,
+        &mut reader,
+        &mut noise,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut quota = payload.init_tenant_quota_clear();
+            quota.set_token(&token_value);
+            quota.set_tenant_id("default");
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::TenantQuotaClear(Ok(result)) => Ok(result.get_changed()),
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert!(quota_clear);
+    next_request_id += 1;
+
+    let aggregate_count = send_control_request(
+        &mut writer,
+        &mut reader,
+        &mut noise,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut quota = payload.init_tenant_quota_recalc();
+            quota.set_token(&token_value);
+            quota.set_tenant_id("default");
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::TenantQuotaRecalc(Ok(result)) => {
+                Ok(result.get_aggregate_count())
+            }
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert_eq!(aggregate_count, 0);
 
     drop(writer);
     drop(reader);

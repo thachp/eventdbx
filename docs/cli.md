@@ -38,9 +38,17 @@ Run without flags to print the current configuration. The first invocation must 
 ## Tokens
 
 - `dbx token generate --group <name> --user <name> [--expiration <secs>] [--limit <writes>] [--keep-alive]`
+- Add `--tenant <id>` (repeatable) to restrict the token to specific tenant ids; the server rejects requests for tenants not present in the token claims.
 - `dbx token list`
 - `dbx token revoke --token <value>`
 - `dbx token refresh --token <value> [--expiration <secs>] [--limit <writes>]`
+
+## Tenants
+
+- `dbx tenant assign <tenant> --shard <shard-0001>` – Pin a tenant to an explicit shard label. Omit the command to continue using hash-based placement.
+- `dbx tenant unassign <tenant>` – Remove the explicit assignment so the tenant hashes across the configured shard count.
+- `dbx tenant list [--shard <shard-0001>] [--json]` – Display manual assignments (filters by shard and supports JSON output).
+- `dbx tenant stats [--json]` – Summarise explicit assignments per shard.
 
 ## Schemas
 
@@ -49,13 +57,19 @@ Run without flags to print the current configuration. The first invocation must 
 - `dbx schema remove <name> <event>`
 - `dbx schema annotate <name> <event> [--note <text>] [--clear]`
 - `dbx schema list`
+- `dbx schema field <aggregate> <field> [--type <type>] [--format <format>] [--required|--not-required] [...rules]`
+- `dbx schema alter <aggregate> <event> [--add <field,...>] [--remove <field,...>] [--set <field,...>] [--clear]`
+
+`schema field` lets you manage column types, formats, substring/regex checks, numeric ranges, nested object rules, or clear them entirely (`--clear-type`, `--clear-rules`) without editing `schemas.json` by hand.
+
+`schema alter` updates the allowed field list per event—append or remove entries incrementally, replace the list via `--set`, or empty it with `--clear`.
 
 ## Aggregates
 
 - `dbx aggregate create --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--metadata <json>] [--note <text>] [--json]`
 - `dbx aggregate apply --aggregate <type> --aggregate-id <id> --event <name> [--field KEY=VALUE...] [--payload <json>] [--stage]`
 - `dbx aggregate patch --aggregate <type> --aggregate-id <id> --event <name> --patch <json> [--stage] [--metadata <json>] [--note <text>]`
-- `dbx aggregate list [--skip <n>] [--take <n>] [--stage]`
+- `dbx aggregate list [--cursor <token>] [--take <n>] [--stage]`
 - `dbx aggregate get --aggregate <type> --aggregate-id <id> [--include-events]`
 - `dbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
 - `dbx aggregate verify --aggregate <type> --aggregate-id <id>`
@@ -66,6 +80,8 @@ Run without flags to print the current configuration. The first invocation must 
 - `dbx aggregate export [<type>] [--all] --output <path> [--format csv|json] [--zip] [--pretty]`
 
 Staging (`--stage`) records events to `~/.eventdbx/staged_events.json` until you call `dbx aggregate commit`.
+
+Cursor pagination uses opaque-but-readable tokens. Active aggregates encode as `a:<aggregate_type>:<aggregate_id>` (archived entries use `r:`) and events append the version (`a:<aggregate_type>:<aggregate_id>:<version>`). Capture the last item from a page and feed its token back via `--cursor` to resume listing.
 
 ## Plugins & queues
 
@@ -97,7 +113,7 @@ EventDBX can replicate an entire domain (or selected aggregates) between two nod
    dbx checkout -d example --remote replica.external:6363 --token "<remote token>"
    ```
 
-   Re-run the command with `--remote` or `--token` to rotate either value. Use `--port` when the socket listens on a non-default port.
+   Re-run the command with `--remote` or `--token` to rotate either value. Use `--port` when the socket listens on a non-default port, and add `--remote-tenant <id>` when the remote server hosts multiple tenants so `dbx push`/`dbx pull` know which tenant to target.
 
 2. Push schemas before pushing data so the destination validates events the same way:
 

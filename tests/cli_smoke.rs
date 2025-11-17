@@ -189,6 +189,26 @@ impl CliTest {
     fn data_dir(&self) -> PathBuf {
         self.home.join(".eventdbx")
     }
+
+    fn config_path(&self) -> PathBuf {
+        self.data_dir().join("config.toml")
+    }
+
+    fn load_config(&self) -> Result<eventdbx::config::Config> {
+        let path = self.config_path();
+        if !path.exists() {
+            let _ = self.run(&["config"])?;
+        }
+        let contents = fs::read_to_string(&path).context("failed to read config.toml")?;
+        let cfg: eventdbx::config::Config =
+            toml::from_str(&contents).context("failed to parse config.toml")?;
+        Ok(cfg)
+    }
+
+    fn plugin_queue_db_path(&self) -> Result<PathBuf> {
+        let config = self.load_config()?;
+        Ok(config.plugin_queue_db_path())
+    }
 }
 
 #[test]
@@ -215,6 +235,8 @@ fn token_generate_and_list_json_round_trip() -> Result<()> {
         "alice",
         "--action",
         "aggregate.read",
+        "--tenant",
+        "default",
         "--json",
     ])?;
     let record: Value =
@@ -244,7 +266,9 @@ fn token_generate_and_list_json_round_trip() -> Result<()> {
 #[test]
 fn token_generate_requires_action_for_non_root() -> Result<()> {
     let cli = CliTest::new()?;
-    let failure = cli.run_failure(&["token", "generate", "--group", "ops", "--user", "alice"])?;
+    let failure = cli.run_failure(&[
+        "token", "generate", "--group", "ops", "--user", "alice", "--tenant", "default",
+    ])?;
     assert!(
         failure
             .stderr
@@ -267,6 +291,8 @@ fn token_refresh_replaces_token() -> Result<()> {
         "alice",
         "--action",
         "aggregate.read",
+        "--tenant",
+        "default",
         "--json",
     ])?;
     let original_token = original["token"]
@@ -409,7 +435,7 @@ cli_success_contains_test!(
 fn queue_clear_prompts_and_respects_confirmation() -> Result<()> {
     let cli = CliTest::new()?;
     {
-        let queue_path = cli.data_dir().join("plugin_queue.db");
+        let queue_path = cli.plugin_queue_db_path()?;
         let store = PluginQueueStore::open(queue_path.as_path()).map_err(anyhow::Error::from)?;
         let job = store
             .enqueue_job(
@@ -447,7 +473,7 @@ fn queue_clear_prompts_and_respects_confirmation() -> Result<()> {
 fn queue_status_displays_dead_events() -> Result<()> {
     let cli = CliTest::new()?;
     {
-        let queue_path = cli.data_dir().join("plugin_queue.db");
+        let queue_path = cli.plugin_queue_db_path()?;
         let store = PluginQueueStore::open(queue_path.as_path()).map_err(anyhow::Error::from)?;
         store
             .enqueue_job(
@@ -605,6 +631,207 @@ fn schema_hide_field() -> Result<()> {
         hidden.iter().any(|value| value == "internal_notes"),
         "expected hidden_fields to include internal_notes: {}",
         schema_after_hide
+    );
+
+    Ok(())
+}
+
+#[test]
+fn schema_field_sets_type_and_rules() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&[
+        "schema",
+        "create",
+        "contacts",
+        "--events",
+        "contact_created",
+    ])?;
+
+    let type_out = cli.run(&["schema", "field", "contacts", "email", "--type", "text"])?;
+    assert!(
+        type_out.contains("type=text"),
+        "unexpected schema field type output:\n{}",
+        type_out
+    );
+
+    let rules_out = cli.run(&[
+        "schema",
+        "field",
+        "contacts",
+        "email",
+        "--format",
+        "email",
+        "--required",
+    ])?;
+    assert!(
+        rules_out.contains("rules=updated"),
+        "unexpected schema field rules output:\n{}",
+        rules_out
+    );
+
+    let schema = cli.run_json(&["schema", "contacts"])?;
+    let column = schema["column_types"]["email"]
+        .as_object()
+        .context("email column missing from schema json")?;
+    assert_eq!(column.get("type"), Some(&json!("text")));
+    assert_eq!(column.get("required"), Some(&json!(true)));
+    assert_eq!(column.get("format"), Some(&json!("email")));
+
+    let clear_rules = cli.run(&[
+        "schema",
+        "field",
+        "contacts",
+        "email",
+        "--clear-format",
+        "--not-required",
+    ])?;
+    assert!(
+        clear_rules.contains("rules=updated"),
+        "unexpected schema field clear output:\n{}",
+        clear_rules
+    );
+    let after = cli.run_json(&["schema", "contacts"])?;
+    assert_eq!(after["column_types"]["email"], json!("text"));
+
+    Ok(())
+}
+
+#[test]
+fn schema_field_clear_type_removes_column() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "orders", "--events", "order_created"])?;
+    cli.run(&["schema", "field", "orders", "total", "--type", "integer"])?;
+
+    let cleared = cli.run(&["schema", "field", "orders", "total", "--clear-type"])?;
+    assert!(
+        cleared.contains("type=cleared"),
+        "unexpected schema field clear type output:\n{}",
+        cleared
+    );
+
+    let schema = cli.run_json(&["schema", "orders"])?;
+    let columns = schema["column_types"]
+        .as_object()
+        .context("column_types missing from schema json")?;
+    assert!(
+        !columns.contains_key("total"),
+        "expected total column to be removed: {}",
+        schema
+    );
+    Ok(())
+}
+
+#[test]
+fn schema_alter_add_remove_flow() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "person", "--events", "person_created"])?;
+
+    let add = cli.run(&[
+        "schema",
+        "alter",
+        "person",
+        "person_created",
+        "--add",
+        "first_name,last_name",
+    ])?;
+    assert!(
+        add.contains("added=first_name,last_name"),
+        "unexpected schema alter add output:\n{}",
+        add
+    );
+
+    let schema = cli.run_json(&["schema", "person"])?;
+    let fields = schema["events"]["person_created"]["fields"]
+        .as_array()
+        .context("expected fields array after add")?;
+    assert!(
+        fields.iter().any(|value| value == "first_name")
+            && fields.iter().any(|value| value == "last_name"),
+        "field list missing expected entries: {}",
+        schema
+    );
+
+    let remove = cli.run(&[
+        "schema",
+        "alter",
+        "person",
+        "person_created",
+        "--remove",
+        "last_name",
+    ])?;
+    assert!(
+        remove.contains("removed=last_name"),
+        "unexpected schema alter remove output:\n{}",
+        remove
+    );
+
+    let after_remove = cli.run_json(&["schema", "person"])?;
+    let remaining = after_remove["events"]["person_created"]["fields"]
+        .as_array()
+        .context("expected fields array after remove")?;
+    let remaining_values: Vec<_> = remaining
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        remaining_values,
+        vec!["first_name".to_string()],
+        "expected only first_name after removal: {}",
+        after_remove
+    );
+
+    Ok(())
+}
+
+#[test]
+fn schema_alter_set_and_clear() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "order", "--events", "order_created"])?;
+
+    let set = cli.run(&[
+        "schema",
+        "alter",
+        "order",
+        "order_created",
+        "--set",
+        "order_id,status",
+    ])?;
+    assert!(
+        set.contains("fields=order_id,status"),
+        "unexpected schema alter set output:\n{}",
+        set
+    );
+
+    let schema = cli.run_json(&["schema", "order"])?;
+    let fields = schema["events"]["order_created"]["fields"]
+        .as_array()
+        .context("expected fields array after set")?;
+    let set_values: Vec<_> = fields
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        set_values,
+        vec!["order_id".to_string(), "status".to_string()],
+        "expected set fields to replace list: {}",
+        schema
+    );
+
+    let cleared = cli.run(&["schema", "alter", "order", "order_created", "--clear"])?;
+    assert!(
+        cleared.contains("fields=cleared"),
+        "unexpected schema alter clear output:\n{}",
+        cleared
+    );
+
+    let after_clear = cli.run_json(&["schema", "order"])?;
+    let cleared_fields = after_clear["events"]["order_created"]["fields"]
+        .as_array()
+        .context("expected fields array after clear")?;
+    assert!(
+        cleared_fields.is_empty(),
+        "expected fields to be empty after clear: {}",
+        after_clear
     );
 
     Ok(())
@@ -953,6 +1180,8 @@ fn token_revoke_updates_status() -> Result<()> {
         "alice",
         "--action",
         "aggregate.read",
+        "--tenant",
+        "default",
         "--json",
     ])?;
     let token = record["token"]
@@ -972,6 +1201,335 @@ fn token_revoke_updates_status() -> Result<()> {
     assert_eq!(array.len(), 1);
     assert_eq!(array[0]["status"], json!("revoked"));
 
+    Ok(())
+}
+
+#[test]
+fn tenant_assign_list_and_unassign_flow() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&["tenant", "assign", "people", "--shard", "shard-0003"])?;
+    cli.run(&["tenant", "assign", "billing", "--shard", "4"])?;
+
+    let list_all = cli.run_json(&["tenant", "list", "--json"])?;
+    let entries = list_all
+        .as_array()
+        .context("tenant list did not return an array")?;
+    assert_eq!(
+        entries.len(),
+        2,
+        "expected two tenant assignments: {entries:?}"
+    );
+    assert!(
+        entries.iter().any(|entry| {
+            entry["tenant"] == json!("people")
+                && entry["shard"] == json!("shard-0003")
+                && entry["quota"].is_null()
+        }),
+        "missing people assignment: {entries:?}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["tenant"] == json!("billing")
+                && entry["shard"] == json!("shard-0004")
+                && entry["quota"].is_null()),
+        "missing billing assignment: {entries:?}"
+    );
+
+    let filtered = cli.run_json(&["tenant", "list", "--json", "--shard", "4"])?;
+    let filtered_array = filtered
+        .as_array()
+        .context("filtered tenant list did not return an array")?;
+    assert_eq!(filtered_array.len(), 1, "expected one entry for shard-0004");
+    assert_eq!(filtered_array[0]["tenant"], json!("billing"));
+    assert!(filtered_array[0]["quota"].is_null());
+
+    cli.run(&["tenant", "unassign", "people"])?;
+    let after_unassign = cli.run_json(&["tenant", "list", "--json"])?;
+    let remaining = after_unassign
+        .as_array()
+        .context("tenant list did not return an array after unassign")?;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0]["tenant"], json!("billing"));
+    assert_eq!(remaining[0]["shard"], json!("shard-0004"));
+    assert!(remaining[0]["quota"].is_null());
+    Ok(())
+}
+
+#[test]
+fn tenant_stats_reports_counts() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&["tenant", "assign", "alpha", "--shard", "1"])?;
+    cli.run(&["tenant", "assign", "bravo", "--shard", "1"])?;
+    cli.run(&["tenant", "assign", "charlie", "--shard", "2"])?;
+
+    let stats = cli.run_json(&["tenant", "stats", "--json"])?;
+    let stats_map = stats
+        .as_object()
+        .context("tenant stats did not return an object")?;
+    assert_eq!(stats_map.get("shard-0001").and_then(Value::as_u64), Some(2));
+    assert_eq!(stats_map.get("shard-0002").and_then(Value::as_u64), Some(1));
+
+    cli.run(&["tenant", "unassign", "alpha"])?;
+    let after = cli.run_json(&["tenant", "stats", "--json"])?;
+    let after_map = after
+        .as_object()
+        .context("tenant stats did not return an object after unassign")?;
+    assert_eq!(after_map.get("shard-0001").and_then(Value::as_u64), Some(1));
+    assert_eq!(after_map.get("shard-0002").and_then(Value::as_u64), Some(1));
+    Ok(())
+}
+
+#[test]
+fn tenant_schema_publish_records_history() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&[
+        "schema",
+        "create",
+        "orders",
+        "--events",
+        "order_created",
+        "--json",
+    ])?;
+
+    let publish_output = cli.run(&[
+        "tenant",
+        "schema",
+        "publish",
+        "default",
+        "--activate",
+        "--reason",
+        "initial load",
+        "--no-reload",
+    ])?;
+    assert!(
+        publish_output.contains("published version="),
+        "unexpected publish output: {}",
+        publish_output
+    );
+
+    let manifest = cli.run_json(&["tenant", "schema", "history", "default", "--json"])?;
+    let active = manifest["active_version"]
+        .as_str()
+        .context("history output missing active_version")?;
+    let versions = manifest["versions"]
+        .as_array()
+        .context("history output missing versions array")?;
+    assert_eq!(versions.len(), 1, "expected a single schema version");
+    assert_eq!(
+        versions[0]["id"],
+        json!(active),
+        "first version id should be active"
+    );
+    assert_eq!(
+        versions[0]["reason"],
+        json!("initial load"),
+        "version reason should match publish flag"
+    );
+    let audit = manifest["audit_log"]
+        .as_array()
+        .context("history output missing audit log")?;
+    assert_eq!(
+        audit.len(),
+        2,
+        "expected publish + activate audit entries, got {:?}",
+        audit
+    );
+    assert_eq!(audit[0]["action"], json!("publish"));
+    assert_eq!(audit[1]["action"], json!("activate"));
+    Ok(())
+}
+
+#[test]
+fn tenant_schema_diff_and_rollback_flow() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&[
+        "schema",
+        "create",
+        "orders",
+        "--events",
+        "order_created",
+        "--json",
+    ])?;
+    cli.run(&[
+        "tenant",
+        "schema",
+        "publish",
+        "default",
+        "--activate",
+        "--no-reload",
+    ])?;
+
+    cli.run(&["schema", "add", "orders", "order_shipped"])?;
+    cli.run(&[
+        "tenant",
+        "schema",
+        "publish",
+        "default",
+        "--activate",
+        "--reason",
+        "add shipped",
+        "--no-reload",
+    ])?;
+
+    let manifest = cli.run_json(&["tenant", "schema", "history", "default", "--json"])?;
+    let versions = manifest["versions"]
+        .as_array()
+        .context("expected versions array after second publish")?;
+    assert!(
+        versions.len() >= 2,
+        "history should include at least two versions: {:?}",
+        versions
+    );
+    let first_id = versions
+        .first()
+        .and_then(|value| value["id"].as_str())
+        .context("missing id for first version")?
+        .to_string();
+    let latest_id = versions
+        .last()
+        .and_then(|value| value["id"].as_str())
+        .context("missing id for latest version")?
+        .to_string();
+    assert_ne!(
+        first_id, latest_id,
+        "second publish should create new version"
+    );
+
+    let diff = cli.run_json(&[
+        "tenant",
+        "schema",
+        "diff",
+        "default",
+        "--from",
+        first_id.as_str(),
+        "--to",
+        latest_id.as_str(),
+        "--json",
+    ])?;
+    let operations = diff
+        .as_array()
+        .context("diff output was not a JSON array")?;
+    assert!(
+        !operations.is_empty(),
+        "expected diff to include at least one operation"
+    );
+
+    let unified_output = cli.run(&[
+        "tenant",
+        "schema",
+        "diff",
+        "default",
+        "--from",
+        first_id.as_str(),
+        "--to",
+        latest_id.as_str(),
+        "--style",
+        "unified",
+        "--color",
+        "always",
+    ])?;
+    assert!(
+        (unified_output.contains("@@") || unified_output.contains("+++ "))
+            && unified_output.contains("\u{1b}[32m")
+            && unified_output.contains("\u{1b}[31m"),
+        "unified diff output did not include expected formatting:\n{}",
+        unified_output
+    );
+
+    let split_output = cli.run(&[
+        "tenant",
+        "schema",
+        "diff",
+        "default",
+        "--from",
+        first_id.as_str(),
+        "--to",
+        latest_id.as_str(),
+        "--style",
+        "split",
+        "--color",
+        "always",
+    ])?;
+    assert!(
+        split_output.contains('|') && split_output.contains("schema@"),
+        "split diff output missing expected columns:\n{}",
+        split_output
+    );
+
+    let rollback_output = cli.run(&[
+        "tenant",
+        "schema",
+        "rollback",
+        "default",
+        "--version",
+        first_id.as_str(),
+        "--no-reload",
+    ])?;
+    assert!(
+        rollback_output.contains("rolled back") || rollback_output.contains("already active"),
+        "unexpected rollback output: {}",
+        rollback_output
+    );
+
+    let post_manifest = cli.run_json(&["tenant", "schema", "history", "default", "--json"])?;
+    assert_eq!(
+        post_manifest["active_version"],
+        json!(first_id),
+        "rollback should update active version"
+    );
+    Ok(())
+}
+
+#[test]
+fn tenant_quota_limits_aggregate_creation() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.run(&["tenant", "quota", "set", "default", "--max-aggregates", "1"])?;
+
+    let list = cli.run_json(&["tenant", "list", "--json"])?;
+    let quota_entry = list
+        .as_array()
+        .context("tenant list did not return an array after quota set")?
+        .iter()
+        .find(|entry| entry["tenant"] == json!("default"))
+        .cloned()
+        .context("missing default tenant entry with quota")?;
+    assert_eq!(quota_entry["quota"], json!(1));
+
+    cli.run(&["schema", "create", "order", "--events", "order_created"])?;
+    cli.create_aggregate("order", "order-1", "order_created")?;
+
+    let failure = cli.run_failure(&[
+        "aggregate",
+        "create",
+        "order",
+        "order-2",
+        "--event",
+        "order_created",
+        "--json",
+    ])?;
+    assert!(
+        failure.stderr.contains("quota"),
+        "unexpected quota failure message:\n{}",
+        failure.stderr
+    );
+
+    cli.run(&["tenant", "quota", "clear", "default"])?;
+    let list_after_clear = cli.run_json(&["tenant", "list", "--json"])?;
+    assert!(
+        !list_after_clear
+            .as_array()
+            .context("tenant list did not return an array after quota clear")?
+            .iter()
+            .any(|entry| entry["tenant"] == json!("default")),
+        "default tenant entry should disappear once quota is cleared"
+    );
+    cli.create_aggregate("order", "order-2", "order_created")?;
     Ok(())
 }
 
@@ -1456,12 +2014,11 @@ fn aggregate_create_outputs_state() -> Result<()> {
 #[test]
 fn aggregate_list_json_empty() -> Result<()> {
     let cli = CliTest::new()?;
-    let failure = cli.run_failure(&["aggregate", "list", "--json"])?;
-    assert!(
-        failure.stderr.contains("storage error"),
-        "unexpected aggregate list failure:\n{}",
-        failure.stderr
-    );
+    let output = cli.run_json(&["aggregate", "list", "--json"])?;
+    let array = output
+        .as_array()
+        .context("aggregate list did not return an array")?;
+    assert!(array.is_empty(), "expected no aggregates, got {}", output);
     Ok(())
 }
 
@@ -1835,22 +2392,36 @@ fn aggregate_list_supports_sorting() -> Result<()> {
     assert_eq!(version_list[1]["version"], 1);
     assert_eq!(version_list[2]["version"], 1);
 
+    let first_page = cli.run_json(&["aggregate", "list", "--json", "--take", "1"])?;
+    let first_list = first_page
+        .as_array()
+        .context("first aggregate page did not return an array")?;
+    assert_eq!(first_list.len(), 1);
+    assert_eq!(
+        first_list[0]["aggregate_id"], "invoice-1",
+        "expected invoice-1 to appear first without an explicit sort"
+    );
+    let aggregate_type = first_list[0]["aggregate_type"]
+        .as_str()
+        .context("first page missing aggregate_type")?;
+    let aggregate_id = first_list[0]["aggregate_id"]
+        .as_str()
+        .context("first page missing aggregate_id")?;
+    let cursor = format!("a:{}:{}", aggregate_type, aggregate_id);
     let paged = cli.run_json(&[
         "aggregate",
         "list",
         "--json",
         "--take",
         "1",
-        "--skip",
-        "1",
-        "--sort",
-        "version:desc,aggregate_id:asc",
+        "--cursor",
+        &cursor,
     ])?;
     let paged_list = paged
         .as_array()
-        .context("paged aggregate list did not return an array")?;
+        .context("cursor-based aggregate list did not return an array")?;
     assert_eq!(paged_list.len(), 1);
-    assert_eq!(paged_list[0]["aggregate_id"], "invoice-1");
+    assert_eq!(paged_list[0]["aggregate_id"], "order-1");
 
     Ok(())
 }

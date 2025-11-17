@@ -1,9 +1,10 @@
 use std::{
     collections::BTreeMap,
-    env,
+    env, fs,
     io::Cursor,
     path::{Path, PathBuf},
     process::Stdio,
+    str::FromStr,
     sync::{Arc, RwLock},
     time::Instant,
 };
@@ -19,6 +20,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     process::Command,
     task::{JoinHandle, spawn_blocking},
+    time::{Duration, sleep},
 };
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, error, info, warn};
@@ -39,11 +41,17 @@ use crate::{
         write_encrypted_frame,
     },
     schema::AggregateSchema,
+    schema_history::{PublishOptions, SchemaHistoryManager},
     service::{
         AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
         normalize_optional_comment,
     },
-    store::{AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState, EventRecord},
+    store::{
+        AggregateCursor, AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState,
+        EventCursor, EventRecord,
+    },
+    tenant::{CoreProvider, normalize_tenant_id},
+    token::{JwtClaims, TokenManager},
 };
 
 #[derive(Debug, Clone)]
@@ -56,6 +64,7 @@ pub struct CliCommandResult {
 enum ControlReply {
     ListAggregates {
         aggregates: Vec<AggregateState>,
+        next_cursor: Option<String>,
     },
     GetAggregate {
         found: bool,
@@ -65,6 +74,7 @@ enum ControlReply {
         aggregate_type: String,
         aggregate_id: String,
         events: Vec<EventRecord>,
+        next_cursor: Option<String>,
     },
     AppendEvent {
         event_json: Option<String>,
@@ -82,12 +92,37 @@ enum ControlReply {
     },
     ListSchemas(String),
     ReplaceSchemas(u32),
+    TenantAssign {
+        changed: bool,
+        shard: String,
+    },
+    TenantUnassign {
+        changed: bool,
+    },
+    TenantQuotaSet {
+        changed: bool,
+        quota: Option<u64>,
+    },
+    TenantQuotaClear {
+        changed: bool,
+    },
+    TenantQuotaRecalc {
+        aggregate_count: u64,
+    },
+    TenantReload {
+        reloaded: bool,
+    },
+    TenantSchemaPublish {
+        version_id: String,
+        activated: bool,
+        skipped: bool,
+    },
 }
 
 enum ControlCommand {
     ListAggregates {
         token: String,
-        skip: usize,
+        cursor: Option<AggregateCursor>,
         take: Option<usize>,
         filter: Option<FilterExpr>,
         sort: Option<Vec<AggregateSort>>,
@@ -103,7 +138,7 @@ enum ControlCommand {
         token: String,
         aggregate_type: String,
         aggregate_id: String,
-        skip: usize,
+        cursor: Option<EventCursor>,
         take: Option<usize>,
     },
     AppendEvent {
@@ -157,16 +192,54 @@ enum ControlCommand {
         token: String,
         schemas_json: String,
     },
+    TenantAssign {
+        token: String,
+        tenant: String,
+        shard: String,
+    },
+    TenantUnassign {
+        token: String,
+        tenant: String,
+    },
+    TenantQuotaSet {
+        token: String,
+        tenant: String,
+        max_aggregates: u64,
+    },
+    TenantQuotaClear {
+        token: String,
+        tenant: String,
+    },
+    TenantQuotaRecalc {
+        token: String,
+        tenant: String,
+    },
+    TenantReload {
+        token: String,
+        tenant: String,
+    },
+    TenantSchemaPublish {
+        token: String,
+        tenant: String,
+        reason: Option<String>,
+        actor: Option<String>,
+        labels: Vec<String>,
+        activate: bool,
+        force: bool,
+        reload: bool,
+    },
 }
 
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
 const CONTROL_RESPONSE_HEADROOM: usize = 4 * 1024;
+const TENANT_MANAGE_ACTION: &str = "tenant.manage";
 
 enum FirstMessage {
     Cli(capnp::message::Reader<OwnedSegments>),
     Control {
         protocol_version: u16,
         token_result: Result<String, String>,
+        tenant_result: Result<Option<String>, String>,
     },
 }
 
@@ -182,10 +255,44 @@ fn control_error_code(err: &EventError) -> &'static str {
         EventError::SchemaNotFound => "schema_not_found",
         EventError::InvalidSchema(_) => "invalid_schema",
         EventError::SchemaViolation(_) => "schema_violation",
+        EventError::InvalidCursor(_) => "invalid_cursor",
         EventError::Config(_) => "config",
         EventError::Storage(_) => "storage",
         EventError::Io(_) => "io",
         EventError::Serialization(_) => "serialization",
+        EventError::TenantQuotaExceeded(_) => "tenant_quota",
+    }
+}
+
+async fn refresh_tenant_context(core_provider: Arc<dyn CoreProvider>, tenant: &str) -> bool {
+    let mut attempt = 0usize;
+    loop {
+        match core_provider.core_for(tenant) {
+            Ok(_) => return true,
+            Err(EventError::Storage(message)) => {
+                let lower = message.to_ascii_lowercase();
+                if lower.contains("lock") && attempt < 5 {
+                    attempt += 1;
+                    sleep(Duration::from_millis(100 * attempt as u64)).await;
+                    continue;
+                }
+                warn!(
+                    tenant = %tenant,
+                    attempt = attempt,
+                    "tenant reload skipped; failed to open context: {}",
+                    message
+                );
+                return false;
+            }
+            Err(err) => {
+                warn!(
+                    tenant = %tenant,
+                    "tenant reload skipped; failed to open context: {}",
+                    err
+                );
+                return false;
+            }
+        }
     }
 }
 
@@ -202,6 +309,13 @@ fn control_command_name(command: &ControlCommand) -> &'static str {
         ControlCommand::SetAggregateArchive { .. } => "set_aggregate_archive",
         ControlCommand::ListSchemas { .. } => "list_schemas",
         ControlCommand::ReplaceSchemas { .. } => "replace_schemas",
+        ControlCommand::TenantAssign { .. } => "tenant_assign",
+        ControlCommand::TenantUnassign { .. } => "tenant_unassign",
+        ControlCommand::TenantQuotaSet { .. } => "tenant_quota_set",
+        ControlCommand::TenantQuotaClear { .. } => "tenant_quota_clear",
+        ControlCommand::TenantQuotaRecalc { .. } => "tenant_quota_recalc",
+        ControlCommand::TenantReload { .. } => "tenant_reload",
+        ControlCommand::TenantSchemaPublish { .. } => "tenant_schema_publish",
     }
 }
 
@@ -223,7 +337,8 @@ pub mod test_support {
     use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
     pub fn spawn_control_session(
-        core: CoreContext,
+        core_provider: Arc<dyn CoreProvider>,
+        tokens: Arc<TokenManager>,
         shared_config: Arc<RwLock<Config>>,
     ) -> (
         Compat<WriteHalf<DuplexStream>>,
@@ -238,7 +353,7 @@ pub mod test_support {
             let message = read_message(&mut server_reader, ReaderOptions::new())
                 .await
                 .context("failed to read control hello")?;
-            let (protocol_version, token_result) = {
+            let (protocol_version, token_result, tenant_result) = {
                 let hello = message
                     .get_root::<control_hello::Reader>()
                     .context("failed to decode control hello")?;
@@ -252,15 +367,27 @@ pub mod test_support {
                             .map_err(|err| format!("invalid UTF-8 in control token: {err}"))
                             .map(|value| value.trim().to_string())
                     });
-                (protocol_version, token_result)
+                let tenant_result = hello
+                    .get_tenant_id()
+                    .map_err(|err| format!("failed to read control tenant id: {err}"))
+                    .and_then(|reader| {
+                        reader
+                            .to_str()
+                            .map_err(|err| format!("invalid UTF-8 in control tenant id: {err}"))
+                            .map(|value| value.trim().to_string())
+                    })
+                    .map(|value| if value.is_empty() { None } else { Some(value) });
+                (protocol_version, token_result, tenant_result)
             };
             drop(message);
             handle_control_handshake(
                 protocol_version,
                 token_result,
+                tenant_result,
                 &mut server_reader,
                 &mut server_writer,
-                core,
+                Arc::clone(&tokens),
+                Arc::clone(&core_provider),
                 shared_config,
             )
             .await
@@ -277,7 +404,8 @@ pub mod test_support {
 pub async fn start(
     bind_addr: &str,
     config_path: Arc<PathBuf>,
-    core: CoreContext,
+    tokens: Arc<TokenManager>,
+    core_provider: Arc<dyn CoreProvider>,
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<JoinHandle<()>> {
     let listener = TcpListener::bind(bind_addr)
@@ -290,11 +418,14 @@ pub async fn start(
     info!("CLI Cap'n Proto server listening on {}", display_addr);
 
     let handle = tokio::spawn({
-        let core = core.clone();
+        let core_provider = Arc::clone(&core_provider);
+        let tokens = Arc::clone(&tokens);
         let shared_config = Arc::clone(&shared_config);
         let config_path = Arc::clone(&config_path);
         async move {
-            if let Err(err) = serve(listener, config_path, core, shared_config).await {
+            if let Err(err) =
+                serve(listener, config_path, tokens, core_provider, shared_config).await
+            {
                 warn!("CLI proxy server terminated: {err:?}");
             }
         }
@@ -305,7 +436,8 @@ pub async fn start(
 async fn serve(
     listener: TcpListener,
     config_path: Arc<PathBuf>,
-    core: CoreContext,
+    tokens: Arc<TokenManager>,
+    core_provider: Arc<dyn CoreProvider>,
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<()> {
     loop {
@@ -314,10 +446,19 @@ async fn serve(
             .await
             .context("failed to accept CLI proxy connection")?;
         let config_path = Arc::clone(&config_path);
-        let core = core.clone();
+        let core_provider = Arc::clone(&core_provider);
+        let tokens = Arc::clone(&tokens);
         let shared_config = Arc::clone(&shared_config);
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, config_path, core, shared_config).await {
+            if let Err(err) = handle_connection(
+                stream,
+                config_path,
+                Arc::clone(&tokens),
+                Arc::clone(&core_provider),
+                shared_config,
+            )
+            .await
+            {
                 warn!(target: "cli_proxy", peer = %peer, "CLI proxy connection error: {err:?}");
             }
         });
@@ -327,7 +468,8 @@ async fn serve(
 async fn handle_connection(
     stream: TcpStream,
     config_path: Arc<PathBuf>,
-    core: CoreContext,
+    tokens: Arc<TokenManager>,
+    core_provider: Arc<dyn CoreProvider>,
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<()> {
     let (reader, writer) = stream.into_split();
@@ -356,13 +498,16 @@ async fn handle_connection(
         FirstMessage::Control {
             protocol_version,
             token_result,
+            tenant_result,
         } => {
             handle_control_handshake(
                 protocol_version,
                 token_result,
+                tenant_result,
                 &mut reader,
                 &mut writer,
-                core,
+                Arc::clone(&tokens),
+                core_provider,
                 shared_config,
             )
             .await
@@ -431,9 +576,11 @@ where
 async fn handle_control_handshake<R, W>(
     protocol_version: u16,
     token_result: Result<String, String>,
+    tenant_result: Result<Option<String>, String>,
     reader: &mut R,
     writer: &mut W,
-    core: CoreContext,
+    tokens: Arc<TokenManager>,
+    core_provider: Arc<dyn CoreProvider>,
     shared_config: Arc<RwLock<Config>>,
 ) -> Result<()>
 where
@@ -442,29 +589,93 @@ where
 {
     let handshake_start = Instant::now();
 
-    let tokens = core.tokens();
-    let (accepted, response_text, claims, token) = if protocol_version != CONTROL_PROTOCOL_VERSION {
-        (
-            false,
-            format!("unsupported control protocol version {}", protocol_version),
-            None,
-            None,
-        )
-    } else {
+    let mut accepted = true;
+    let mut response_text = "ok".to_string();
+    let mut claims: Option<JwtClaims> = None;
+    let mut token: Option<String> = None;
+    let mut session_tenant: Option<String> = None;
+    let mut session_core: Option<CoreContext> = None;
+
+    if protocol_version != CONTROL_PROTOCOL_VERSION {
+        accepted = false;
+        response_text = format!("unsupported control protocol version {}", protocol_version);
+    }
+
+    if accepted {
         match token_result {
-            Err(message) => (false, message, None, None),
-            Ok(token) if token.is_empty() => {
-                (false, "missing control token".to_string(), None, None)
+            Err(message) => {
+                accepted = false;
+                response_text = message;
             }
-            Ok(token) => match tokens.verify(&token) {
-                Ok(claims) => (true, "ok".to_string(), Some(claims), Some(token)),
+            Ok(value) if value.trim().is_empty() => {
+                accepted = false;
+                response_text = "missing control token".to_string();
+            }
+            Ok(value) => match tokens.verify(&value) {
+                Ok(verified) => {
+                    claims = Some(verified);
+                    token = Some(value);
+                }
                 Err(err) => {
+                    accepted = false;
+                    response_text = "invalid control token".to_string();
                     warn!("control handshake rejected due to invalid token: {}", err);
-                    (false, "invalid control token".to_string(), None, None)
                 }
             },
         }
+    }
+
+    let requested_tenant = if accepted {
+        match tenant_result {
+            Err(message) => {
+                accepted = false;
+                response_text = message;
+                None
+            }
+            Ok(value) => value,
+        }
+    } else {
+        None
     };
+
+    let config_snapshot = shared_config
+        .read()
+        .expect("config lock poisoned while resolving tenant")
+        .clone();
+    let require_tenant = config_snapshot.multi_tenant();
+
+    if accepted {
+        let tenant = match requested_tenant.filter(|value| !value.is_empty()) {
+            Some(value) => value,
+            None if require_tenant => {
+                accepted = false;
+                response_text =
+                    "tenantId is required when multi-tenant mode is enabled".to_string();
+                String::new()
+            }
+            None => config_snapshot.active_domain().to_string(),
+        };
+        if accepted {
+            if let Some(claims) = &claims {
+                if !claims.allows_tenant(&tenant) {
+                    accepted = false;
+                    response_text = format!("token does not grant access to tenant '{}'", tenant);
+                }
+            }
+        }
+        if accepted {
+            match core_provider.core_for(&tenant) {
+                Ok(core) => {
+                    session_core = Some(core);
+                    session_tenant = Some(tenant);
+                }
+                Err(err) => {
+                    accepted = false;
+                    response_text = format!("failed to initialise tenant '{}': {}", tenant, err);
+                }
+            }
+        }
+    }
 
     let response_bytes = {
         let mut message = capnp::message::Builder::new_default();
@@ -502,20 +713,36 @@ where
             subject = %claims.sub,
             token_group = %claims.group,
             token_user = %claims.user,
+            tenant = %session_tenant.as_deref().unwrap_or("<unknown>"),
             "control handshake accepted"
         );
     }
 
     let token = token.expect("token must be present when handshake accepted");
+    let tenant = session_tenant
+        .as_deref()
+        .expect("tenant must be present when handshake accepted")
+        .to_string();
+    let core = session_core.expect("core context must be present when handshake accepted");
     println!(
-        "control handshake accepted for token subject {}",
-        claims.as_ref().map(|c| c.sub.as_str()).unwrap_or("unknown")
+        "control handshake accepted for token subject {} (tenant={})",
+        claims.as_ref().map(|c| c.sub.as_str()).unwrap_or("unknown"),
+        tenant
     );
     let noise = perform_server_handshake(reader, writer, token.as_bytes())
         .await
         .context("failed to establish encrypted control channel")?;
 
-    handle_control_session_encrypted(reader, writer, noise, core, shared_config).await
+    handle_control_session_encrypted(
+        reader,
+        writer,
+        noise,
+        core,
+        shared_config,
+        tenant,
+        core_provider,
+    )
+    .await
 }
 
 fn classify_first_message(message: capnp::message::Reader<OwnedSegments>) -> Result<FirstMessage> {
@@ -537,9 +764,20 @@ fn classify_first_message(message: capnp::message::Reader<OwnedSegments>) -> Res
                     .map_err(|err| format!("invalid UTF-8 in control token: {err}"))
                     .map(|value| value.trim().to_string())
             });
+        let tenant_result = hello
+            .get_tenant_id()
+            .map_err(|err| format!("failed to read control tenant id: {err}"))
+            .and_then(|reader| {
+                reader
+                    .to_str()
+                    .map_err(|err| format!("invalid UTF-8 in control tenant id: {err}"))
+                    .map(|value| value.trim().to_string())
+            })
+            .map(|value| if value.is_empty() { None } else { Some(value) });
         return Ok(FirstMessage::Control {
             protocol_version: hello.get_protocol_version(),
             token_result,
+            tenant_result,
         });
     }
 
@@ -552,6 +790,8 @@ async fn handle_control_session_encrypted<R, W>(
     mut noise: TransportState,
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
+    tenant: String,
+    core_provider: Arc<dyn CoreProvider>,
 ) -> Result<()>
 where
     R: futures::AsyncRead + Unpin,
@@ -574,9 +814,14 @@ where
         let (command_label, status_label, response_result) = match parse_control_command(request) {
             Ok(command) => {
                 let label = control_command_name(&command);
-                let result =
-                    execute_control_command(command, core.clone(), Arc::clone(&shared_config))
-                        .await;
+                let result = execute_control_command(
+                    command,
+                    core.clone(),
+                    Arc::clone(&shared_config),
+                    tenant.as_str(),
+                    Arc::clone(&core_provider),
+                )
+                .await;
                 let status = match &result {
                     Ok(_) => "ok",
                     Err(err) => control_error_code(err),
@@ -601,7 +846,10 @@ where
                     Ok(reply) => {
                         let payload = response.reborrow().init_payload();
                         match reply {
-                            ControlReply::ListAggregates { aggregates } => {
+                            ControlReply::ListAggregates {
+                                aggregates,
+                                next_cursor,
+                            } => {
                                 let encoded = encode_json_list_response(
                                     request_id,
                                     &aggregates,
@@ -620,6 +868,13 @@ where
                                 }
                                 let mut builder = payload.init_list_aggregates();
                                 builder.set_aggregates_json(&encoded.json);
+                                if let Some(cursor) = next_cursor.as_deref() {
+                                    builder.set_has_next_cursor(true);
+                                    builder.set_next_cursor(cursor);
+                                } else {
+                                    builder.set_has_next_cursor(false);
+                                    builder.set_next_cursor("");
+                                }
                             }
                             ControlReply::GetAggregate {
                                 found,
@@ -637,6 +892,7 @@ where
                                 aggregate_type,
                                 aggregate_id,
                                 events,
+                                next_cursor,
                             } => {
                                 let encoded = encode_json_list_response(
                                     request_id,
@@ -658,6 +914,13 @@ where
                                 }
                                 let mut builder = payload.init_list_events();
                                 builder.set_events_json(&encoded.json);
+                                if let Some(cursor) = next_cursor.as_deref() {
+                                    builder.set_has_next_cursor(true);
+                                    builder.set_next_cursor(cursor);
+                                } else {
+                                    builder.set_has_next_cursor(false);
+                                    builder.set_next_cursor("");
+                                }
                             }
                             ControlReply::AppendEvent { event_json } => {
                                 let mut builder = payload.init_append_event();
@@ -707,6 +970,48 @@ where
                                 let mut builder = payload.init_replace_schemas();
                                 builder.set_replaced(replaced);
                             }
+                            ControlReply::TenantAssign { changed, shard } => {
+                                let mut builder = payload.init_tenant_assign();
+                                builder.set_changed(changed);
+                                builder.set_shard_id(&shard);
+                            }
+                            ControlReply::TenantUnassign { changed } => {
+                                let mut builder = payload.init_tenant_unassign();
+                                builder.set_changed(changed);
+                            }
+                            ControlReply::TenantQuotaSet { changed, quota } => {
+                                let mut builder = payload.init_tenant_quota_set();
+                                builder.set_changed(changed);
+                                if let Some(value) = quota {
+                                    builder.set_has_quota(true);
+                                    builder.set_quota(value);
+                                } else {
+                                    builder.set_has_quota(false);
+                                    builder.set_quota(0);
+                                }
+                            }
+                            ControlReply::TenantQuotaClear { changed } => {
+                                let mut builder = payload.init_tenant_quota_clear();
+                                builder.set_changed(changed);
+                            }
+                            ControlReply::TenantQuotaRecalc { aggregate_count } => {
+                                let mut builder = payload.init_tenant_quota_recalc();
+                                builder.set_aggregate_count(aggregate_count);
+                            }
+                            ControlReply::TenantReload { reloaded } => {
+                                let mut builder = payload.init_tenant_reload();
+                                builder.set_reloaded(reloaded);
+                            }
+                            ControlReply::TenantSchemaPublish {
+                                version_id,
+                                activated,
+                                skipped,
+                            } => {
+                                let mut builder = payload.init_tenant_schema_publish();
+                                builder.set_version_id(&version_id);
+                                builder.set_activated(activated);
+                                builder.set_skipped(skipped);
+                            }
                         }
                     }
                     Err(err) => {
@@ -740,8 +1045,17 @@ fn parse_control_command(
     {
         payload::ListAggregates(req) => {
             let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
-            let skip = usize::try_from(req.get_skip())
-                .map_err(|_| EventError::InvalidSchema("skip exceeds platform limits".into()))?;
+            let cursor = if req.get_has_cursor() {
+                let raw = read_control_text(req.get_cursor(), "cursor")?;
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(AggregateCursor::from_str(trimmed)?)
+                }
+            } else {
+                None
+            };
             let take = if req.get_has_take() {
                 Some(usize::try_from(req.get_take()).map_err(|_| {
                     EventError::InvalidSchema("take exceeds platform limits".into())
@@ -803,7 +1117,7 @@ fn parse_control_command(
 
             Ok(ControlCommand::ListAggregates {
                 token,
-                skip,
+                cursor,
                 take,
                 filter,
                 sort,
@@ -829,8 +1143,17 @@ fn parse_control_command(
             let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
             let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
             let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
-            let skip = usize::try_from(req.get_skip())
-                .map_err(|_| EventError::InvalidSchema("skip exceeds platform limits".into()))?;
+            let cursor = if req.get_has_cursor() {
+                let raw = read_control_text(req.get_cursor(), "cursor")?;
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(EventCursor::from_str(trimmed)?)
+                }
+            } else {
+                None
+            };
             let take = if req.get_has_take() {
                 Some(usize::try_from(req.get_take()).map_err(|_| {
                     EventError::InvalidSchema("take exceeds platform limits".into())
@@ -845,7 +1168,7 @@ fn parse_control_command(
                     .to_string(),
                 aggregate_type,
                 aggregate_id,
-                skip,
+                cursor,
                 take,
             })
         }
@@ -1085,6 +1408,102 @@ fn parse_control_command(
                 schemas_json,
             })
         }
+        payload::TenantAssign(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            let shard = read_control_text(req.get_shard_id(), "shard_id")?;
+            Ok(ControlCommand::TenantAssign {
+                token,
+                tenant,
+                shard,
+            })
+        }
+        payload::TenantUnassign(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            Ok(ControlCommand::TenantUnassign { token, tenant })
+        }
+        payload::TenantQuotaSet(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            let max_aggregates = req.get_max_aggregates();
+            Ok(ControlCommand::TenantQuotaSet {
+                token,
+                tenant,
+                max_aggregates,
+            })
+        }
+        payload::TenantQuotaClear(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            Ok(ControlCommand::TenantQuotaClear { token, tenant })
+        }
+        payload::TenantQuotaRecalc(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            Ok(ControlCommand::TenantQuotaRecalc { token, tenant })
+        }
+        payload::TenantReload(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            Ok(ControlCommand::TenantReload { token, tenant })
+        }
+        payload::TenantSchemaPublish(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let tenant = read_control_text(req.get_tenant_id(), "tenant_id")?;
+            let reason = if req.get_has_reason() {
+                Some(read_control_text(req.get_reason(), "reason")?)
+            } else {
+                None
+            };
+            let actor = if req.get_has_actor() {
+                Some(read_control_text(req.get_actor(), "actor")?)
+            } else {
+                None
+            };
+            let labels_reader = req
+                .get_labels()
+                .map_err(|err| EventError::Serialization(err.to_string()))?;
+            let mut labels = Vec::with_capacity(labels_reader.len() as usize);
+            for entry in labels_reader.iter() {
+                let value = entry
+                    .map_err(|err| EventError::Serialization(err.to_string()))?
+                    .to_string()
+                    .map_err(|err| EventError::Serialization(err.to_string()))?;
+                labels.push(value);
+            }
+            Ok(ControlCommand::TenantSchemaPublish {
+                token,
+                tenant,
+                reason,
+                actor,
+                labels,
+                activate: req.get_activate(),
+                force: req.get_force(),
+                reload: req.get_reload(),
+            })
+        }
     }
 }
 
@@ -1092,11 +1511,14 @@ async fn execute_control_command(
     command: ControlCommand,
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
+    tenant_id: &str,
+    core_provider: Arc<dyn CoreProvider>,
 ) -> std::result::Result<ControlReply, EventError> {
+    let _tenant_id = tenant_id;
     match command {
         ControlCommand::ListAggregates {
             token,
-            skip,
+            cursor,
             take,
             filter,
             sort,
@@ -1123,15 +1545,20 @@ async fn execute_control_command(
                 let filter = filter;
                 let sort = sort;
                 let token = token.clone();
+                let cursor = cursor.clone();
                 move || {
                     let sort_ref = sort.as_ref().map(|keys| keys.as_slice());
-                    core.list_aggregates(&token, skip, take, filter, sort_ref, scope)
+                    let cursor_ref = cursor.as_ref();
+                    core.list_aggregates(&token, cursor_ref, take, filter, sort_ref, scope)
                 }
             })
             .await
             .map_err(|err| EventError::Storage(format!("list aggregates task failed: {err}")))?;
-            let aggregates = aggregates?;
-            Ok(ControlReply::ListAggregates { aggregates })
+            let (aggregates, next_cursor) = aggregates?;
+            Ok(ControlReply::ListAggregates {
+                aggregates,
+                next_cursor: next_cursor.map(|cursor| cursor.encode()),
+            })
         }
         ControlCommand::GetAggregate {
             token,
@@ -1162,7 +1589,7 @@ async fn execute_control_command(
             token,
             aggregate_type,
             aggregate_id,
-            skip,
+            cursor,
             take,
         } => {
             let events = spawn_blocking({
@@ -1170,15 +1597,21 @@ async fn execute_control_command(
                 let aggregate_type = aggregate_type.clone();
                 let aggregate_id = aggregate_id.clone();
                 let token = token.clone();
-                move || core.list_events(&token, &aggregate_type, &aggregate_id, skip, take)
+                let cursor = cursor.clone();
+                move || {
+                    let cursor_ref = cursor.as_ref();
+                    core.list_events(&token, &aggregate_type, &aggregate_id, cursor_ref, take)
+                }
             })
             .await
             .map_err(|err| EventError::Storage(format!("list events task failed: {err}")))??;
 
+            let (events, next_cursor) = events;
             Ok(ControlReply::ListEvents {
                 aggregate_type,
                 aggregate_id,
                 events,
+                next_cursor: next_cursor.map(|cursor| cursor.encode()),
             })
         }
         ControlCommand::AppendEvent {
@@ -1405,6 +1838,120 @@ async fn execute_control_command(
             .map_err(|err| EventError::Storage(format!("replace schemas task failed: {err}")))??;
             Ok(ControlReply::ReplaceSchemas(replaced))
         }
+        ControlCommand::TenantAssign {
+            token,
+            tenant,
+            shard,
+        } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let assignments = core.assignments();
+            let changed = assignments.assign(&tenant, &shard)?;
+            core_provider.invalidate_tenant(&tenant);
+            Ok(ControlReply::TenantAssign { changed, shard })
+        }
+        ControlCommand::TenantUnassign { token, tenant } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let assignments = core.assignments();
+            let changed = assignments.unassign(&tenant)?;
+            core_provider.invalidate_tenant(&tenant);
+            Ok(ControlReply::TenantUnassign { changed })
+        }
+        ControlCommand::TenantQuotaSet {
+            token,
+            tenant,
+            max_aggregates,
+        } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let assignments = core.assignments();
+            let changed = assignments.set_quota(&tenant, Some(max_aggregates))?;
+            core_provider.invalidate_tenant(&tenant);
+            Ok(ControlReply::TenantQuotaSet {
+                changed,
+                quota: Some(max_aggregates),
+            })
+        }
+        ControlCommand::TenantQuotaClear { token, tenant } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let assignments = core.assignments();
+            let changed = assignments.set_quota(&tenant, None)?;
+            core_provider.invalidate_tenant(&tenant);
+            Ok(ControlReply::TenantQuotaClear { changed })
+        }
+        ControlCommand::TenantQuotaRecalc { token, tenant } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let target_core = if tenant.eq_ignore_ascii_case(core.tenant_id()) {
+                core.clone()
+            } else {
+                core_provider.core_for(&tenant)?
+            };
+            let store = target_core.store();
+            let count = spawn_blocking(move || {
+                store
+                    .counts()
+                    .map(|counts| counts.total_aggregates() as u64)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("aggregate count task failed: {err}")))??;
+            let assignments = target_core.assignments();
+            assignments.ensure_aggregate_count(&tenant, || Ok(count))?;
+            Ok(ControlReply::TenantQuotaRecalc {
+                aggregate_count: count,
+            })
+        }
+        ControlCommand::TenantReload { token, tenant } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            drop(core);
+            core_provider.invalidate_tenant(&tenant);
+            let reloaded = refresh_tenant_context(Arc::clone(&core_provider), &tenant).await;
+            Ok(ControlReply::TenantReload { reloaded })
+        }
+        ControlCommand::TenantSchemaPublish {
+            token,
+            tenant,
+            reason,
+            actor,
+            labels,
+            activate,
+            force,
+            reload,
+        } => {
+            let tenant = normalize_tenant_id(&tenant)?;
+            authorize_tenant_admin(&core, &token, &tenant)?;
+            let domain_root = {
+                let guard = shared_config
+                    .read()
+                    .map_err(|_| EventError::Storage("failed to acquire config lock".into()))?;
+                guard.domain_data_dir_for(&tenant)
+            };
+            drop(core);
+            let manager = SchemaHistoryManager::new(&domain_root);
+            let payload =
+                fs::read_to_string(manager.active_schema_path()).map_err(EventError::Io)?;
+            let outcome = manager.publish(PublishOptions {
+                schema_json: &payload,
+                actor: actor.as_deref(),
+                reason: reason.as_deref(),
+                labels: labels.as_slice(),
+                activate,
+                skip_if_identical: !force,
+            })?;
+            drop(manager);
+            if reload {
+                core_provider.invalidate_tenant(&tenant);
+                let _ = refresh_tenant_context(Arc::clone(&core_provider), &tenant).await;
+            }
+            Ok(ControlReply::TenantSchemaPublish {
+                version_id: outcome.version_id,
+                activated: outcome.activated,
+                skipped: outcome.skipped,
+            })
+        }
     }
 }
 
@@ -1501,6 +2048,20 @@ where
             "control response exceeds frame limit ({} bytes)",
             MAX_NOISE_FRAME_PAYLOAD
         )));
+    }
+    Ok(())
+}
+
+fn authorize_tenant_admin(
+    core: &CoreContext,
+    token: &str,
+    tenant: &str,
+) -> std::result::Result<(), EventError> {
+    let claims = core
+        .tokens()
+        .authorize_action(token, TENANT_MANAGE_ACTION, None)?;
+    if !claims.allows_tenant(tenant) {
+        return Err(EventError::Unauthorized);
     }
     Ok(())
 }
