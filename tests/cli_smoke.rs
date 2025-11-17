@@ -1537,6 +1537,8 @@ fn tenant_schema_diff_and_rollback_flow() -> Result<()> {
 fn tenant_quota_limits_aggregate_creation() -> Result<()> {
     let cli = CliTest::new()?;
 
+    cli.run(&["config", "--multi-tenant", "true"])?;
+
     cli.run(&["tenant", "quota", "set", "default", "--max-mb", "1"])?;
 
     let list = cli.run_json(&["tenant", "list", "--json"])?;

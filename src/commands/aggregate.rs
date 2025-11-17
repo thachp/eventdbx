@@ -1048,7 +1048,11 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
         schema_manager.validate_event(&aggregate, &event, &payload)?;
     }
 
-    let assignments = TenantAssignmentStore::open(config.tenant_meta_path())?;
+    let assignments = if config.multi_tenant() {
+        Some(TenantAssignmentStore::open(config.tenant_meta_path())?)
+    } else {
+        None
+    };
     let encryption = config.encryption_key()?;
     match EventStore::open(
         config.event_store_path(),
@@ -1063,7 +1067,9 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
                 bail!("aggregate {}::{} already exists", aggregate, aggregate_id);
             }
 
-            enforce_offline_tenant_quota(config, &store, &assignments)?;
+            if let Some(assignments) = assignments.as_ref() {
+                enforce_offline_tenant_quota(config, &store, assignments)?;
+            }
 
             let plugins = PluginManager::from_config(&config)?;
             let record = store.append(AppendEvent {
@@ -1078,8 +1084,10 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
 
             maybe_auto_snapshot(&store, &schema_manager, &record);
 
-            let usage = store.storage_usage_bytes()?;
-            assignments.update_storage_usage_bytes(config.active_domain(), usage)?;
+            if let Some(assignments) = assignments.as_ref() {
+                let usage = store.storage_usage_bytes()?;
+                assignments.update_storage_usage_bytes(config.active_domain(), usage)?;
+            }
 
             if !plugins.is_empty() {
                 let schema = schema_manager.get(&record.aggregate_type).ok();
@@ -1281,8 +1289,14 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
         config.snowflake_worker_id,
     ) {
         Ok(store) => {
-            let assignments = TenantAssignmentStore::open(config.tenant_meta_path())?;
-            enforce_offline_tenant_quota(config, &store, &assignments)?;
+            let assignments = if config.multi_tenant() {
+                Some(TenantAssignmentStore::open(config.tenant_meta_path())?)
+            } else {
+                None
+            };
+            if let Some(assignments) = assignments.as_ref() {
+                enforce_offline_tenant_quota(config, &store, assignments)?;
+            }
             let plugins = PluginManager::from_config(&config)?;
             let effective_payload = if let Some(ref patch_ops) = patch {
                 store.prepare_payload_from_patch(&aggregate, &aggregate_id, patch_ops)?
@@ -1316,8 +1330,10 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 issued_by: None,
                 note: note.clone(),
             })?;
-            let usage = store.storage_usage_bytes()?;
-            assignments.update_storage_usage_bytes(config.active_domain(), usage)?;
+            if let Some(assignments) = assignments.as_ref() {
+                let usage = store.storage_usage_bytes()?;
+                assignments.update_storage_usage_bytes(config.active_domain(), usage)?;
+            }
 
             maybe_auto_snapshot(&store, &schema_manager, &record);
             if verbose {
