@@ -87,7 +87,6 @@ once_cell = "1.19"
 metrics = "0.22"
 metrics-exporter-prometheus = "0.13"
 xz2 = "0.1"
-clerk-fapi-rs = "0.2"
 rpassword = "7.3"
 
 [features]
@@ -108,9 +107,6 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading"] }
-
-[patch.crates-io]
-clerk-fapi-rs = { path = "vendor/clerk-fapi-rs" }
 
 # The profile that 'dist' will build with
 [profile.dist]

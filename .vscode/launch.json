@@ -19,7 +19,7 @@
       "cargo": {
         "args": ["run", "--bin=dbx"]
       },
-      "args": ["pull", "local"]
+      "args": ["cloud", "auth", "status"]
     },
     {
       "name": "Debug unit tests in executable 'dbx'",

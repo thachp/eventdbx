@@ -162,3 +162,8 @@ EventDBX can replicate an entire domain (or selected aggregates) between two nod
 - `dbx upgrade list [--limit <n>] [--json]`
 
 `dbx upgrade` now caches every downloaded release in `~/.eventdbx/versions/<target>/<tag>/`, allowing you to install multiple versions side-by-side and activate them later with `dbx upgrade use`. The `installed` subcommand lists cached versions, and `list` marks installed entries with `[installed]` and the active version with `[active]`. Use `--no-switch` to keep the current binary in place after downloading, and `--print-only` to preview the actions without making changes.
+
+## Cloud
+
+- `dbx cloud auth [--api-url <url>] [--email <address>] [--accept] [--first-name <name>] [--last-name <name>]` – Link the CLI to EventDBX Cloud using the backend API. When you omit `--email`, `dbx` reuses the email stored in `~/.eventdbx/cloud.token` from your last successful login so you can re-authenticate quickly.
+- `dbx cloud auth status` shows who the local token belongs to, and `dbx cloud auth logout` deletes the stored token if you need to relink a different account.
