@@ -7,7 +7,11 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use chrono::Utc;
-use eventdbx::{plugin::queue::PluginQueueStore, snowflake::SnowflakeId};
+use eventdbx::{
+    plugin::queue::PluginQueueStore,
+    snowflake::SnowflakeId,
+    validation::MAX_EVENT_PAYLOAD_BYTES,
+};
 
 struct CliTest {
     _tmp: TempDir,
@@ -1224,7 +1228,7 @@ fn tenant_assign_list_and_unassign_flow() -> Result<()> {
         entries.iter().any(|entry| {
             entry["tenant"] == json!("people")
                 && entry["shard"] == json!("shard-0003")
-                && entry["quota"].is_null()
+                && entry["quota_mb"].is_null()
         }),
         "missing people assignment: {entries:?}"
     );
@@ -1233,7 +1237,7 @@ fn tenant_assign_list_and_unassign_flow() -> Result<()> {
             .iter()
             .any(|entry| entry["tenant"] == json!("billing")
                 && entry["shard"] == json!("shard-0004")
-                && entry["quota"].is_null()),
+                && entry["quota_mb"].is_null()),
         "missing billing assignment: {entries:?}"
     );
 
@@ -1243,7 +1247,7 @@ fn tenant_assign_list_and_unassign_flow() -> Result<()> {
         .context("filtered tenant list did not return an array")?;
     assert_eq!(filtered_array.len(), 1, "expected one entry for shard-0004");
     assert_eq!(filtered_array[0]["tenant"], json!("billing"));
-    assert!(filtered_array[0]["quota"].is_null());
+    assert!(filtered_array[0]["quota_mb"].is_null());
 
     cli.run(&["tenant", "unassign", "people"])?;
     let after_unassign = cli.run_json(&["tenant", "list", "--json"])?;
@@ -1253,7 +1257,7 @@ fn tenant_assign_list_and_unassign_flow() -> Result<()> {
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0]["tenant"], json!("billing"));
     assert_eq!(remaining[0]["shard"], json!("shard-0004"));
-    assert!(remaining[0]["quota"].is_null());
+    assert!(remaining[0]["quota_mb"].is_null());
     Ok(())
 }
 
@@ -1489,7 +1493,7 @@ fn tenant_schema_diff_and_rollback_flow() -> Result<()> {
 fn tenant_quota_limits_aggregate_creation() -> Result<()> {
     let cli = CliTest::new()?;
 
-    cli.run(&["tenant", "quota", "set", "default", "--max-aggregates", "1"])?;
+    cli.run(&["tenant", "quota", "set", "default", "--max-mb", "1"])?;
 
     let list = cli.run_json(&["tenant", "list", "--json"])?;
     let quota_entry = list
@@ -1499,25 +1503,41 @@ fn tenant_quota_limits_aggregate_creation() -> Result<()> {
         .find(|entry| entry["tenant"] == json!("default"))
         .cloned()
         .context("missing default tenant entry with quota")?;
-    assert_eq!(quota_entry["quota"], json!(1));
+    assert_eq!(quota_entry["quota_mb"], json!(1));
 
     cli.run(&["schema", "create", "order", "--events", "order_created"])?;
-    cli.create_aggregate("order", "order-1", "order_created")?;
 
-    let failure = cli.run_failure(&[
-        "aggregate",
-        "create",
-        "order",
-        "order-2",
-        "--event",
-        "order_created",
-        "--json",
-    ])?;
-    assert!(
-        failure.stderr.contains("quota"),
-        "unexpected quota failure message:\n{}",
-        failure.stderr
-    );
+    let payload_blob = "x".repeat((MAX_EVENT_PAYLOAD_BYTES.saturating_sub(32)) as usize);
+    let payload_json = format!(r#"{{"blob":"{}"}}"#, payload_blob);
+
+    let mut quota_hit = false;
+    for index in 0..10 {
+        let aggregate_id = format!("order-{}", index);
+        let args = vec![
+            "aggregate",
+            "create",
+            "order",
+            aggregate_id.as_str(),
+            "--event",
+            "order_created",
+            "--payload",
+            payload_json.as_str(),
+            "--json",
+        ];
+        let output = cli.exec(&args)?;
+        if output.status.success() {
+            continue;
+        }
+        let stderr = normalize_output(output.stderr)?;
+        assert!(
+            stderr.contains("quota"),
+            "unexpected failure once quota tripped:\n{}",
+            stderr
+        );
+        quota_hit = true;
+        break;
+    }
+    assert!(quota_hit, "expected storage quota to block new events");
 
     cli.run(&["tenant", "quota", "clear", "default"])?;
     let list_after_clear = cli.run_json(&["tenant", "list", "--json"])?;
@@ -1529,7 +1549,7 @@ fn tenant_quota_limits_aggregate_creation() -> Result<()> {
             .any(|entry| entry["tenant"] == json!("default")),
         "default tenant entry should disappear once quota is cleared"
     );
-    cli.create_aggregate("order", "order-2", "order_created")?;
+    cli.create_aggregate("order", "order-99", "order_created")?;
     Ok(())
 }
 

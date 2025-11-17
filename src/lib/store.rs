@@ -964,7 +964,7 @@ impl EventStore {
     pub fn open(path: PathBuf, encryptor: Option<Encryptor>, worker_id: u16) -> Result<Self> {
         let mut options = Options::default();
         options.create_if_missing(true);
-        let db = DBWithThreadMode::<MultiThreaded>::open(&options, path)
+        let db = DBWithThreadMode::<MultiThreaded>::open(&options, &path)
             .map_err(|err| EventError::Storage(err.to_string()))?;
 
         if worker_id > MAX_WORKER_ID {
@@ -986,7 +986,7 @@ impl EventStore {
     pub fn open_read_only(path: PathBuf, encryptor: Option<Encryptor>) -> Result<Self> {
         let mut options = Options::default();
         options.create_if_missing(false);
-        let db = DBWithThreadMode::<MultiThreaded>::open_for_read_only(&options, path, false)
+        let db = DBWithThreadMode::<MultiThreaded>::open_for_read_only(&options, &path, false)
             .map_err(|err| EventError::Storage(err.to_string()))?;
 
         Ok(Self {
@@ -996,6 +996,23 @@ impl EventStore {
             encryptor,
             id_generator: Mutex::new(SnowflakeGenerator::new(0)),
         })
+    }
+
+    pub fn storage_usage_bytes(&self) -> Result<u64> {
+        let sst = self.rocksdb_property_bytes("rocksdb.total-sst-files-size")?;
+        let mem = self.rocksdb_property_bytes("rocksdb.size-all-mem-tables")?;
+        let wal = self.rocksdb_property_bytes("rocksdb.live-wal-file-size")?;
+        Ok(sst.saturating_add(mem).saturating_add(wal))
+    }
+
+    fn rocksdb_property_bytes(&self, name: &str) -> Result<u64> {
+        match self.db.property_int_value(name) {
+            Ok(Some(value)) => Ok(value),
+            Ok(None) => Ok(0),
+            Err(err) => Err(EventError::Storage(format!(
+                "failed to read RocksDB property '{name}': {err}"
+            ))),
+        }
     }
 
     pub fn counts(&self) -> Result<StoreCounts> {
@@ -2737,6 +2754,7 @@ impl EventStore {
     ) -> Result<BTreeMap<String, String>> {
         self.load_state_map_from(AggregateIndex::Active, aggregate_type, aggregate_id)
     }
+
 }
 
 fn meta_prefix_for(index: AggregateIndex) -> Vec<u8> {

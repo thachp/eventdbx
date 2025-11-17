@@ -27,7 +27,7 @@ use eventdbx::{
         self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateSortField,
         AggregateState, AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
     },
-    tenant_store::TenantAssignmentStore,
+    tenant_store::{TenantAssignmentStore, BYTES_PER_MEGABYTE},
     token::{IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
@@ -606,12 +606,8 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             )?;
             store.remove_aggregate(&args.aggregate, &args.aggregate_id)?;
             let assignments = TenantAssignmentStore::open(config.tenant_meta_path())?;
-            assignments.ensure_aggregate_count(config.active_domain(), || {
-                store
-                    .counts()
-                    .map(|counts| counts.total_aggregates() as u64)
-            })?;
-            assignments.increment_aggregate_count(config.active_domain(), -1)?;
+            let usage = store.storage_usage_bytes()?;
+            assignments.update_storage_usage_bytes(config.active_domain(), usage)?;
             println!(
                 "aggregate_type={} aggregate_id={} removed",
                 args.aggregate, args.aggregate_id
@@ -1082,7 +1078,8 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
 
             maybe_auto_snapshot(&store, &schema_manager, &record);
 
-            assignments.increment_aggregate_count(config.active_domain(), 1)?;
+            let usage = store.storage_usage_bytes()?;
+            assignments.update_storage_usage_bytes(config.active_domain(), usage)?;
 
             if !plugins.is_empty() {
                 let schema = schema_manager.get(&record.aggregate_type).ok();
@@ -1284,6 +1281,8 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
         config.snowflake_worker_id,
     ) {
         Ok(store) => {
+            let assignments = TenantAssignmentStore::open(config.tenant_meta_path())?;
+            enforce_offline_tenant_quota(config, &store, &assignments)?;
             let plugins = PluginManager::from_config(&config)?;
             let effective_payload = if let Some(ref patch_ops) = patch {
                 store.prepare_payload_from_patch(&aggregate, &aggregate_id, patch_ops)?
@@ -1317,6 +1316,8 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 issued_by: None,
                 note: note.clone(),
             })?;
+            let usage = store.storage_usage_bytes()?;
+            assignments.update_storage_usage_bytes(config.active_domain(), usage)?;
 
             maybe_auto_snapshot(&store, &schema_manager, &record);
             if verbose {
@@ -1596,15 +1597,15 @@ fn enforce_offline_tenant_quota(
     assignments: &TenantAssignmentStore,
 ) -> Result<()> {
     let tenant = config.active_domain();
-    assignments.ensure_aggregate_count(tenant, || {
-        store
-            .counts()
-            .map(|counts| counts.total_aggregates() as u64)
-    })?;
-    if let Some(limit) = assignments.quota_for(tenant)? {
-        let current = assignments.aggregate_count(tenant)?.unwrap_or_default();
-        if current >= limit {
-            bail!("tenant '{}' reached aggregate quota ({})", tenant, limit);
+    let usage = store.storage_usage_bytes()?;
+    assignments.update_storage_usage_bytes(tenant, usage)?;
+    if let Some(limit_mb) = assignments.quota_for(tenant)? {
+        let limit_bytes = limit_mb.saturating_mul(BYTES_PER_MEGABYTE);
+        if usage >= limit_bytes {
+            bail!(
+                "tenant '{}' reached storage quota ({} MB)",
+                tenant, limit_mb
+            );
         }
     }
     Ok(())
