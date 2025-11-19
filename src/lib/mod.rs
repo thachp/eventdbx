@@ -13,6 +13,7 @@ pub mod plugin_capnp;
 pub mod replication_noise;
 pub mod restrict;
 pub mod schema;
+pub mod schema_capnp;
 pub mod schema_history;
 pub mod server;
 pub mod service;

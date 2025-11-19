@@ -382,7 +382,7 @@ impl CoreContext {
             aggregate_type,
             aggregate_id,
             archived,
-            comment,
+            note,
         } = input;
 
         ensure_snake_case("aggregate_type", &aggregate_type)?;
@@ -397,7 +397,7 @@ impl CoreContext {
             return Err(EventError::Unauthorized);
         }
 
-        let comment = normalize_optional_comment(comment);
+        let comment = normalize_optional_note(note);
 
         let store = self.store();
         let state = store.set_archive(&aggregate_type, &aggregate_id, archived, comment)?;
@@ -627,11 +627,11 @@ pub struct SetAggregateArchiveInput {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub archived: bool,
-    pub comment: Option<String>,
+    pub note: Option<String>,
 }
 
-pub(crate) fn normalize_optional_comment(comment: Option<String>) -> Option<String> {
-    comment.and_then(|value| {
+pub(crate) fn normalize_optional_note(note: Option<String>) -> Option<String> {
+    note.and_then(|value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             None

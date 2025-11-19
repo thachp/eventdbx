@@ -1095,8 +1095,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             archive.set_aggregate_type("order");
             archive.set_aggregate_id("order-1");
             archive.set_archived(true);
-            archive.set_comment("closed via control");
-            archive.set_has_comment(true);
+            archive.set_note("closed via control");
+            archive.set_has_note(true);
         },
         |response| match response
             .get_payload()
@@ -1231,8 +1231,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             archive.set_aggregate_type("order");
             archive.set_aggregate_id("order-1");
             archive.set_archived(false);
-            archive.set_comment("");
-            archive.set_has_comment(false);
+            archive.set_note("");
+            archive.set_has_note(false);
         },
         |response| match response
             .get_payload()

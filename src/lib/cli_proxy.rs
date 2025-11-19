@@ -41,7 +41,7 @@ use crate::{
     schema_history::{PublishOptions, SchemaHistoryManager},
     service::{
         AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
-        normalize_optional_comment,
+        normalize_optional_note,
     },
     store::{
         AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState, EventCursor,
@@ -180,7 +180,7 @@ enum ControlCommand {
         aggregate_type: String,
         aggregate_id: String,
         archived: bool,
-        comment: Option<String>,
+        note: Option<String>,
     },
     ListSchemas {
         token: String,
@@ -1356,8 +1356,8 @@ fn parse_control_command(
             let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
             let archived = req.get_archived();
 
-            let comment = normalize_optional_comment(if req.get_has_comment() {
-                Some(read_control_text(req.get_comment(), "comment")?)
+            let note = normalize_optional_note(if req.get_has_note() {
+                Some(read_control_text(req.get_note(), "note")?)
             } else {
                 None
             });
@@ -1367,7 +1367,7 @@ fn parse_control_command(
                 aggregate_type,
                 aggregate_id,
                 archived,
-                comment,
+                note,
             })
         }
         payload::ListSchemas(req) => {
@@ -1748,7 +1748,7 @@ async fn execute_control_command(
             aggregate_type,
             aggregate_id,
             archived,
-            comment,
+            note,
         } => {
             let verbose = config_verbose(&shared_config)?;
             let aggregate = spawn_blocking({
@@ -1756,14 +1756,14 @@ async fn execute_control_command(
                 let aggregate_type = aggregate_type.clone();
                 let aggregate_id = aggregate_id.clone();
                 let token = token.clone();
-                let comment = comment.clone();
+                let note = note.clone();
                 move || {
                     core.set_aggregate_archive(SetAggregateArchiveInput {
                         token,
                         aggregate_type,
                         aggregate_id,
                         archived,
-                        comment,
+                        note,
                     })
                 }
             })

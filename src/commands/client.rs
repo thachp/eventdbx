@@ -541,7 +541,7 @@ impl ServerClient {
                 set.set_aggregate_type(aggregate_type);
                 set.set_aggregate_id(aggregate_id);
                 set.set_archived(archived);
-                set.set_has_comment(false);
+                set.set_has_note(false);
                 Ok(())
             },
             |response| {
