@@ -1184,6 +1184,7 @@ impl EventStore {
     pub fn open(path: PathBuf, encryptor: Option<Encryptor>, worker_id: u16) -> Result<Self> {
         let mut options = Options::default();
         options.create_if_missing(true);
+        configure_db_options(&mut options, false);
         let db = DBWithThreadMode::<MultiThreaded>::open(&options, &path)
             .map_err(|err| EventError::Storage(err.to_string()))?;
 
@@ -1206,6 +1207,7 @@ impl EventStore {
     pub fn open_read_only(path: PathBuf, encryptor: Option<Encryptor>) -> Result<Self> {
         let mut options = Options::default();
         options.create_if_missing(false);
+        configure_db_options(&mut options, true);
         let db = DBWithThreadMode::<MultiThreaded>::open_for_read_only(&options, &path, false)
             .map_err(|err| EventError::Storage(err.to_string()))?;
 
@@ -3371,6 +3373,28 @@ impl EventStore {
     ) -> Result<BTreeMap<String, String>> {
         self.load_state_map_from(AggregateIndex::Active, aggregate_type, aggregate_id)
     }
+}
+
+fn configure_db_options(options: &mut Options, read_only: bool) {
+    if !read_only {
+        if let Ok(parallelism) = std::thread::available_parallelism() {
+            let workers = parallelism.get().max(2) as i32;
+            options.increase_parallelism(workers);
+            options.set_max_background_jobs(workers);
+        }
+        options.set_allow_concurrent_memtable_write(true);
+        options.set_enable_write_thread_adaptive_yield(true);
+        options.set_write_buffer_size(64 * 1024 * 1024);
+        options.set_max_write_buffer_number(4);
+        options.set_min_write_buffer_number_to_merge(2);
+        options.set_level_zero_file_num_compaction_trigger(8);
+        options.set_level_zero_slowdown_writes_trigger(17);
+        options.set_level_zero_stop_writes_trigger(24);
+        options.set_target_file_size_base(128 * 1024 * 1024);
+        options.set_max_total_wal_size(256 * 1024 * 1024);
+    }
+    options.set_bytes_per_sync(2 * 1024 * 1024);
+    options.set_optimize_filters_for_hits(true);
 }
 
 fn meta_prefix_for(index: AggregateIndex) -> Vec<u8> {
