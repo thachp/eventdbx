@@ -274,6 +274,7 @@ impl ServerClient {
         &self,
         token: &str,
         filter: Option<&str>,
+        sort: Option<&str>,
         include_archived: bool,
         archived_only: bool,
     ) -> Result<Vec<AggregateState>> {
@@ -285,6 +286,7 @@ impl ServerClient {
                 cursor.as_deref(),
                 DEFAULT_PAGE_SIZE,
                 filter,
+                sort,
                 include_archived,
                 archived_only,
             )?;
@@ -303,6 +305,7 @@ impl ServerClient {
         cursor: Option<&str>,
         take: usize,
         filter: Option<&str>,
+        sort: Option<&str>,
         include_archived: bool,
         archived_only: bool,
     ) -> Result<(Vec<AggregateState>, Option<String>)> {
@@ -333,7 +336,13 @@ impl ServerClient {
                 } else {
                     list.set_has_filter(false);
                 }
-                list.set_has_sort(false);
+                if let Some(sort) = sort {
+                    list.set_has_sort(true);
+                    list.set_sort(sort);
+                } else {
+                    list.set_has_sort(false);
+                    list.set_sort("");
+                }
                 Ok(())
             },
             |response| {

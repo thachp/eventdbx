@@ -47,8 +47,11 @@ Run without flags to print the current configuration. The first invocation must 
 
 - `dbx tenant assign <tenant> --shard <shard-0001>` – Pin a tenant to an explicit shard label. Omit the command to continue using hash-based placement.
 - `dbx tenant unassign <tenant>` – Remove the explicit assignment so the tenant hashes across the configured shard count.
-- `dbx tenant list [--shard <shard-0001>] [--json]` – Display manual assignments (filters by shard and supports JSON output).
+- `dbx tenant list [--shard <shard-0001>] [--json]` – Display manual assignments plus any configured storage quotas and current usage (filters by shard and supports JSON output).
 - `dbx tenant stats [--json]` – Summarise explicit assignments per shard.
+- `dbx tenant quota set <tenant> --max-mb <n>` – Enforce a per-tenant storage ceiling in megabytes; the daemon rejects new writes once usage reaches the limit.
+- `dbx tenant quota clear <tenant>` – Remove the storage quota so the tenant can grow again.
+- `dbx tenant quota recalc <tenant>` – Recompute storage usage counters by walking the tenant’s event store (handy after manual maintenance or restores).
 
 ## Schemas
 

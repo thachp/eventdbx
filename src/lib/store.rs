@@ -727,6 +727,56 @@ impl AggregateSort {
             ordering
         }
     }
+
+    pub fn parse_directives(raw: &str) -> std::result::Result<Vec<Self>, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("sort specification cannot be empty".to_string());
+        }
+
+        let mut directives = Vec::new();
+        for segment in trimmed.split(',') {
+            let spec = segment.trim();
+            if spec.is_empty() {
+                return Err("sort segments cannot be empty".to_string());
+            }
+            directives.push(Self::parse_single(spec)?);
+        }
+
+        Ok(directives)
+    }
+
+    fn parse_single(spec: &str) -> std::result::Result<Self, String> {
+        let mut parts = spec.split(':');
+        let field_str = parts
+            .next()
+            .ok_or_else(|| "missing sort field".to_string())?
+            .trim();
+
+        if field_str.is_empty() {
+            return Err("sort field cannot be empty".to_string());
+        }
+
+        let field = field_str.parse::<AggregateSortField>()?;
+        let descending = match parts.next() {
+            Some(order) => match order.trim().to_ascii_lowercase().as_str() {
+                "asc" => false,
+                "desc" => true,
+                other => {
+                    return Err(format!(
+                        "invalid sort order '{other}' (expected 'asc' or 'desc')"
+                    ));
+                }
+            },
+            None => false,
+        };
+
+        if parts.next().is_some() {
+            return Err("sort specification contains too many ':' separators".to_string());
+        }
+
+        Ok(Self { field, descending })
+    }
 }
 
 impl EventSortField {

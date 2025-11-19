@@ -169,6 +169,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_take(0);
             list.set_has_take(false);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(false);
         },
@@ -301,6 +302,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(false);
         },
@@ -345,6 +347,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(false);
             list.set_has_filter(true);
@@ -1137,6 +1140,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             list.set_has_take(true);
             list.set_has_filter(false);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(false);
         },
@@ -1184,6 +1188,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             list.set_has_take(true);
             list.set_has_filter(false);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(true);
         },
@@ -1277,6 +1282,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             list.set_has_take(true);
             list.set_has_filter(false);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(false);
         },

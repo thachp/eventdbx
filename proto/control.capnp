@@ -66,7 +66,7 @@ struct ListAggregatesRequest {
   hasTake @3 :Bool;
   filter @4 :Text;
   hasFilter @5 :Bool;
-  sort @6 :List(AggregateSort);
+  sort @6 :Text;
   hasSort @7 :Bool;
   includeArchived @8 :Bool;
   archivedOnly @9 :Bool;
@@ -201,19 +201,6 @@ struct ReplaceSchemasRequest {
 
 struct ReplaceSchemasResponse {
   replaced @0 :UInt32;
-}
-
-struct AggregateSort {
-  field @0 :AggregateSortField;
-  descending @1 :Bool;
-}
-
-enum AggregateSortField {
-  aggregateType @0;
-  aggregateId @1;
-  version @2;
-  merkleRoot @3;
-  archived @4;
 }
 
 struct ControlError {

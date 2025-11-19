@@ -13,6 +13,7 @@ EventDBX keeps every change as an immutable event so you can replay history, aud
 - **Immutable timelines** keep the full history for every aggregate and guard it with Merkle proofs.
 - **Schema-aware validation** enforces contracts per aggregate while still letting you iterate with permissive modes.
 - **Plugin-powered read models** persist jobs in RocksDB, apply backoff, and deliver only the slices each plugin needs (event/state/schema) so external systems can build tailored projections.
+- **Tenant-level quotas** enforce per-tenant storage ceilings with live usage counters so noisy neighbours cannot crowd out other domains.
 - **Encrypted storage** protects payloads, snapshots, and tokens once you configure a data encryption key.
 
 ## Quick start

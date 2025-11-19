@@ -1404,10 +1404,10 @@ fn collect_remote_aggregates(
         (Some(agg), None) => {
             ensure_snake_case("aggregate_type", agg)?;
             let filter = Some(build_aggregate_filter_expr(agg)?);
-            client.list_aggregates(token, filter.as_deref(), true, false)
+            client.list_aggregates(token, filter.as_deref(), None, true, false)
         }
         (None, Some(_)) => bail!("--id requires --aggregate"),
-        (None, None) => client.list_aggregates(token, None, true, false),
+        (None, None) => client.list_aggregates(token, None, None, true, false),
     }
 }
 

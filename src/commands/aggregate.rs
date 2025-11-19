@@ -24,8 +24,8 @@ use eventdbx::{
     restrict,
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
-        self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateSortField,
-        AggregateState, AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
+        self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState,
+        AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
     },
     tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
     token::{IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, TokenManager},
@@ -488,7 +488,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
             let sort_directives = if let Some(spec) = args.sort.as_deref() {
                 Some(
-                    parse_sort_directives(spec)
+                    AggregateSort::parse_directives(spec)
                         .map_err(|err| anyhow!("invalid sort specification: {err}"))?,
                 )
             } else {
@@ -1938,56 +1938,6 @@ fn create_zip_archive(files: &[(PathBuf, String)], output: &Path) -> Result<()> 
 
     zip.finish()?;
     Ok(())
-}
-
-fn parse_sort_directives(raw: &str) -> Result<Vec<AggregateSort>, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("sort specification cannot be empty".to_string());
-    }
-
-    let mut directives = Vec::new();
-    for segment in trimmed.split(',') {
-        let spec = segment.trim();
-        if spec.is_empty() {
-            return Err("sort segments cannot be empty".to_string());
-        }
-        directives.push(parse_single_sort(spec)?);
-    }
-
-    Ok(directives)
-}
-
-fn parse_single_sort(spec: &str) -> Result<AggregateSort, String> {
-    let mut parts = spec.split(':');
-    let field_str = parts
-        .next()
-        .ok_or_else(|| "missing sort field".to_string())?
-        .trim();
-
-    if field_str.is_empty() {
-        return Err("sort field cannot be empty".to_string());
-    }
-
-    let field = AggregateSortField::from_str(field_str)?;
-    let descending = match parts.next() {
-        Some(order) => match order.trim().to_ascii_lowercase().as_str() {
-            "asc" => false,
-            "desc" => true,
-            other => {
-                return Err(format!(
-                    "invalid sort order '{other}' (expected 'asc' or 'desc')"
-                ));
-            }
-        },
-        None => false,
-    };
-
-    if parts.next().is_some() {
-        return Err("sort specification contains too many ':' separators".to_string());
-    }
-
-    Ok(AggregateSort { field, descending })
 }
 
 fn parse_key_value(raw: &str) -> Result<KeyValue, String> {

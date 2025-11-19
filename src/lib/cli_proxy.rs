@@ -28,10 +28,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     cli_capnp::{cli_request, cli_response},
     config::Config,
-    control_capnp::{
-        AggregateSortField as CapnpAggregateSortField, control_hello, control_hello_response,
-        control_request, control_response,
-    },
+    control_capnp::{control_hello, control_hello_response, control_request, control_response},
     error::EventError,
     filter::{self, FilterExpr},
     observability,
@@ -47,8 +44,8 @@ use crate::{
         normalize_optional_comment,
     },
     store::{
-        AggregateCursor, AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState,
-        EventCursor, EventRecord,
+        AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState, EventCursor,
+        EventRecord,
     },
     tenant::{CoreProvider, normalize_tenant_id},
     token::{JwtClaims, TokenManager},
@@ -1079,31 +1076,14 @@ fn parse_control_command(
             };
 
             let sort = if req.get_has_sort() {
-                let list = req
-                    .get_sort()
-                    .map_err(|err| EventError::Serialization(err.to_string()))?;
-                let mut directives = Vec::with_capacity(list.len() as usize);
-                for entry in list.iter() {
-                    let field = match entry.get_field().map_err(|err| {
-                        EventError::InvalidSchema(format!(
-                            "unknown aggregate sort field value: {err}"
-                        ))
-                    })? {
-                        CapnpAggregateSortField::AggregateType => AggregateSortField::AggregateType,
-                        CapnpAggregateSortField::AggregateId => AggregateSortField::AggregateId,
-                        CapnpAggregateSortField::Version => AggregateSortField::Version,
-                        CapnpAggregateSortField::MerkleRoot => AggregateSortField::MerkleRoot,
-                        CapnpAggregateSortField::Archived => AggregateSortField::Archived,
-                    };
-                    directives.push(AggregateSort {
-                        field,
-                        descending: entry.get_descending(),
-                    });
-                }
-                if directives.is_empty() {
+                let raw = read_control_text(req.get_sort(), "sort")?;
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
                     None
                 } else {
-                    Some(directives)
+                    Some(AggregateSort::parse_directives(trimmed).map_err(|err| {
+                        EventError::InvalidSchema(format!("invalid sort specification: {err}"))
+                    })?)
                 }
             } else {
                 None
