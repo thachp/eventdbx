@@ -904,6 +904,41 @@ fn compare_event_sort_keys(
     StdOrdering::Equal
 }
 
+fn aggregate_sort_matches_key_order(keys: &[AggregateSort]) -> bool {
+    if keys.is_empty() {
+        return true;
+    }
+    const NATURAL_ORDER: [AggregateSortField; 2] = [
+        AggregateSortField::AggregateType,
+        AggregateSortField::AggregateId,
+    ];
+    keys.iter().enumerate().all(|(idx, key)| {
+        !key.descending
+            && NATURAL_ORDER
+                .get(idx)
+                .map(|field| key.field == *field)
+                .unwrap_or(false)
+    })
+}
+
+fn event_sort_matches_key_order(keys: &[EventSort]) -> bool {
+    if keys.is_empty() {
+        return true;
+    }
+    const NATURAL_ORDER: [EventSortField; 3] = [
+        EventSortField::AggregateType,
+        EventSortField::AggregateId,
+        EventSortField::Version,
+    ];
+    keys.iter().enumerate().all(|(idx, key)| {
+        !key.descending
+            && NATURAL_ORDER
+                .get(idx)
+                .map(|field| key.field == *field)
+                .unwrap_or(false)
+    })
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -1975,7 +2010,7 @@ impl EventStore {
             .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
         let mut items = Vec::new();
         let mut skipped = 0usize;
-        let should_sort = sort.map_or(false, |keys| !keys.is_empty());
+        let should_sort = sort.map_or(false, |keys| !aggregate_sort_matches_key_order(keys));
         let mut status = "ok";
 
         for item in iter {
@@ -2285,7 +2320,7 @@ impl EventStore {
             .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
         let mut items = Vec::new();
         let mut skipped = 0usize;
-        let should_sort = sort.map_or(false, |keys| !keys.is_empty());
+        let should_sort = sort.map_or(false, |keys| !event_sort_matches_key_order(keys));
         let mut status = "ok";
 
         for item in iter {
@@ -3071,6 +3106,80 @@ mod tests {
 
         let events = store.list_events("order", "order-42").unwrap();
         assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn aggregate_sort_key_order_detection() {
+        assert!(aggregate_sort_matches_key_order(&[]));
+
+        let sorts = vec![AggregateSort {
+            field: AggregateSortField::AggregateType,
+            descending: false,
+        }];
+        assert!(aggregate_sort_matches_key_order(&sorts));
+
+        let sorts = vec![
+            AggregateSort {
+                field: AggregateSortField::AggregateType,
+                descending: false,
+            },
+            AggregateSort {
+                field: AggregateSortField::AggregateId,
+                descending: false,
+            },
+        ];
+        assert!(aggregate_sort_matches_key_order(&sorts));
+
+        let invalid = vec![AggregateSort {
+            field: AggregateSortField::AggregateId,
+            descending: false,
+        }];
+        assert!(!aggregate_sort_matches_key_order(&invalid));
+
+        let descending = vec![AggregateSort {
+            field: AggregateSortField::AggregateType,
+            descending: true,
+        }];
+        assert!(!aggregate_sort_matches_key_order(&descending));
+    }
+
+    #[test]
+    fn event_sort_key_order_detection() {
+        assert!(event_sort_matches_key_order(&[]));
+
+        let sorts = vec![EventSort {
+            field: EventSortField::AggregateType,
+            descending: false,
+        }];
+        assert!(event_sort_matches_key_order(&sorts));
+
+        let sorts = vec![
+            EventSort {
+                field: EventSortField::AggregateType,
+                descending: false,
+            },
+            EventSort {
+                field: EventSortField::AggregateId,
+                descending: false,
+            },
+            EventSort {
+                field: EventSortField::Version,
+                descending: false,
+            },
+        ];
+        assert!(event_sort_matches_key_order(&sorts));
+
+        let invalid_field = vec![EventSort {
+            field: EventSortField::EventType,
+            descending: false,
+        }];
+        assert!(!event_sort_matches_key_order(&invalid_field));
+
+        let descending = vec![EventSort {
+            field: EventSortField::AggregateType,
+            descending: true,
+        }];
+        assert!(!event_sort_matches_key_order(&descending));
     }
 
     #[test]
