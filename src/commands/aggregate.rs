@@ -309,7 +309,7 @@ pub struct AggregateListArgs {
     #[arg(long)]
     pub filter: Option<String>,
 
-    /// Sort aggregates by comma-separated fields (e.g. `aggregate_type:asc,version:desc`)
+    /// Sort aggregates by comma-separated fields (e.g. `aggregate_type:asc,updated_at:desc`)
     #[arg(long, value_name = "FIELD[:ORDER][,...]")]
     pub sort: Option<String>,
 

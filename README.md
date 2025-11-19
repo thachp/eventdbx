@@ -117,7 +117,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
      ```
 
    - If the server is stopped, the same CLI command writes to the local RocksDB store directly.
-   - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort created_at:desc --take 5` or drill into the payload of a specific event via `dbx events <snowflake_id> --json`.
+   - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort version:desc --take 5` or drill into the payload of a specific event via `dbx events <snowflake_id> --json`.
 
 6. **Replicate a domain (optional)**
 
@@ -321,6 +321,8 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 - `dbx aggregate remove --aggregate <type> --aggregate-id <id>` Removes an aggregate that has no events (version still 0).
 - `dbx aggregate commit`  
   Flushes all staged events in a single atomic transaction.
+
+Aggregate sorting currently accepts `aggregate_type`, `aggregate_id`, `archived`, `created_at`, and `updated_at` fields (with optional `:asc`/`:desc` suffixes). Sorting by `version` has been removed to keep the CLI aligned with the indexed columns.
 
 Cursor pagination tokens are human-readable: active aggregates encode as `a:<aggregate_type>:<aggregate_id>` (`r:` for archived), and event cursors append the event version (`a:<aggregate_type>:<aggregate_id>:<version>`). Grab the last row from a page, form its token, and pass it via `--cursor` to resume listing.
 

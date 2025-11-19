@@ -2442,21 +2442,20 @@ fn aggregate_list_supports_sorting() -> Result<()> {
     assert_eq!(list[1]["aggregate_id"], "order-2");
     assert_eq!(list[2]["aggregate_id"], "order-1");
 
-    let version_sorted = cli.run_json(&[
+    let updated_sorted = cli.run_json(&[
         "aggregate",
         "list",
         "--json",
         "--sort",
-        "version:desc,aggregate_id:asc",
+        "updated_at:desc,aggregate_id:asc",
     ])?;
-    let version_list = version_sorted
+    let updated_list = updated_sorted
         .as_array()
-        .context("version-sorted list did not return an array")?;
-    assert_eq!(version_list.len(), 3);
-    assert_eq!(version_list[0]["aggregate_id"], "order-1");
-    assert_eq!(version_list[0]["version"], 2);
-    assert_eq!(version_list[1]["version"], 1);
-    assert_eq!(version_list[2]["version"], 1);
+        .context("timestamp-sorted list did not return an array")?;
+    assert_eq!(updated_list.len(), 3);
+    assert_eq!(updated_list[0]["aggregate_id"], "order-1");
+    assert_eq!(updated_list[1]["aggregate_id"], "invoice-1");
+    assert_eq!(updated_list[2]["aggregate_id"], "order-2");
 
     let first_page = cli.run_json(&["aggregate", "list", "--json", "--take", "1"])?;
     let first_list = first_page
