@@ -378,6 +378,17 @@ pub struct AggregateState {
     pub archived: bool,
 }
 
+#[derive(Debug, Clone)]
+struct AggregateSummary {
+    aggregate_type: String,
+    aggregate_id: String,
+    version: u64,
+    merkle_root: String,
+    archived: bool,
+    created_at: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct StoreCounts {
     pub active_aggregates: usize,
@@ -2481,6 +2492,7 @@ impl EventStore {
         let mut skipped = 0usize;
         let should_sort = sort.map_or(false, |keys| !aggregate_sort_matches_key_order(keys));
         let mut status = "ok";
+        let mut pending = if should_sort { Some(Vec::new()) } else { None };
 
         for item in iter {
             let Ok((key, value)) = item else {
@@ -2508,6 +2520,20 @@ impl EventStore {
                 updated_at,
                 ..
             } = meta;
+            if should_sort {
+                if let Some(list) = pending.as_mut() {
+                    list.push(AggregateSummary {
+                        aggregate_type,
+                        aggregate_id,
+                        version,
+                        merkle_root,
+                        archived,
+                        created_at,
+                        updated_at,
+                    });
+                }
+                continue;
+            }
             let state = match self.load_state_map_from(index, &aggregate_type, &aggregate_id) {
                 Ok(state) => state,
                 Err(_) => {
@@ -2551,6 +2577,17 @@ impl EventStore {
         }
 
         if should_sort {
+            let summaries = pending.unwrap_or_default();
+            let (mut aggregates, had_errors) = self.load_states_parallel(index, summaries);
+            if had_errors {
+                status = "err";
+            }
+            for aggregate in aggregates.drain(..) {
+                let Some(aggregate) = transform(aggregate) else {
+                    continue;
+                };
+                items.push(aggregate);
+            }
             if let Some(keys) = sort {
                 items.sort_by(|a, b| compare_aggregate_sort_keys(a, b, keys));
             }
@@ -2771,6 +2808,54 @@ impl EventStore {
         };
 
         Ok((items, next_cursor))
+    }
+
+    fn load_states_parallel(
+        &self,
+        index: AggregateIndex,
+        summaries: Vec<AggregateSummary>,
+    ) -> (Vec<AggregateState>, bool) {
+        use rayon::prelude::*;
+
+        let results: Vec<std::result::Result<AggregateState, EventError>> = summaries
+            .into_par_iter()
+            .map(|summary| {
+                let AggregateSummary {
+                    aggregate_type,
+                    aggregate_id,
+                    version,
+                    merkle_root,
+                    archived,
+                    created_at,
+                    updated_at,
+                } = summary;
+                let state = self.load_state_map_from(index, &aggregate_type, &aggregate_id)?;
+                Ok(AggregateState {
+                    aggregate_type,
+                    aggregate_id,
+                    version,
+                    state,
+                    merkle_root,
+                    created_at,
+                    updated_at,
+                    archived,
+                })
+            })
+            .collect();
+
+        let mut had_error = false;
+        let aggregates = results
+            .into_iter()
+            .filter_map(|result| match result {
+                Ok(aggregate) => Some(aggregate),
+                Err(_) => {
+                    had_error = true;
+                    None
+                }
+            })
+            .collect();
+
+        (aggregates, had_error)
     }
 
     fn collect_events_paginated(

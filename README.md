@@ -339,9 +339,9 @@ Cursor pagination tokens are human-readable: active aggregates encode as `a:<agg
 
 #### Aggregate Operation Costs
 
-Every aggregate command ultimately turns into a small set of RocksDB reads or writes. Ballpark complexities:
+Every aggregate command ultimately turns into a small set of RocksDB reads or writes. Ballpark complexities (assume hot data in cache):
 
-- `aggregate list`: iterates over the requested page of aggregates. Runtime is O(k) in the page size (default `list_page_size`).
+- `aggregate list`: iterates over the requested page of aggregates. Runtime is O(k) in the page size (default `list_page_size`) when you follow the natural key order (type → id) or stick to single-field timestamp sorts; arbitrary filters or multi-field sorts fall back to an O(N) scan because predicates are evaluated in memory after loading each aggregate.
 - `aggregate get`: one state lookup (O(log N)) plus optional event scanning when you request `--include-events` or `--version` (adds O(Eₐ) for that aggregate’s events) and lightweight JSON parsing of the returned map.
 - `aggregate select`: uses the same state lookup as `get` (O(log N)) and walks each requested dot path in-memory; no additional RocksDB reads are taken, so cost is dominated by the selected payload size.
 - `aggregate apply`: validates the payload, merges it into the materialized state, and appends the event in a single batch write. Time is proportional to the payload size being processed.
@@ -353,7 +353,7 @@ In practice those costs are dominated by payload size and the number of events y
 
 | Operation          | Time complexity          | Notes                                                            |
 | ------------------ | ------------------------ | ---------------------------------------------------------------- |
-| `aggregate list`   | O(k)                     | `k` is the requested page size (defaults to `list_page_size`).   |
+| `aggregate list`   | O(k) / O(N)              | O(k) for cursor-order or timestamp-indexed sorts; O(N) when filters/sorts can’t use an index. |
 | `aggregate get`    | O(log N + Eₐ + P)        | Single state read plus optional event scan and JSON parsing.     |
 | `aggregate select` | O(log N + P_selected)    | Same state read as `get`; dot-path traversal happens in memory.  |
 | `aggregate apply`  | O(P)                     | Payload validation + merge + append in one RocksDB batch.        |
