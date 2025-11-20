@@ -44,7 +44,7 @@ use crate::{
         normalize_optional_note,
     },
     store::{
-        AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState, EventCursor,
+        self, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState, EventCursor,
         EventRecord,
     },
     tenant::{CoreProvider, normalize_tenant_id},
@@ -119,7 +119,7 @@ enum ControlReply {
 enum ControlCommand {
     ListAggregates {
         token: String,
-        cursor: Option<AggregateCursor>,
+        cursor: Option<String>,
         take: Option<usize>,
         filter: Option<FilterExpr>,
         sort: Option<Vec<AggregateSort>>,
@@ -1048,7 +1048,7 @@ fn parse_control_command(
                 if trimmed.is_empty() {
                     None
                 } else {
-                    Some(AggregateCursor::from_str(trimmed)?)
+                    Some(trimmed.to_string())
                 }
             } else {
                 None
@@ -1528,7 +1528,29 @@ async fn execute_control_command(
                 let cursor = cursor.clone();
                 move || {
                     let sort_ref = sort.as_ref().map(|keys| keys.as_slice());
-                    let cursor_ref = cursor.as_ref();
+                    let timestamp_sort = sort_ref.and_then(store::timestamp_sort_hint);
+                    if cursor.is_some() && sort.is_some() && timestamp_sort.is_none() {
+                        return Err(EventError::InvalidCursor(
+                            "cursor cannot be combined with sort directives".into(),
+                        ));
+                    }
+
+                    let store = core.store();
+                    let cursor_parsed = match cursor.as_deref() {
+                        Some(raw) => {
+                            let cursor = if let Some((kind, descending)) = timestamp_sort {
+                                let expanded =
+                                    store.parse_timestamp_cursor(raw, kind, descending)?;
+                                store::ensure_timestamp_cursor(&expanded, kind, descending, scope)?;
+                                expanded
+                            } else {
+                                AggregateCursor::from_str(raw)?
+                            };
+                            Some(cursor)
+                        }
+                        None => None,
+                    };
+                    let cursor_ref = cursor_parsed.as_ref();
                     core.list_aggregates(&token, cursor_ref, take, filter, sort_ref, scope)
                 }
             })

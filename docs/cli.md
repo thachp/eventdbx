@@ -85,6 +85,7 @@ Run without flags to print the current configuration. The first invocation must 
 Staging (`--stage`) records events to `~/.eventdbx/staged_events.json` until you call `dbx aggregate commit`.
 
 Cursor pagination uses opaque-but-readable tokens. Active aggregates encode as `a:<aggregate_type>:<aggregate_id>` (archived entries use `r:`) and events append the version (`a:<aggregate_type>:<aggregate_id>:<version>`). Capture the last item from a page and feed its token back via `--cursor` to resume listing.
+Timestamp-sorted listings accept `ts:<field>:<order>:<scope>:<timestamp_ms>:<aggregate_type>:<aggregate_id>` tokens (`field` is `created_at` or `updated_at`, `order` is `asc|desc`, and `scope` is `a` or `r`). You can also pass `ts:<aggregate_type>:<aggregate_id>` when pairing `--cursor` with `--sort created_at|updated_at`, and the CLI/control clients will expand it for you.
 
 ## Plugins & queues
 

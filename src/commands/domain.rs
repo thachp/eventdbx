@@ -1362,6 +1362,7 @@ fn collect_local_aggregates(
                 None,
                 None,
                 AggregateQueryScope::IncludeArchived,
+                None,
                 |state| {
                     if state.aggregate_type == agg {
                         Some(state)
@@ -1378,6 +1379,7 @@ fn collect_local_aggregates(
             None,
             None,
             AggregateQueryScope::IncludeArchived,
+            None,
             |state| Some(state),
         )),
     }
@@ -1808,6 +1810,7 @@ fn merge_events(source: &Config, target: &Config) -> Result<EventMergeStats> {
         None,
         None,
         AggregateQueryScope::IncludeArchived,
+        None,
         |aggregate| Some(aggregate),
     );
     aggregates.sort_by(|a, b| {

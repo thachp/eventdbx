@@ -6,7 +6,7 @@ use assert_cmd::{Command, cargo::cargo_bin_cmd};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use eventdbx::{
     plugin::queue::PluginQueueStore, snowflake::SnowflakeId, validation::MAX_EVENT_PAYLOAD_BYTES,
 };
@@ -2487,6 +2487,136 @@ fn aggregate_list_supports_sorting() -> Result<()> {
         .context("cursor-based aggregate list did not return an array")?;
     assert_eq!(paged_list.len(), 1);
     assert_eq!(paged_list[0]["aggregate_id"], "order-1");
+
+    Ok(())
+}
+
+#[test]
+fn aggregate_list_timestamp_cursor() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.create_aggregate_with_fields(
+        "patient",
+        "patient-1",
+        "patient_created",
+        &[("status", "new")],
+    )?;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    cli.create_aggregate_with_fields(
+        "patient",
+        "patient-2",
+        "patient_created",
+        &[("status", "pending")],
+    )?;
+
+    let page = cli.run_json(&[
+        "aggregate",
+        "list",
+        "--json",
+        "--take",
+        "1",
+        "--sort",
+        "updated_at:desc",
+    ])?;
+    let list = page
+        .as_array()
+        .context("timestamp-sorted list did not return an array")?;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["aggregate_id"], "patient-2");
+    let updated_at = list[0]["updated_at"]
+        .as_str()
+        .context("sorted row missing updated_at")?;
+    let parsed =
+        DateTime::parse_from_rfc3339(updated_at).context("failed to parse updated_at timestamp")?;
+    let cursor = format!(
+        "ts:updated_at:desc:a:{}:{}:{}",
+        parsed.timestamp_millis(),
+        list[0]["aggregate_type"]
+            .as_str()
+            .context("sorted row missing aggregate_type")?,
+        list[0]["aggregate_id"]
+            .as_str()
+            .context("sorted row missing aggregate_id")?
+    );
+
+    let next_page = cli.run_json(&[
+        "aggregate",
+        "list",
+        "--json",
+        "--take",
+        "1",
+        "--sort",
+        "updated_at:desc",
+        "--cursor",
+        &cursor,
+    ])?;
+    let next = next_page
+        .as_array()
+        .context("timestamp cursor page did not return an array")?;
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0]["aggregate_id"], "patient-1");
+
+    Ok(())
+}
+
+#[test]
+fn aggregate_list_timestamp_cursor_shorthand() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    cli.create_aggregate_with_fields(
+        "account",
+        "account-1",
+        "account_created",
+        &[("status", "open")],
+    )?;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    cli.create_aggregate_with_fields(
+        "account",
+        "account-2",
+        "account_created",
+        &[("status", "approved")],
+    )?;
+
+    let page = cli.run_json(&[
+        "aggregate",
+        "list",
+        "--json",
+        "--take",
+        "1",
+        "--sort",
+        "created_at:desc",
+    ])?;
+    let list = page
+        .as_array()
+        .context("timestamp-sorted list did not return an array")?;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["aggregate_id"], "account-2");
+    let cursor = format!(
+        "ts:{}:{}",
+        list[0]["aggregate_type"]
+            .as_str()
+            .context("sorted row missing aggregate_type")?,
+        list[0]["aggregate_id"]
+            .as_str()
+            .context("sorted row missing aggregate_id")?
+    );
+
+    let next_page = cli.run_json(&[
+        "aggregate",
+        "list",
+        "--json",
+        "--take",
+        "1",
+        "--sort",
+        "created_at:desc",
+        "--cursor",
+        &cursor,
+    ])?;
+    let next = next_page
+        .as_array()
+        .context("timestamp cursor page did not return an array")?;
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0]["aggregate_id"], "account-1");
 
     Ok(())
 }

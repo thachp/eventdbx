@@ -10,7 +10,7 @@ use crate::{
     restrict::{self, RestrictMode},
     schema::SchemaManager,
     store::{
-        ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState,
+        self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState,
         AppendEvent, EventArchiveScope, EventCursor, EventQueryScope, EventRecord, EventStore,
         select_state_field,
     },
@@ -203,18 +203,34 @@ impl CoreContext {
             Some(sanitized)
         };
 
-        if cursor.is_some() && sort.is_some() {
+        let timestamp_sort = sort.and_then(store::timestamp_sort_hint);
+        if cursor.is_some() && sort.is_some() && timestamp_sort.is_none() {
             return Err(EventError::InvalidCursor(
                 "cursor cannot be combined with sort directives".into(),
             ));
         }
 
         if let Some(keys) = sort {
+            if let Some((kind, descending)) = timestamp_sort {
+                if let Some(cursor) = cursor {
+                    store::ensure_timestamp_cursor(cursor, kind, descending, scope)?;
+                }
+                let aggregates = self.store.aggregates_paginated_with_transform(
+                    0,
+                    Some(effective_take),
+                    Some(keys),
+                    scope,
+                    cursor,
+                    &mut transform,
+                );
+                return Ok((aggregates, None));
+            }
             let aggregates = self.store.aggregates_paginated_with_transform(
                 0,
                 Some(effective_take),
                 Some(keys),
                 scope,
+                None,
                 &mut transform,
             );
             return Ok((aggregates, None));

@@ -325,6 +325,7 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 Aggregate sorting currently accepts `aggregate_type`, `aggregate_id`, `archived`, `created_at`, and `updated_at` fields (with optional `:asc`/`:desc` suffixes). Sorting by `version` has been removed to keep the CLI aligned with the indexed columns.
 
 Cursor pagination tokens are human-readable: active aggregates encode as `a:<aggregate_type>:<aggregate_id>` (`r:` for archived), and event cursors append the event version (`a:<aggregate_type>:<aggregate_id>:<version>`). Grab the last row from a page, form its token, and pass it via `--cursor` to resume listing.
+Timestamp-sorted aggregate listings use `ts:<field>:<order>:<scope>:<timestamp_ms>:<aggregate_type>:<aggregate_id>` tokens (`field` is `created_at` or `updated_at`, `order` is `asc|desc`, and `scope` is `a` or `r`). Take the timestamp from the last row (in milliseconds) to build the cursor for the next page; you can also pass the shorthand `ts:<aggregate_type>:<aggregate_id>` and the CLI/control clients (including `eventdbxjs`) will derive the rest when combined with `--sort created_at|updated_at`.
 
 ### Events
 

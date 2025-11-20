@@ -4,7 +4,7 @@ use std::{
     convert::TryInto,
     fmt,
     path::PathBuf,
-    str,
+    str::{self, FromStr},
     time::Instant,
 };
 
@@ -432,10 +432,21 @@ impl fmt::Display for CursorIndex {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum AggregateCursorKind {
+    Natural,
+    Timestamp {
+        kind: TimestampIndexKind,
+        descending: bool,
+        timestamp_ms: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregateCursor {
     index: CursorIndex,
     aggregate_type: String,
     aggregate_id: String,
+    kind: AggregateCursorKind,
 }
 
 impl AggregateCursor {
@@ -448,6 +459,27 @@ impl AggregateCursor {
             index,
             aggregate_type: aggregate_type.into(),
             aggregate_id: aggregate_id.into(),
+            kind: AggregateCursorKind::Natural,
+        }
+    }
+
+    pub fn new_timestamp(
+        index: CursorIndex,
+        aggregate_type: impl Into<String>,
+        aggregate_id: impl Into<String>,
+        kind: TimestampIndexKind,
+        descending: bool,
+        timestamp_ms: i64,
+    ) -> Self {
+        Self {
+            index,
+            aggregate_type: aggregate_type.into(),
+            aggregate_id: aggregate_id.into(),
+            kind: AggregateCursorKind::Timestamp {
+                kind,
+                descending,
+                timestamp_ms,
+            },
         }
     }
 
@@ -464,24 +496,68 @@ impl AggregateCursor {
     }
 
     pub fn encode(&self) -> String {
-        format!(
-            "{}:{}:{}",
-            self.index.code(),
-            self.aggregate_type,
-            self.aggregate_id
-        )
+        match &self.kind {
+            AggregateCursorKind::Natural => format!(
+                "{}:{}:{}",
+                self.index.code(),
+                self.aggregate_type,
+                self.aggregate_id
+            ),
+            AggregateCursorKind::Timestamp {
+                kind,
+                descending,
+                timestamp_ms,
+            } => format!(
+                "ts:{}:{}:{}:{}:{}:{}",
+                kind.as_str(),
+                if *descending { "desc" } else { "asc" },
+                self.index.code(),
+                timestamp_ms,
+                self.aggregate_type,
+                self.aggregate_id
+            ),
+        }
+    }
+
+    pub fn is_timestamp(&self) -> bool {
+        matches!(self.kind, AggregateCursorKind::Timestamp { .. })
+    }
+
+    pub fn timestamp_components(&self) -> Option<(TimestampIndexKind, bool, i64)> {
+        match self.kind {
+            AggregateCursorKind::Timestamp {
+                kind,
+                descending,
+                timestamp_ms,
+            } => Some((kind, descending, timestamp_ms)),
+            _ => None,
+        }
+    }
+
+    pub fn as_timestamp_key(
+        &self,
+    ) -> Option<(TimestampIndexKind, bool, i64, CursorIndex, &str, &str)> {
+        match self.kind {
+            AggregateCursorKind::Timestamp {
+                kind,
+                descending,
+                timestamp_ms,
+            } => Some((
+                kind,
+                descending,
+                timestamp_ms,
+                self.index,
+                self.aggregate_type(),
+                self.aggregate_id(),
+            )),
+            _ => None,
+        }
     }
 }
 
 impl fmt::Display for AggregateCursor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}:{}:{}",
-            self.index.code(),
-            self.aggregate_type,
-            self.aggregate_id
-        )
+        write!(f, "{}", self.encode())
     }
 }
 
@@ -492,6 +568,69 @@ impl std::str::FromStr for AggregateCursor {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             return Err(EventError::InvalidCursor("cursor cannot be empty".into()));
+        }
+        if trimmed.starts_with("ts:") {
+            let mut segments = trimmed.split(':');
+            segments.next(); // consume "ts"
+            let kind_str = segments
+                .next()
+                .ok_or_else(|| EventError::InvalidCursor("timestamp cursor missing kind".into()))?;
+            let kind = TimestampIndexKind::from_str_token(kind_str).ok_or_else(|| {
+                EventError::InvalidCursor(format!("unknown timestamp cursor kind '{kind_str}'"))
+            })?;
+            let order = segments.next().ok_or_else(|| {
+                EventError::InvalidCursor("timestamp cursor missing order".into())
+            })?;
+            let descending = match order {
+                "asc" => false,
+                "desc" => true,
+                _ => {
+                    return Err(EventError::InvalidCursor(format!(
+                        "timestamp cursor order must be 'asc' or 'desc', found '{order}'"
+                    )));
+                }
+            };
+            let index_tag = segments.next().ok_or_else(|| {
+                EventError::InvalidCursor("timestamp cursor missing scope".into())
+            })?;
+            let index = CursorIndex::from_str_tag(index_tag)?;
+            let ts_str = segments.next().ok_or_else(|| {
+                EventError::InvalidCursor("timestamp cursor missing timestamp".into())
+            })?;
+            let timestamp_ms = ts_str.parse::<i64>().map_err(|_| {
+                EventError::InvalidCursor(format!(
+                    "timestamp cursor contains invalid timestamp '{ts_str}'"
+                ))
+            })?;
+            let aggregate_type = segments.next().ok_or_else(|| {
+                EventError::InvalidCursor("timestamp cursor missing aggregate_type".into())
+            })?;
+            if aggregate_type.is_empty() {
+                return Err(EventError::InvalidCursor(
+                    "timestamp cursor aggregate_type cannot be empty".into(),
+                ));
+            }
+            let aggregate_id = segments.next().ok_or_else(|| {
+                EventError::InvalidCursor("timestamp cursor missing aggregate_id".into())
+            })?;
+            if aggregate_id.is_empty() {
+                return Err(EventError::InvalidCursor(
+                    "timestamp cursor aggregate_id cannot be empty".into(),
+                ));
+            }
+            if segments.next().is_some() {
+                return Err(EventError::InvalidCursor(
+                    "timestamp cursor has too many segments".into(),
+                ));
+            }
+            return Ok(Self::new_timestamp(
+                index,
+                aggregate_type,
+                aggregate_id,
+                kind,
+                descending,
+                timestamp_ms,
+            ));
         }
         let mut segments = trimmed.split(':');
         let Some(index_tag) = segments.next() else {
@@ -522,6 +661,49 @@ impl std::str::FromStr for AggregateCursor {
 
         Ok(Self::new(index, aggregate_type, aggregate_id))
     }
+}
+
+pub fn ensure_timestamp_cursor(
+    cursor: &AggregateCursor,
+    kind: TimestampIndexKind,
+    descending: bool,
+    scope: AggregateQueryScope,
+) -> Result<()> {
+    let Some((cursor_kind, cursor_desc, _, cursor_index, _, _)) = cursor.as_timestamp_key() else {
+        return Err(EventError::InvalidCursor(
+            "timestamp cursors must use the 'ts:' prefix (ts:<field>:<order>:...)".into(),
+        ));
+    };
+    if cursor_kind != kind {
+        return Err(EventError::InvalidCursor(format!(
+            "timestamp cursor targets '{}' but sort is '{}'",
+            cursor_kind.as_str(),
+            kind.as_str()
+        )));
+    }
+    if cursor_desc != descending {
+        return Err(EventError::InvalidCursor(
+            "timestamp cursor order does not match the requested sort direction".into(),
+        ));
+    }
+    match scope {
+        AggregateQueryScope::ActiveOnly => {
+            if cursor_index != CursorIndex::Active {
+                return Err(EventError::InvalidCursor(
+                    "timestamp cursor must reference active aggregates in this scope".into(),
+                ));
+            }
+        }
+        AggregateQueryScope::ArchivedOnly => {
+            if cursor_index != CursorIndex::Archived {
+                return Err(EventError::InvalidCursor(
+                    "timestamp cursor must reference archived aggregates in this scope".into(),
+                ));
+            }
+        }
+        AggregateQueryScope::IncludeArchived => {}
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -702,8 +884,8 @@ enum AggregateIndex {
     Archived,
 }
 
-#[derive(Clone, Copy)]
-enum TimestampIndexKind {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimestampIndexKind {
     CreatedAt,
     UpdatedAt,
 }
@@ -910,6 +1092,21 @@ impl TimestampIndexKind {
             }
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TimestampIndexKind::CreatedAt => "created_at",
+            TimestampIndexKind::UpdatedAt => "updated_at",
+        }
+    }
+
+    fn from_str_token(value: &str) -> Option<Self> {
+        match value {
+            "created_at" | "created" => Some(TimestampIndexKind::CreatedAt),
+            "updated_at" | "updated" => Some(TimestampIndexKind::UpdatedAt),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1043,7 +1240,7 @@ fn aggregate_sort_matches_key_order(keys: &[AggregateSort]) -> bool {
     })
 }
 
-fn timestamp_sort_hint(keys: &[AggregateSort]) -> Option<(TimestampIndexKind, bool)> {
+pub fn timestamp_sort_hint(keys: &[AggregateSort]) -> Option<(TimestampIndexKind, bool)> {
     if keys.len() != 1 {
         return None;
     }
@@ -1565,6 +1762,84 @@ impl EventStore {
             updated_at,
             archived,
         })
+    }
+
+    pub fn parse_timestamp_cursor(
+        &self,
+        raw: &str,
+        kind: TimestampIndexKind,
+        descending: bool,
+    ) -> Result<AggregateCursor> {
+        if let Some(cursor) = self.try_shorthand_timestamp_cursor(raw, kind, descending)? {
+            return Ok(cursor);
+        }
+
+        AggregateCursor::from_str(raw)
+    }
+
+    fn try_shorthand_timestamp_cursor(
+        &self,
+        raw: &str,
+        kind: TimestampIndexKind,
+        descending: bool,
+    ) -> Result<Option<AggregateCursor>> {
+        let parts: Vec<_> = raw.trim().split(':').collect();
+        if parts.len() != 3 || parts[0] != "ts" {
+            return Ok(None);
+        }
+        let aggregate_type = parts[1];
+        let aggregate_id = parts[2];
+        if aggregate_type.is_empty() {
+            return Err(EventError::InvalidCursor(
+                "timestamp cursor aggregate_type cannot be empty".into(),
+            ));
+        }
+        if aggregate_id.is_empty() {
+            return Err(EventError::InvalidCursor(
+                "timestamp cursor aggregate_id cannot be empty".into(),
+            ));
+        }
+
+        let aggregate = match self.get_aggregate_state(aggregate_type, aggregate_id) {
+            Ok(aggregate) => aggregate,
+            Err(EventError::AggregateNotFound) => {
+                return Err(EventError::InvalidCursor(format!(
+                    "cursor references unknown aggregate '{}:{}'",
+                    aggregate_type, aggregate_id
+                )));
+            }
+            Err(err) => return Err(err),
+        };
+        let timestamp = match kind {
+            TimestampIndexKind::CreatedAt => aggregate.created_at,
+            TimestampIndexKind::UpdatedAt => aggregate.updated_at,
+        }
+        .ok_or_else(|| {
+            EventError::InvalidCursor(format!(
+                "aggregate {}:{} missing {} timestamp",
+                aggregate_type,
+                aggregate_id,
+                match kind {
+                    TimestampIndexKind::CreatedAt => "created_at",
+                    TimestampIndexKind::UpdatedAt => "updated_at",
+                }
+            ))
+        })?;
+
+        let index = if aggregate.archived {
+            CursorIndex::Archived
+        } else {
+            CursorIndex::Active
+        };
+
+        Ok(Some(AggregateCursor::new_timestamp(
+            index,
+            aggregate.aggregate_type,
+            aggregate.aggregate_id,
+            kind,
+            descending,
+            timestamp.timestamp_millis(),
+        )))
     }
 
     pub fn list_events(
@@ -2187,6 +2462,7 @@ impl EventStore {
             take,
             None,
             AggregateQueryScope::ActiveOnly,
+            None,
             |aggregate| Some(aggregate),
         )
     }
@@ -2197,6 +2473,7 @@ impl EventStore {
         take: Option<usize>,
         sort: Option<&[AggregateSort]>,
         scope: AggregateQueryScope,
+        cursor: Option<&AggregateCursor>,
         mut transform: F,
     ) -> Vec<AggregateState>
     where
@@ -2210,6 +2487,7 @@ impl EventStore {
                     skip,
                     take,
                     descending,
+                    cursor,
                     &mut transform,
                 );
             }
@@ -2269,6 +2547,7 @@ impl EventStore {
         skip: usize,
         take: Option<usize>,
         descending: bool,
+        cursor: Option<&AggregateCursor>,
         transform: &mut F,
     ) -> Vec<AggregateState>
     where
@@ -2281,6 +2560,7 @@ impl EventStore {
                 skip,
                 take,
                 descending,
+                cursor,
                 transform,
             ),
             AggregateQueryScope::ArchivedOnly => self.collect_timestamp_index_paginated(
@@ -2289,11 +2569,11 @@ impl EventStore {
                 skip,
                 take,
                 descending,
+                cursor,
                 transform,
             ),
-            AggregateQueryScope::IncludeArchived => {
-                self.collect_timestamp_indexes_merged(kind, skip, take, descending, transform)
-            }
+            AggregateQueryScope::IncludeArchived => self
+                .collect_timestamp_indexes_merged(kind, skip, take, descending, cursor, transform),
         }
     }
 
@@ -2304,6 +2584,7 @@ impl EventStore {
         skip: usize,
         take: Option<usize>,
         descending: bool,
+        cursor: Option<&AggregateCursor>,
         transform: &mut F,
     ) -> Vec<AggregateState>
     where
@@ -2312,6 +2593,21 @@ impl EventStore {
         let mut stream = TimestampIndexIterator::new(self, kind, index, descending);
         let mut items = Vec::new();
         let mut skipped = 0usize;
+        let cursor_key = cursor.and_then(|token| {
+            token.as_timestamp_key().and_then(
+                |(cursor_kind, cursor_desc, cursor_ts, cursor_index, agg_type, agg_id)| {
+                    if cursor_kind == kind
+                        && cursor_desc == descending
+                        && cursor_index == CursorIndex::from(index)
+                    {
+                        Some((cursor_ts, agg_type.to_owned(), agg_id.to_owned()))
+                    } else {
+                        None
+                    }
+                },
+            )
+        });
+        let mut resume = cursor_key;
 
         while let Some(entry) = stream.next_entry() {
             let aggregate = match self.load_aggregate_from_index(
@@ -2326,6 +2622,30 @@ impl EventStore {
                     continue;
                 }
             };
+
+            let mut consume_cursor = false;
+            if let Some((cursor_ts, cursor_type, cursor_id)) = resume.as_ref() {
+                let ordering = compare_timestamp_values(
+                    entry.timestamp_ms,
+                    &entry.aggregate_type,
+                    &entry.aggregate_id,
+                    *cursor_ts,
+                    cursor_type,
+                    cursor_id,
+                );
+                let skip_entry = if descending {
+                    ordering != StdOrdering::Less
+                } else {
+                    ordering != StdOrdering::Greater
+                };
+                if skip_entry {
+                    continue;
+                }
+                consume_cursor = true;
+            }
+            if consume_cursor {
+                resume = None;
+            }
 
             let Some(aggregate) = transform(aggregate) else {
                 continue;
@@ -2352,6 +2672,7 @@ impl EventStore {
         skip: usize,
         take: Option<usize>,
         descending: bool,
+        cursor: Option<&AggregateCursor>,
         transform: &mut F,
     ) -> Vec<AggregateState>
     where
@@ -2365,6 +2686,18 @@ impl EventStore {
         let mut next_archived = archived_stream.next_entry();
         let mut skipped = 0usize;
         let mut items = Vec::new();
+        let cursor_key = cursor.and_then(|token| {
+            token.as_timestamp_key().and_then(
+                |(cursor_kind, cursor_desc, cursor_ts, _cursor_index, agg_type, agg_id)| {
+                    if cursor_kind == kind && cursor_desc == descending {
+                        Some((cursor_ts, agg_type.to_owned(), agg_id.to_owned()))
+                    } else {
+                        None
+                    }
+                },
+            )
+        });
+        let mut resume = cursor_key;
 
         loop {
             let (source_index, entry) = match (&next_active, &next_archived) {
@@ -2411,6 +2744,34 @@ impl EventStore {
                     continue;
                 }
             };
+
+            let mut consume_cursor = false;
+            if let Some((cursor_ts, cursor_type, cursor_id)) = resume.as_ref() {
+                let ordering = compare_timestamp_values(
+                    entry.timestamp_ms,
+                    &entry.aggregate_type,
+                    &entry.aggregate_id,
+                    *cursor_ts,
+                    cursor_type,
+                    cursor_id,
+                );
+                let skip_entry = if descending {
+                    ordering != StdOrdering::Less
+                } else {
+                    ordering != StdOrdering::Greater
+                };
+                if skip_entry {
+                    match source_index {
+                        AggregateIndex::Active => next_active = active_stream.next_entry(),
+                        AggregateIndex::Archived => next_archived = archived_stream.next_entry(),
+                    }
+                    continue;
+                }
+                consume_cursor = true;
+            }
+            if consume_cursor {
+                resume = None;
+            }
 
             let Some(aggregate) = transform(aggregate) else {
                 match source_index {
@@ -3559,6 +3920,24 @@ fn compare_timestamp_entries(
     }
 }
 
+fn compare_timestamp_values(
+    lhs_ts: i64,
+    lhs_type: &str,
+    lhs_id: &str,
+    rhs_ts: i64,
+    rhs_type: &str,
+    rhs_id: &str,
+) -> StdOrdering {
+    let mut ordering = lhs_ts.cmp(&rhs_ts);
+    if ordering == StdOrdering::Equal {
+        ordering = lhs_type.cmp(rhs_type);
+    }
+    if ordering == StdOrdering::Equal {
+        ordering = lhs_id.cmp(rhs_id);
+    }
+    ordering
+}
+
 fn event_prefix_for_scope(index: AggregateIndex, scope: EventQueryScope<'_>) -> Vec<u8> {
     match scope {
         EventQueryScope::All => key_with_segments(&[index.event_prefix()]),
@@ -3868,6 +4247,7 @@ mod tests {
             Some(3),
             Some(&sorts),
             AggregateQueryScope::ActiveOnly,
+            None,
             |aggregate| Some(aggregate),
         );
         let ids: Vec<_> = aggregates.into_iter().map(|agg| agg.aggregate_id).collect();
@@ -3908,6 +4288,7 @@ mod tests {
             Some(2),
             Some(&sorts),
             AggregateQueryScope::ActiveOnly,
+            None,
             |aggregate| Some(aggregate),
         );
         let ids: Vec<_> = aggregates.into_iter().map(|agg| agg.aggregate_id).collect();

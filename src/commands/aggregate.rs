@@ -482,10 +482,6 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 }
             }
 
-            let take = args.take.unwrap_or(config.list_page_size);
-            if take == 0 {
-                bail!("--take must be greater than zero");
-            }
             let sort_directives = if let Some(spec) = args.sort.as_deref() {
                 Some(
                     AggregateSort::parse_directives(spec)
@@ -495,16 +491,97 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 None
             };
             let sort_keys = sort_directives.as_ref().map(|keys| keys.as_slice());
-            if args.cursor.is_some() && sort_directives.is_some() {
-                bail!("--cursor cannot be combined with --sort");
+            let timestamp_sort = sort_keys.and_then(store::timestamp_sort_hint);
+            let take = args.take.unwrap_or(config.list_page_size);
+            if take == 0 {
+                bail!("--take must be greater than zero");
+            }
+
+            let cursor_token = match args.cursor.as_deref() {
+                Some(raw) => {
+                    let cursor = if let Some((kind, descending)) = timestamp_sort {
+                        store
+                            .parse_timestamp_cursor(raw, kind, descending)
+                            .with_context(|| format!("invalid cursor '{raw}'"))?
+                    } else {
+                        AggregateCursor::from_str(raw)
+                            .with_context(|| format!("invalid cursor '{raw}'"))?
+                    };
+                    Some(cursor)
+                }
+                None => None,
+            };
+            if sort_directives.is_some() && timestamp_sort.is_none() && cursor_token.is_some() {
+                bail!(
+                    "--cursor can only be combined with --sort when sorting by created_at or updated_at"
+                );
+            }
+            if sort_directives.is_none() {
+                if let Some(token) = cursor_token.as_ref() {
+                    if token.is_timestamp() {
+                        bail!("timestamp cursors require --sort created_at or updated_at");
+                    }
+                }
             }
 
             if let Some(keys) = sort_keys {
+                if let Some((kind, descending)) = timestamp_sort {
+                    if let Some(cursor) = cursor_token.as_ref() {
+                        store::ensure_timestamp_cursor(cursor, kind, descending, scope)?;
+                    }
+                    let aggregates = store.aggregates_paginated_with_transform(
+                        0,
+                        Some(take),
+                        Some(keys),
+                        scope,
+                        cursor_token.as_ref(),
+                        |aggregate| {
+                            if let Some(expr) = filter_expr.as_ref() {
+                                if !expr.matches_aggregate(&aggregate) {
+                                    return None;
+                                }
+                            }
+                            Some(aggregate)
+                        },
+                    );
+                    if args.json {
+                        println!("{}", serde_json::to_string_pretty(&aggregates)?);
+                    } else {
+                        let show_archived = matches!(
+                            scope,
+                            AggregateQueryScope::IncludeArchived
+                                | AggregateQueryScope::ArchivedOnly
+                        );
+                        for aggregate in aggregates {
+                            if show_archived {
+                                println!(
+                                    "aggregate_type={} aggregate_id={} version={} merkle_root={} archived={}",
+                                    aggregate.aggregate_type,
+                                    aggregate.aggregate_id,
+                                    aggregate.version,
+                                    aggregate.merkle_root,
+                                    aggregate.archived
+                                );
+                            } else {
+                                println!(
+                                    "aggregate_type={} aggregate_id={} version={} merkle_root={}",
+                                    aggregate.aggregate_type,
+                                    aggregate.aggregate_id,
+                                    aggregate.version,
+                                    aggregate.merkle_root
+                                );
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+
                 let aggregates = store.aggregates_paginated_with_transform(
                     0,
                     Some(take),
                     Some(keys),
                     scope,
+                    None,
                     |aggregate| {
                         if let Some(expr) = filter_expr.as_ref() {
                             if !expr.matches_aggregate(&aggregate) {
@@ -545,18 +622,8 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 return Ok(());
             }
 
-            let cursor = match args.cursor.as_deref() {
-                Some(raw) => Some(AggregateCursor::from_str(raw).with_context(|| {
-                    format!(
-                        "invalid cursor '{}'; expected format a:aggregate_type:aggregate_id",
-                        raw
-                    )
-                })?),
-                None => None,
-            };
-
             let (aggregates, _next_cursor) = store.aggregates_page_with_transform(
-                cursor.as_ref(),
+                cursor_token.as_ref(),
                 take,
                 scope,
                 |aggregate| {
