@@ -318,6 +318,7 @@ fn compare_numbers(value: &ComparableValue, expected: &FilterValue, ordering: Or
 }
 
 const LIKE_REGEX_CACHE_CAPACITY: usize = 128;
+const FILTER_EXPR_CACHE_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 enum CachedRegex {
@@ -337,6 +338,13 @@ impl CachedRegex {
 static LIKE_REGEX_CACHE: Lazy<Mutex<LruCache<String, CachedRegex>>> = Lazy::new(|| {
     Mutex::new(LruCache::new(
         NonZeroUsize::new(LIKE_REGEX_CACHE_CAPACITY).expect("LIKE regex cache capacity > 0"),
+    ))
+});
+
+static FILTER_EXPR_CACHE: Lazy<Mutex<LruCache<String, FilterExpr>>> = Lazy::new(|| {
+    Mutex::new(LruCache::new(
+        NonZeroUsize::new(FILTER_EXPR_CACHE_CAPACITY)
+            .expect("filter expr cache capacity must be > 0"),
     ))
 });
 
@@ -404,7 +412,20 @@ impl fmt::Display for FilterValue {
 // === Shorthand Parser ===
 
 pub fn parse_shorthand(input: &str) -> Result<FilterExpr, FilterParseError> {
-    let lexer = Lexer::new(input);
+    let normalized = input.trim();
+    if normalized.is_empty() {
+        return Err(FilterParseError::Message("filter cannot be empty".into()));
+    }
+
+    if let Some(expr) = FILTER_EXPR_CACHE
+        .lock()
+        .get(normalized)
+        .map(|expr| expr.clone())
+    {
+        return Ok(expr);
+    }
+
+    let lexer = Lexer::new(normalized);
     let tokens = lexer.collect::<Result<Vec<_>, _>>()?;
     if tokens.is_empty() {
         return Err(FilterParseError::Message("filter cannot be empty".into()));
@@ -412,7 +433,12 @@ pub fn parse_shorthand(input: &str) -> Result<FilterExpr, FilterParseError> {
     let mut parser = Parser::new(tokens);
     let expr = parser.parse_expression()?;
     parser.expect_end()?;
-    Ok(expr)
+    let result = expr.clone();
+    {
+        let mut cache = FILTER_EXPR_CACHE.lock();
+        cache.put(normalized.to_string(), expr);
+    }
+    Ok(result)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1021,5 +1047,39 @@ mod tests {
 
         let expr = parse_shorthand(r#"name.first = "Jane""#).expect("parse succeeds");
         assert!(!expr.matches_aggregate(&aggregate));
+    }
+
+    #[test]
+    fn parse_shorthand_caches_results() {
+        {
+            let mut cache = FILTER_EXPR_CACHE.lock();
+            cache.clear();
+        }
+        let expr_text = r#"status = "pending""#;
+        let expr = parse_shorthand(expr_text).expect("parse succeeds");
+        let FilterExpr::Comparison { .. } = expr else {
+            panic!("expected comparison expression");
+        };
+
+        {
+            let cache = FILTER_EXPR_CACHE.lock();
+            assert!(
+                cache.peek(expr_text).is_some(),
+                "expression should be cached"
+            );
+        }
+
+        // Leading/trailing whitespace should hit the same cache entry (not a new key).
+        let spaced = r#"   status = "pending"   "#;
+        parse_shorthand(spaced).expect("parse succeeds with whitespace");
+        let cache = FILTER_EXPR_CACHE.lock();
+        assert!(
+            cache.peek(expr_text.trim()).is_some(),
+            "trimmed expression should remain cached"
+        );
+        assert!(
+            cache.peek(spaced).is_none(),
+            "whitespace variant should not introduce new cache key"
+        );
     }
 }

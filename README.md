@@ -117,7 +117,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
      ```
 
    - If the server is stopped, the same CLI command writes to the local RocksDB store directly.
-   - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort created_at:desc --take 5` or drill into the payload of a specific event via `dbx events <snowflake_id> --json`.
+   - Inspect recent history at any point with `dbx events --filter 'payload.status = "active"' --sort version:desc --take 5` or drill into the payload of a specific event via `dbx events <snowflake_id> --json`.
 
 6. **Replicate a domain (optional)**
 
@@ -322,7 +322,10 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 - `dbx aggregate commit`  
   Flushes all staged events in a single atomic transaction.
 
+Aggregate sorting currently accepts `aggregate_type`, `aggregate_id`, `archived`, `created_at`, and `updated_at` fields (with optional `:asc`/`:desc` suffixes). Sorting by `version` has been removed to keep the CLI aligned with the indexed columns.
+
 Cursor pagination tokens are human-readable: active aggregates encode as `a:<aggregate_type>:<aggregate_id>` (`r:` for archived), and event cursors append the event version (`a:<aggregate_type>:<aggregate_id>:<version>`). Grab the last row from a page, form its token, and pass it via `--cursor` to resume listing.
+Timestamp-sorted aggregate listings use `ts:<field>:<order>:<scope>:<timestamp_ms>:<aggregate_type>:<aggregate_id>` tokens (`field` is `created_at` or `updated_at`, `order` is `asc|desc`, and `scope` is `a` or `r`). Take the timestamp from the last row (in milliseconds) to build the cursor for the next page; you can also pass the shorthand `ts:<aggregate_type>:<aggregate_id>` and the CLI/control clients (including `eventdbxjs`) will derive the rest when combined with `--sort created_at|updated_at`.
 
 ### Events
 
@@ -337,9 +340,9 @@ Cursor pagination tokens are human-readable: active aggregates encode as `a:<agg
 
 #### Aggregate Operation Costs
 
-Every aggregate command ultimately turns into a small set of RocksDB reads or writes. Ballpark complexities:
+Every aggregate command ultimately turns into a small set of RocksDB reads or writes. Ballpark complexities (assume hot data in cache):
 
-- `aggregate list`: iterates over the requested page of aggregates. Runtime is O(k) in the page size (default `list_page_size`).
+- `aggregate list`: iterates over the requested page of aggregates. Runtime is O(k) in the page size (default `list_page_size`) when you follow the natural key order (type → id) or stick to single-field timestamp sorts; arbitrary filters or multi-field sorts fall back to an O(N) scan because predicates are evaluated in memory after loading each aggregate.
 - `aggregate get`: one state lookup (O(log N)) plus optional event scanning when you request `--include-events` or `--version` (adds O(Eₐ) for that aggregate’s events) and lightweight JSON parsing of the returned map.
 - `aggregate select`: uses the same state lookup as `get` (O(log N)) and walks each requested dot path in-memory; no additional RocksDB reads are taken, so cost is dominated by the selected payload size.
 - `aggregate apply`: validates the payload, merges it into the materialized state, and appends the event in a single batch write. Time is proportional to the payload size being processed.
@@ -351,7 +354,7 @@ In practice those costs are dominated by payload size and the number of events y
 
 | Operation          | Time complexity          | Notes                                                            |
 | ------------------ | ------------------------ | ---------------------------------------------------------------- |
-| `aggregate list`   | O(k)                     | `k` is the requested page size (defaults to `list_page_size`).   |
+| `aggregate list`   | O(k) / O(N)              | O(k) for cursor-order or timestamp-indexed sorts; O(N) when filters/sorts can’t use an index. |
 | `aggregate get`    | O(log N + Eₐ + P)        | Single state read plus optional event scan and JSON parsing.     |
 | `aggregate select` | O(log N + P_selected)    | Same state read as `get`; dot-path traversal happens in memory.  |
 | `aggregate apply`  | O(P)                     | Payload validation + merge + append in one RocksDB batch.        |

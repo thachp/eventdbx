@@ -28,10 +28,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     cli_capnp::{cli_request, cli_response},
     config::Config,
-    control_capnp::{
-        AggregateSortField as CapnpAggregateSortField, control_hello, control_hello_response,
-        control_request, control_response,
-    },
+    control_capnp::{control_hello, control_hello_response, control_request, control_response},
     error::EventError,
     filter::{self, FilterExpr},
     observability,
@@ -44,11 +41,11 @@ use crate::{
     schema_history::{PublishOptions, SchemaHistoryManager},
     service::{
         AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
-        normalize_optional_comment,
+        normalize_optional_note,
     },
     store::{
-        AggregateCursor, AggregateQueryScope, AggregateSort, AggregateSortField, AggregateState,
-        EventCursor, EventRecord,
+        self, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState, EventCursor,
+        EventRecord,
     },
     tenant::{CoreProvider, normalize_tenant_id},
     token::{JwtClaims, TokenManager},
@@ -122,7 +119,7 @@ enum ControlReply {
 enum ControlCommand {
     ListAggregates {
         token: String,
-        cursor: Option<AggregateCursor>,
+        cursor: Option<String>,
         take: Option<usize>,
         filter: Option<FilterExpr>,
         sort: Option<Vec<AggregateSort>>,
@@ -183,7 +180,7 @@ enum ControlCommand {
         aggregate_type: String,
         aggregate_id: String,
         archived: bool,
-        comment: Option<String>,
+        note: Option<String>,
     },
     ListSchemas {
         token: String,
@@ -1051,7 +1048,7 @@ fn parse_control_command(
                 if trimmed.is_empty() {
                     None
                 } else {
-                    Some(AggregateCursor::from_str(trimmed)?)
+                    Some(trimmed.to_string())
                 }
             } else {
                 None
@@ -1079,31 +1076,14 @@ fn parse_control_command(
             };
 
             let sort = if req.get_has_sort() {
-                let list = req
-                    .get_sort()
-                    .map_err(|err| EventError::Serialization(err.to_string()))?;
-                let mut directives = Vec::with_capacity(list.len() as usize);
-                for entry in list.iter() {
-                    let field = match entry.get_field().map_err(|err| {
-                        EventError::InvalidSchema(format!(
-                            "unknown aggregate sort field value: {err}"
-                        ))
-                    })? {
-                        CapnpAggregateSortField::AggregateType => AggregateSortField::AggregateType,
-                        CapnpAggregateSortField::AggregateId => AggregateSortField::AggregateId,
-                        CapnpAggregateSortField::Version => AggregateSortField::Version,
-                        CapnpAggregateSortField::MerkleRoot => AggregateSortField::MerkleRoot,
-                        CapnpAggregateSortField::Archived => AggregateSortField::Archived,
-                    };
-                    directives.push(AggregateSort {
-                        field,
-                        descending: entry.get_descending(),
-                    });
-                }
-                if directives.is_empty() {
+                let raw = read_control_text(req.get_sort(), "sort")?;
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
                     None
                 } else {
-                    Some(directives)
+                    Some(AggregateSort::parse_directives(trimmed).map_err(|err| {
+                        EventError::InvalidSchema(format!("invalid sort specification: {err}"))
+                    })?)
                 }
             } else {
                 None
@@ -1376,8 +1356,8 @@ fn parse_control_command(
             let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
             let archived = req.get_archived();
 
-            let comment = normalize_optional_comment(if req.get_has_comment() {
-                Some(read_control_text(req.get_comment(), "comment")?)
+            let note = normalize_optional_note(if req.get_has_note() {
+                Some(read_control_text(req.get_note(), "note")?)
             } else {
                 None
             });
@@ -1387,7 +1367,7 @@ fn parse_control_command(
                 aggregate_type,
                 aggregate_id,
                 archived,
-                comment,
+                note,
             })
         }
         payload::ListSchemas(req) => {
@@ -1548,7 +1528,29 @@ async fn execute_control_command(
                 let cursor = cursor.clone();
                 move || {
                     let sort_ref = sort.as_ref().map(|keys| keys.as_slice());
-                    let cursor_ref = cursor.as_ref();
+                    let timestamp_sort = sort_ref.and_then(store::timestamp_sort_hint);
+                    if cursor.is_some() && sort.is_some() && timestamp_sort.is_none() {
+                        return Err(EventError::InvalidCursor(
+                            "cursor cannot be combined with sort directives".into(),
+                        ));
+                    }
+
+                    let store = core.store();
+                    let cursor_parsed = match cursor.as_deref() {
+                        Some(raw) => {
+                            let cursor = if let Some((kind, descending)) = timestamp_sort {
+                                let expanded =
+                                    store.parse_timestamp_cursor(raw, kind, descending)?;
+                                store::ensure_timestamp_cursor(&expanded, kind, descending, scope)?;
+                                expanded
+                            } else {
+                                AggregateCursor::from_str(raw)?
+                            };
+                            Some(cursor)
+                        }
+                        None => None,
+                    };
+                    let cursor_ref = cursor_parsed.as_ref();
                     core.list_aggregates(&token, cursor_ref, take, filter, sort_ref, scope)
                 }
             })
@@ -1768,7 +1770,7 @@ async fn execute_control_command(
             aggregate_type,
             aggregate_id,
             archived,
-            comment,
+            note,
         } => {
             let verbose = config_verbose(&shared_config)?;
             let aggregate = spawn_blocking({
@@ -1776,14 +1778,14 @@ async fn execute_control_command(
                 let aggregate_type = aggregate_type.clone();
                 let aggregate_id = aggregate_id.clone();
                 let token = token.clone();
-                let comment = comment.clone();
+                let note = note.clone();
                 move || {
                     core.set_aggregate_archive(SetAggregateArchiveInput {
                         token,
                         aggregate_type,
                         aggregate_id,
                         archived,
-                        comment,
+                        note,
                     })
                 }
             })

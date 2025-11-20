@@ -178,6 +178,32 @@ dbx aggregate get patient p-001 --include-events
 
 Plugins expose REST/GraphQL/gRPC endpoints for external readers. Check the plugin README for usage examples.
 
+## 8. Enforce tenant storage quotas
+
+Keep noisy neighbours in check by setting per-tenant storage caps. `dbx tenant list` now prints `quota_mb` and `usage_mb` columns (or JSON fields) so you can spot heavy tenants at a glance:
+
+```bash
+dbx tenant list
+```
+
+Set a ceiling in megabytes with `dbx tenant quota set <tenant> --max-mb <limit>` (aliases such as `--max-aggregates` still work):
+
+```bash
+dbx tenant quota set default --max-mb 512
+```
+
+Once the tenant reaches 512 MB, any new event write—CLI or control-socket—fails with `tenant 'default' reached storage quota (512 MB)` until you either prune data or clear the cap:
+
+```bash
+dbx tenant quota clear default
+```
+
+Storage usage counters update automatically as events are written, but you can force a fresh scan with `dbx tenant quota recalc <tenant>` if you manually delete SST files or restore from backups:
+
+```bash
+dbx tenant quota recalc default
+```
+
 ## Next steps
 
 - Explore the full [CLI reference]({{ '/cli/' | relative_url }}) for backups, plugins, and other operational tooling.

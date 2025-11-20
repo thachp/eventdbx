@@ -1,5 +1,7 @@
 @0xc3d1ec2a1e3f5b26;
 
+using Schema = import "schema.capnp";
+
 struct ControlRequest {
   id @0 :UInt64;
   payload :union {
@@ -12,15 +14,15 @@ struct ControlRequest {
     selectAggregate @7 :SelectAggregateRequest;
     createAggregate @8 :CreateAggregateRequest;
     setAggregateArchive @9 :SetAggregateArchiveRequest;
-    listSchemas @10 :ListSchemasRequest;
-    replaceSchemas @11 :ReplaceSchemasRequest;
-    tenantAssign @12 :TenantAssignRequest;
-    tenantUnassign @13 :TenantUnassignRequest;
-    tenantQuotaSet @14 :TenantQuotaSetRequest;
-    tenantQuotaClear @15 :TenantQuotaClearRequest;
-    tenantQuotaRecalc @16 :TenantQuotaRecalcRequest;
-    tenantReload @17 :TenantReloadRequest;
-    tenantSchemaPublish @18 :TenantSchemaPublishRequest;
+    listSchemas @10 :Schema.ListSchemasRequest;
+    replaceSchemas @11 :Schema.ReplaceSchemasRequest;
+    tenantAssign @12 :Schema.TenantAssignRequest;
+    tenantUnassign @13 :Schema.TenantUnassignRequest;
+    tenantQuotaSet @14 :Schema.TenantQuotaSetRequest;
+    tenantQuotaClear @15 :Schema.TenantQuotaClearRequest;
+    tenantQuotaRecalc @16 :Schema.TenantQuotaRecalcRequest;
+    tenantReload @17 :Schema.TenantReloadRequest;
+    tenantSchemaPublish @18 :Schema.TenantSchemaPublishRequest;
   }
 }
 
@@ -36,15 +38,15 @@ struct ControlResponse {
     error @7 :ControlError;
     createAggregate @8 :CreateAggregateResponse;
     setAggregateArchive @9 :SetAggregateArchiveResponse;
-    listSchemas @10 :ListSchemasResponse;
-    replaceSchemas @11 :ReplaceSchemasResponse;
-    tenantAssign @12 :TenantAssignResponse;
-    tenantUnassign @13 :TenantUnassignResponse;
-    tenantQuotaSet @14 :TenantQuotaSetResponse;
-    tenantQuotaClear @15 :TenantQuotaClearResponse;
-    tenantQuotaRecalc @16 :TenantQuotaRecalcResponse;
-    tenantReload @17 :TenantReloadResponse;
-    tenantSchemaPublish @18 :TenantSchemaPublishResponse;
+    listSchemas @10 :Schema.ListSchemasResponse;
+    replaceSchemas @11 :Schema.ReplaceSchemasResponse;
+    tenantAssign @12 :Schema.TenantAssignResponse;
+    tenantUnassign @13 :Schema.TenantUnassignResponse;
+    tenantQuotaSet @14 :Schema.TenantQuotaSetResponse;
+    tenantQuotaClear @15 :Schema.TenantQuotaClearResponse;
+    tenantQuotaRecalc @16 :Schema.TenantQuotaRecalcResponse;
+    tenantReload @17 :Schema.TenantReloadResponse;
+    tenantSchemaPublish @18 :Schema.TenantSchemaPublishResponse;
   }
 }
 
@@ -66,7 +68,7 @@ struct ListAggregatesRequest {
   hasTake @3 :Bool;
   filter @4 :Text;
   hasFilter @5 :Bool;
-  sort @6 :List(AggregateSort);
+  sort @6 :Text;
   hasSort @7 :Bool;
   includeArchived @8 :Bool;
   archivedOnly @9 :Bool;
@@ -178,123 +180,15 @@ struct SetAggregateArchiveRequest {
   aggregateType @1 :Text;
   aggregateId @2 :Text;
   archived @3 :Bool;
-  comment @4 :Text;
-  hasComment @5 :Bool;
+  note @4 :Text;
+  hasNote @5 :Bool;
 }
 
 struct SetAggregateArchiveResponse {
   aggregateJson @0 :Text;
 }
 
-struct ListSchemasRequest {
-  token @0 :Text;
-}
-
-struct ListSchemasResponse {
-  schemasJson @0 :Text;
-}
-
-struct ReplaceSchemasRequest {
-  token @0 :Text;
-  schemasJson @1 :Text;
-}
-
-struct ReplaceSchemasResponse {
-  replaced @0 :UInt32;
-}
-
-struct AggregateSort {
-  field @0 :AggregateSortField;
-  descending @1 :Bool;
-}
-
-enum AggregateSortField {
-  aggregateType @0;
-  aggregateId @1;
-  version @2;
-  merkleRoot @3;
-  archived @4;
-}
-
 struct ControlError {
   code @0 :Text;
   message @1 :Text;
-}
-
-struct TenantAssignRequest {
-  token @0 :Text;
-  tenantId @1 :Text;
-  shardId @2 :Text;
-}
-
-struct TenantAssignResponse {
-  changed @0 :Bool;
-  shardId @1 :Text;
-}
-
-struct TenantUnassignRequest {
-  token @0 :Text;
-  tenantId @1 :Text;
-}
-
-struct TenantUnassignResponse {
-  changed @0 :Bool;
-}
-
-struct TenantQuotaSetRequest {
-  token @0 :Text;
-  tenantId @1 :Text;
-  maxStorageMb @2 :UInt64;
-}
-
-struct TenantQuotaSetResponse {
-  changed @0 :Bool;
-  quotaMb @1 :UInt64;
-  hasQuota @2 :Bool;
-}
-
-struct TenantQuotaClearRequest {
-  token @0 :Text;
-  tenantId @1 :Text;
-}
-
-struct TenantQuotaClearResponse {
-  changed @0 :Bool;
-}
-
-struct TenantQuotaRecalcRequest {
-  token @0 :Text;
-  tenantId @1 :Text;
-}
-
-struct TenantQuotaRecalcResponse {
-  storageBytes @0 :UInt64;
-}
-
-struct TenantReloadRequest {
-  token @0 :Text;
-  tenantId @1 :Text;
-}
-
-struct TenantReloadResponse {
-  reloaded @0 :Bool;
-}
-
-struct TenantSchemaPublishRequest {
-  token @0 :Text;
-  tenantId @1 :Text;
-  reason @2 :Text;
-  hasReason @3 :Bool;
-  actor @4 :Text;
-  hasActor @5 :Bool;
-  labels @6 :List(Text);
-  activate @7 :Bool;
-  force @8 :Bool;
-  reload @9 :Bool;
-}
-
-struct TenantSchemaPublishResponse {
-  versionId @0 :Text;
-  activated @1 :Bool;
-  skipped @2 :Bool;
 }

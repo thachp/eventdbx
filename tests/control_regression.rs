@@ -169,6 +169,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_take(0);
             list.set_has_take(false);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(false);
         },
@@ -301,6 +302,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(false);
         },
@@ -345,6 +347,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
             list.set_take(10);
             list.set_has_take(true);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(false);
             list.set_has_filter(true);
@@ -1092,8 +1095,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             archive.set_aggregate_type("order");
             archive.set_aggregate_id("order-1");
             archive.set_archived(true);
-            archive.set_comment("closed via control");
-            archive.set_has_comment(true);
+            archive.set_note("closed via control");
+            archive.set_has_note(true);
         },
         |response| match response
             .get_payload()
@@ -1137,6 +1140,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             list.set_has_take(true);
             list.set_has_filter(false);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(false);
         },
@@ -1184,6 +1188,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             list.set_has_take(true);
             list.set_has_filter(false);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(true);
         },
@@ -1226,8 +1231,8 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             archive.set_aggregate_type("order");
             archive.set_aggregate_id("order-1");
             archive.set_archived(false);
-            archive.set_comment("");
-            archive.set_has_comment(false);
+            archive.set_note("");
+            archive.set_has_note(false);
         },
         |response| match response
             .get_payload()
@@ -1277,6 +1282,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
             list.set_has_take(true);
             list.set_has_filter(false);
             list.set_has_sort(false);
+            list.set_sort("");
             list.set_include_archived(false);
             list.set_archived_only(false);
         },

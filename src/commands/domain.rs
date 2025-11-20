@@ -1362,6 +1362,7 @@ fn collect_local_aggregates(
                 None,
                 None,
                 AggregateQueryScope::IncludeArchived,
+                None,
                 |state| {
                     if state.aggregate_type == agg {
                         Some(state)
@@ -1378,6 +1379,7 @@ fn collect_local_aggregates(
             None,
             None,
             AggregateQueryScope::IncludeArchived,
+            None,
             |state| Some(state),
         )),
     }
@@ -1404,10 +1406,10 @@ fn collect_remote_aggregates(
         (Some(agg), None) => {
             ensure_snake_case("aggregate_type", agg)?;
             let filter = Some(build_aggregate_filter_expr(agg)?);
-            client.list_aggregates(token, filter.as_deref(), true, false)
+            client.list_aggregates(token, filter.as_deref(), None, true, false)
         }
         (None, Some(_)) => bail!("--id requires --aggregate"),
-        (None, None) => client.list_aggregates(token, None, true, false),
+        (None, None) => client.list_aggregates(token, None, None, true, false),
     }
 }
 
@@ -1808,6 +1810,7 @@ fn merge_events(source: &Config, target: &Config) -> Result<EventMergeStats> {
         None,
         None,
         AggregateQueryScope::IncludeArchived,
+        None,
         |aggregate| Some(aggregate),
     );
     aggregates.sort_by(|a, b| {

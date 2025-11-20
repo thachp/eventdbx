@@ -10,7 +10,7 @@ use crate::{
     restrict::{self, RestrictMode},
     schema::SchemaManager,
     store::{
-        ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState,
+        self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState,
         AppendEvent, EventArchiveScope, EventCursor, EventQueryScope, EventRecord, EventStore,
         select_state_field,
     },
@@ -203,18 +203,34 @@ impl CoreContext {
             Some(sanitized)
         };
 
-        if cursor.is_some() && sort.is_some() {
+        let timestamp_sort = sort.and_then(store::timestamp_sort_hint);
+        if cursor.is_some() && sort.is_some() && timestamp_sort.is_none() {
             return Err(EventError::InvalidCursor(
                 "cursor cannot be combined with sort directives".into(),
             ));
         }
 
         if let Some(keys) = sort {
+            if let Some((kind, descending)) = timestamp_sort {
+                if let Some(cursor) = cursor {
+                    store::ensure_timestamp_cursor(cursor, kind, descending, scope)?;
+                }
+                let aggregates = self.store.aggregates_paginated_with_transform(
+                    0,
+                    Some(effective_take),
+                    Some(keys),
+                    scope,
+                    cursor,
+                    &mut transform,
+                );
+                return Ok((aggregates, None));
+            }
             let aggregates = self.store.aggregates_paginated_with_transform(
                 0,
                 Some(effective_take),
                 Some(keys),
                 scope,
+                None,
                 &mut transform,
             );
             return Ok((aggregates, None));
@@ -382,7 +398,7 @@ impl CoreContext {
             aggregate_type,
             aggregate_id,
             archived,
-            comment,
+            note,
         } = input;
 
         ensure_snake_case("aggregate_type", &aggregate_type)?;
@@ -397,7 +413,7 @@ impl CoreContext {
             return Err(EventError::Unauthorized);
         }
 
-        let comment = normalize_optional_comment(comment);
+        let comment = normalize_optional_note(note);
 
         let store = self.store();
         let state = store.set_archive(&aggregate_type, &aggregate_id, archived, comment)?;
@@ -627,11 +643,11 @@ pub struct SetAggregateArchiveInput {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub archived: bool,
-    pub comment: Option<String>,
+    pub note: Option<String>,
 }
 
-pub(crate) fn normalize_optional_comment(comment: Option<String>) -> Option<String> {
-    comment.and_then(|value| {
+pub(crate) fn normalize_optional_note(note: Option<String>) -> Option<String> {
+    note.and_then(|value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
             None
