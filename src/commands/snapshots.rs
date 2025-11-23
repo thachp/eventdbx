@@ -10,9 +10,7 @@ use eventdbx::{
 };
 use serde_json;
 
-use crate::commands::{
-    aggregate::ensure_proxy_token, client::ServerClient, is_lock_error_message,
-};
+use crate::commands::{aggregate::ensure_proxy_token, client::ServerClient, is_lock_error_message};
 
 #[derive(Subcommand)]
 pub enum SnapshotsCommands {

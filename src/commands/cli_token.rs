@@ -21,8 +21,11 @@ const BOOTSTRAP_DEFAULT_TTL_SECS: u64 = 7_200;
 
 pub fn ensure_bootstrap_token(config: &Config, ttl_override: Option<u64>) -> Result<String> {
     let manager = open_token_manager(config)?;
-    if ttl_override.is_none() {
-        if let Some(token) = load_existing_token(config, &manager)? {
+    if let Some((token, claims)) = load_existing_token(config, &manager)? {
+        if ttl_override
+            .map(|ttl| bootstrap_ttl_matches(&claims, ttl))
+            .unwrap_or(true)
+        {
             return Ok(token);
         }
     }
@@ -79,7 +82,21 @@ fn issue_new_bootstrap_token(manager: &TokenManager, ttl_override: Option<u64>) 
     Ok(token_value)
 }
 
-fn load_existing_token(config: &Config, manager: &TokenManager) -> Result<Option<String>> {
+fn bootstrap_ttl_matches(claims: &JwtClaims, ttl_secs: u64) -> bool {
+    if ttl_secs == 0 {
+        return claims.exp.is_none();
+    }
+    let Some(exp) = claims.exp else {
+        return false;
+    };
+    let claim_ttl = exp - claims.iat;
+    claim_ttl >= 0 && (claim_ttl - ttl_secs as i64).abs() <= 1
+}
+
+fn load_existing_token(
+    config: &Config,
+    manager: &TokenManager,
+) -> Result<Option<(String, JwtClaims)>> {
     let path = config.cli_token_path();
     let contents = match fs::read_to_string(&path) {
         Ok(value) => value,
@@ -143,7 +160,7 @@ fn load_existing_token(config: &Config, manager: &TokenManager) -> Result<Option
         .any(|resource| resource == ROOT_RESOURCE);
 
     if has_root_action && has_root_resource {
-        Ok(Some(trimmed.to_string()))
+        Ok(Some((trimmed.to_string(), claims)))
     } else {
         Ok(None)
     }
@@ -231,6 +248,23 @@ mod tests {
 
         let second = ensure_bootstrap_token(&config, None)?;
         assert_eq!(first, second);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reuse_bootstrap_token_when_override_matches() -> Result<()> {
+        let dir = tempdir().context("failed to create temp dir")?;
+        let mut config = Config::default();
+        config.data_dir = dir.path().to_path_buf();
+        config.ensure_data_dir()?;
+
+        let first = ensure_bootstrap_token(&config, None)?;
+        let reused = ensure_bootstrap_token(&config, Some(BOOTSTRAP_DEFAULT_TTL_SECS))?;
+        assert_eq!(first, reused);
+
+        let replaced = ensure_bootstrap_token(&config, Some(1))?;
+        assert_ne!(first, replaced, "mismatched TTL should force regeneration");
 
         Ok(())
     }
