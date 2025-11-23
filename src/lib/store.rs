@@ -1559,7 +1559,7 @@ fn store_in_use_message(path: &Path, pid: Option<u32>) -> String {
     }
 }
 
-fn is_lock_error_message(message: &str) -> bool {
+pub fn is_lock_error_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("lock file")
         || lower.contains("resource temporarily unavailable")
@@ -2349,10 +2349,7 @@ impl EventStore {
                 let snapshot: SnapshotRecord = serde_json::from_slice(&value).map_err(|err| {
                     EventError::Storage(format!("failed to deserialize snapshot: {err}"))
                 })?;
-                if aggregate_type.map_or(true, |value| snapshot.aggregate_type == value)
-                    && aggregate_id.map_or(true, |value| snapshot.aggregate_id == value)
-                    && version.map_or(true, |v| v == snapshot.version)
-                {
+                if version.map_or(true, |v| v == snapshot.version) {
                     snapshots.push(snapshot);
                 }
             }

@@ -8,6 +8,7 @@ use serde_json;
 use crate::commands::{
     cli_token,
     client::ServerClient,
+    is_lock_error,
     schema_version::{
         SchemaActivateArgs, SchemaDiffArgs, SchemaHistoryArgs, SchemaPublishArgs, SchemaReloadArgs,
         SchemaRollbackArgs, SchemaShowArgs, schema_activate, schema_diff, schema_history,
@@ -494,19 +495,6 @@ pub(crate) fn prepare_remote_client(
     let token = cli_token::ensure_bootstrap_token(config)?;
     let client = ServerClient::new(config)?.with_tenant(Some(tenant.to_string()));
     Ok((client, token))
-}
-
-fn is_lock_error(err: &EventError) -> bool {
-    match err {
-        EventError::Storage(message) => {
-            let lower = message.to_ascii_lowercase();
-            lower.contains("lock file")
-                || lower.contains("resource temporarily unavailable")
-                || lower.contains("store lock")
-                || lower.contains("store is in use")
-        }
-        _ => false,
-    }
 }
 
 fn report_assign(tenant: &str, shard: &str, changed: bool) {

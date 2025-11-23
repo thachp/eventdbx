@@ -38,7 +38,7 @@ use eventdbx::{
 #[cfg(test)]
 use eventdbx::restrict::RestrictMode;
 
-use crate::commands::{cli_token, client::ServerClient};
+use crate::commands::{cli_token, client::ServerClient, is_lock_error_message};
 use tracing::warn;
 
 #[derive(Subcommand)]
@@ -1165,7 +1165,7 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
             }
             Ok(())
         }
-        Err(EventError::Storage(message)) if is_lock_error(&message) => {
+        Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
             let state = proxy_create_via_socket(
                 config,
                 token,
@@ -1315,7 +1315,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 println!("event staged for later commit");
                 return Ok(());
             }
-            Err(EventError::Storage(message)) if is_lock_error(&message) => {
+            Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
                 bail!(
                     "event store is locked by a running server.\nStop the server or omit --stage."
                 );
@@ -1404,7 +1404,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
             }
             Ok(())
         }
-        Err(EventError::Storage(message)) if is_lock_error(&message) => {
+        Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
             let record = proxy_append_via_socket(
                 config,
                 token,
@@ -1591,15 +1591,6 @@ fn normalize_token(token: String) -> Option<String> {
         Some(trimmed.to_string())
     }
 }
-
-fn is_lock_error(message: &str) -> bool {
-    let lower = message.to_lowercase();
-    lower.contains("lock file")
-        || lower.contains("resource temporarily unavailable")
-        || lower.contains("store lock")
-        || lower.contains("store is in use")
-}
-
 fn export_aggregates(config: &Config, args: AggregateExportArgs) -> Result<()> {
     let AggregateExportArgs {
         aggregate,

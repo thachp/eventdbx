@@ -10,7 +10,9 @@ use eventdbx::{
 };
 use serde_json;
 
-use crate::commands::{aggregate::ensure_proxy_token, client::ServerClient};
+use crate::commands::{
+    aggregate::ensure_proxy_token, client::ServerClient, is_lock_error_message,
+};
 
 #[derive(Subcommand)]
 pub enum SnapshotsCommands {
@@ -75,7 +77,7 @@ fn list_snapshots(config: &Config, args: SnapshotsListArgs) -> Result<()> {
             let snapshots = store.list_snapshots(aggregate, aggregate_id, version)?;
             print_snapshots(&snapshots, args.json)?;
         }
-        Err(EventError::Storage(message)) if is_lock_error(&message) => {
+        Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
             let snapshots =
                 proxy_list_snapshots_via_socket(config, aggregate, aggregate_id, version)?;
             print_snapshots(&snapshots, args.json)?;
@@ -100,7 +102,7 @@ fn create_snapshot(config: &Config, args: SnapshotsCreateArgs) -> Result<()> {
                 store.create_snapshot(&args.aggregate, &args.aggregate_id, args.comment.clone())?;
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
         }
-        Err(EventError::Storage(message)) if is_lock_error(&message) => {
+        Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
             let snapshot = proxy_create_snapshot_via_socket(
                 config,
                 &args.aggregate,
@@ -174,12 +176,4 @@ fn print_snapshots(snapshots: &[SnapshotRecord], json: bool) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn is_lock_error(message: &str) -> bool {
-    let lower = message.to_lowercase();
-    lower.contains("lock file")
-        || lower.contains("resource temporarily unavailable")
-        || lower.contains("store lock")
-        || lower.contains("store is in use")
 }
