@@ -175,17 +175,12 @@ fn proxy_get_snapshot_via_socket(
 ) -> Result<Option<SnapshotRecord>> {
     let token = ensure_proxy_token(config, None)?;
     let client = ServerClient::new(config)?;
-    let snapshots = client
-        .list_snapshots(&token, None, None, None)
-        .with_context(|| {
-            format!(
-                "failed to list snapshots via running server socket {}",
-                config.socket.bind_addr
-            )
-        })?;
-    Ok(snapshots
-        .into_iter()
-        .find(|snapshot| snapshot.snapshot_id == Some(snapshot_id)))
+    client.get_snapshot(&token, snapshot_id).with_context(|| {
+        format!(
+            "failed to fetch snapshot via running server socket {}",
+            config.socket.bind_addr
+        )
+    })
 }
 
 fn proxy_create_snapshot_via_socket(
