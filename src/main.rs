@@ -14,6 +14,7 @@ use crate::commands::{
     plugin::{PluginCommands, PluginWorkerArgs},
     queue::QueueArgs,
     schema::SchemaCommands,
+    snapshots::SnapshotsCommands,
     start::{DestroyArgs, StartArgs},
     system::{BackupArgs, RestoreArgs},
     tenant::TenantCommands as TenantSubcommands,
@@ -98,6 +99,11 @@ enum Commands {
         #[command(subcommand)]
         command: AggregateCommands,
     },
+    /// Manage snapshots
+    Snapshots {
+        #[command(subcommand)]
+        command: SnapshotsCommands,
+    },
     /// Upgrade or switch the EventDBX CLI binary
     Upgrade(UpgradeArgs),
     /// Create a backup archive containing all EventDBX data
@@ -148,6 +154,7 @@ async fn main() -> Result<()> {
         Commands::Queue(args) => commands::queue::execute(config, args)?,
         Commands::Tenant { command } => commands::tenant::execute(config, command)?,
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
+        Commands::Snapshots { command } => commands::snapshots::execute(config, command)?,
         Commands::Upgrade(args) => commands::upgrade::execute(args).await?,
         Commands::Backup(args) => commands::system::backup(config, args)?,
         Commands::Restore(args) => commands::system::restore(config, args)?,

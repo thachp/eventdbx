@@ -23,6 +23,8 @@ struct ControlRequest {
     tenantQuotaRecalc @16 :Schema.TenantQuotaRecalcRequest;
     tenantReload @17 :Schema.TenantReloadRequest;
     tenantSchemaPublish @18 :Schema.TenantSchemaPublishRequest;
+    createSnapshot @19 :CreateSnapshotRequest;
+    listSnapshots @20 :ListSnapshotsRequest;
   }
 }
 
@@ -47,6 +49,8 @@ struct ControlResponse {
     tenantQuotaRecalc @16 :Schema.TenantQuotaRecalcResponse;
     tenantReload @17 :Schema.TenantReloadResponse;
     tenantSchemaPublish @18 :Schema.TenantSchemaPublishResponse;
+    createSnapshot @19 :CreateSnapshotResponse;
+    listSnapshots @20 :ListSnapshotsResponse;
   }
 }
 
@@ -186,6 +190,32 @@ struct SetAggregateArchiveRequest {
 
 struct SetAggregateArchiveResponse {
   aggregateJson @0 :Text;
+}
+
+struct CreateSnapshotRequest {
+  token @0 :Text;
+  aggregateType @1 :Text;
+  aggregateId @2 :Text;
+  comment @3 :Text;
+  hasComment @4 :Bool;
+}
+
+struct CreateSnapshotResponse {
+  snapshotJson @0 :Text;
+}
+
+struct ListSnapshotsRequest {
+  token @0 :Text;
+  aggregateType @1 :Text;
+  aggregateId @2 :Text;
+  hasAggregateType @3 :Bool;
+  hasAggregateId @4 :Bool;
+  version @5 :UInt64;
+  hasVersion @6 :Bool;
+}
+
+struct ListSnapshotsResponse {
+  snapshotsJson @0 :Text;
 }
 
 struct ControlError {

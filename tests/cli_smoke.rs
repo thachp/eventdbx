@@ -2713,7 +2713,7 @@ fn aggregate_snapshot_creates_record() -> Result<()> {
         "--json",
     ])?;
     cli.create_aggregate_with_fields("snap", "snap-1", "snap_created", &[("status", "ready")])?;
-    let output = cli.run(&["aggregate", "snapshot", "snap", "snap-1"])?;
+    let output = cli.run(&["snapshots", "create", "snap", "snap-1"])?;
     let snapshot: Value =
         serde_json::from_str(output.trim()).context("failed to parse snapshot output")?;
     assert_eq!(snapshot["aggregate_id"], json!("snap-1"));

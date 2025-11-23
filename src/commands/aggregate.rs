@@ -38,7 +38,7 @@ use eventdbx::{
 #[cfg(test)]
 use eventdbx::restrict::RestrictMode;
 
-use crate::commands::{cli_token, client::ServerClient};
+use crate::commands::{cli_token, client::ServerClient, is_lock_error_message};
 use tracing::warn;
 
 #[derive(Subcommand)]
@@ -59,8 +59,6 @@ pub enum AggregateCommands {
     Replay(AggregateReplayArgs),
     /// Verify an aggregate's Merkle root
     Verify(AggregateVerifyArgs),
-    /// Create a snapshot of the aggregate state
-    Snapshot(AggregateSnapshotArgs),
     /// Archive an aggregate instance
     Archive(AggregateArchiveArgs),
     /// Restore an archived aggregate instance
@@ -240,19 +238,6 @@ pub struct AggregateVerifyArgs {
     /// Emit results as JSON
     #[arg(long, default_value_t = false)]
     pub json: bool,
-}
-
-#[derive(Args)]
-pub struct AggregateSnapshotArgs {
-    /// Aggregate type
-    pub aggregate: String,
-
-    /// Aggregate identifier
-    pub aggregate_id: String,
-
-    /// Optional comment to record with the snapshot
-    #[arg(long)]
-    pub comment: Option<String>,
 }
 
 #[derive(Args)]
@@ -873,16 +858,6 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 );
             }
         }
-        AggregateCommands::Snapshot(args) => {
-            let store = EventStore::open(
-                config.event_store_path(),
-                config.encryption_key()?,
-                config.snowflake_worker_id,
-            )?;
-            let snapshot =
-                store.create_snapshot(&args.aggregate, &args.aggregate_id, args.comment.clone())?;
-            println!("{}", serde_json::to_string_pretty(&snapshot)?);
-        }
         AggregateCommands::Archive(args) => {
             let store = EventStore::open(
                 config.event_store_path(),
@@ -1190,7 +1165,7 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
             }
             Ok(())
         }
-        Err(EventError::Storage(message)) if is_lock_error(&message) => {
+        Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
             let state = proxy_create_via_socket(
                 config,
                 token,
@@ -1340,7 +1315,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 println!("event staged for later commit");
                 return Ok(());
             }
-            Err(EventError::Storage(message)) if is_lock_error(&message) => {
+            Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
                 bail!(
                     "event store is locked by a running server.\nStop the server or omit --stage."
                 );
@@ -1429,7 +1404,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
             }
             Ok(())
         }
-        Err(EventError::Storage(message)) if is_lock_error(&message) => {
+        Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
             let record = proxy_append_via_socket(
                 config,
                 token,
@@ -1542,7 +1517,7 @@ fn proxy_create_via_socket(
     Ok(state)
 }
 
-fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> {
+pub(crate) fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> {
     if let Some(token) = token.and_then(normalize_token) {
         return Ok(token);
     }
@@ -1616,12 +1591,6 @@ fn normalize_token(token: String) -> Option<String> {
         Some(trimmed.to_string())
     }
 }
-
-fn is_lock_error(message: &str) -> bool {
-    let lower = message.to_lowercase();
-    lower.contains("lock file") || lower.contains("resource temporarily unavailable")
-}
-
 fn export_aggregates(config: &Config, args: AggregateExportArgs) -> Result<()> {
     let AggregateExportArgs {
         aggregate,

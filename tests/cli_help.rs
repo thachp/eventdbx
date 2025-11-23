@@ -195,10 +195,6 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "Verify an aggregate's Merkle root",
     },
     HelpCase {
-        path: &["aggregate", "snapshot"],
-        expected_snippet: "Create a snapshot of the aggregate state",
-    },
-    HelpCase {
         path: &["aggregate", "archive"],
         expected_snippet: "Archive an aggregate instance",
     },
@@ -217,6 +213,18 @@ const HELP_CASES: &[HelpCase] = &[
     HelpCase {
         path: &["aggregate", "export"],
         expected_snippet: "Export aggregate state to CSV or JSON",
+    },
+    HelpCase {
+        path: &["snapshots"],
+        expected_snippet: "Manage snapshots",
+    },
+    HelpCase {
+        path: &["snapshots", "list"],
+        expected_snippet: "List snapshots with optional aggregate filters",
+    },
+    HelpCase {
+        path: &["snapshots", "create"],
+        expected_snippet: "Create a snapshot of an aggregate state",
     },
     HelpCase {
         path: &["upgrade"],

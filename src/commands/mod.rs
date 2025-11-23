@@ -15,6 +15,7 @@ pub mod plugin;
 pub mod queue;
 pub mod schema;
 pub mod schema_version;
+pub mod snapshots;
 pub mod start;
 pub mod system;
 pub mod tenant;
@@ -81,4 +82,15 @@ struct JwtActorFragment {
     user: String,
     #[serde(default)]
     sub: String,
+}
+
+pub(crate) fn is_lock_error_message(message: &str) -> bool {
+    eventdbx::store::is_lock_error_message(message)
+}
+
+pub(crate) fn is_lock_error(err: &eventdbx::error::EventError) -> bool {
+    match err {
+        eventdbx::error::EventError::Storage(message) => is_lock_error_message(message),
+        _ => false,
+    }
 }
