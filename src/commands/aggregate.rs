@@ -25,7 +25,7 @@ use eventdbx::{
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
         self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState,
-        AppendEvent, EventRecord, EventStore, SnapshotRecord, payload_to_map, select_state_field,
+        AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
     },
     tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
     token::{IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, TokenManager},
@@ -59,8 +59,6 @@ pub enum AggregateCommands {
     Replay(AggregateReplayArgs),
     /// Verify an aggregate's Merkle root
     Verify(AggregateVerifyArgs),
-    /// Create a snapshot of the aggregate state
-    Snapshot(AggregateSnapshotArgs),
     /// Archive an aggregate instance
     Archive(AggregateArchiveArgs),
     /// Restore an archived aggregate instance
@@ -240,19 +238,6 @@ pub struct AggregateVerifyArgs {
     /// Emit results as JSON
     #[arg(long, default_value_t = false)]
     pub json: bool,
-}
-
-#[derive(Args)]
-pub struct AggregateSnapshotArgs {
-    /// Aggregate type
-    pub aggregate: String,
-
-    /// Aggregate identifier
-    pub aggregate_id: String,
-
-    /// Optional comment to record with the snapshot
-    #[arg(long)]
-    pub comment: Option<String>,
 }
 
 #[derive(Args)]
@@ -871,32 +856,6 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     "aggregate_type={} aggregate_id={} merkle_root={}",
                     args.aggregate, args.aggregate_id, merkle_root
                 );
-            }
-        }
-        AggregateCommands::Snapshot(args) => {
-            match EventStore::open(
-                config.event_store_path(),
-                config.encryption_key()?,
-                config.snowflake_worker_id,
-            ) {
-                Ok(store) => {
-                    let snapshot = store.create_snapshot(
-                        &args.aggregate,
-                        &args.aggregate_id,
-                        args.comment.clone(),
-                    )?;
-                    println!("{}", serde_json::to_string_pretty(&snapshot)?);
-                }
-                Err(EventError::Storage(message)) if is_lock_error(&message) => {
-                    let snapshot = proxy_snapshot_via_socket(
-                        &config,
-                        &args.aggregate,
-                        &args.aggregate_id,
-                        args.comment.as_deref(),
-                    )?;
-                    println!("{}", serde_json::to_string_pretty(&snapshot)?);
-                }
-                Err(err) => return Err(err.into()),
             }
         }
         AggregateCommands::Archive(args) => {
@@ -1556,24 +1515,6 @@ fn proxy_create_via_socket(
             )
         })?;
     Ok(state)
-}
-
-fn proxy_snapshot_via_socket(
-    config: &Config,
-    aggregate: &str,
-    aggregate_id: &str,
-    comment: Option<&str>,
-) -> Result<SnapshotRecord> {
-    let token = ensure_proxy_token(config, None)?;
-    let client = ServerClient::new(config)?;
-    client
-        .create_snapshot(&token, aggregate, aggregate_id, comment)
-        .with_context(|| {
-            format!(
-                "failed to create snapshot via running server socket {}",
-                config.socket.bind_addr
-            )
-        })
 }
 
 pub(crate) fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> {

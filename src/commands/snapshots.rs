@@ -8,6 +8,7 @@ use eventdbx::{
     store::{EventStore, SnapshotRecord},
     validation::{ensure_aggregate_id, ensure_snake_case},
 };
+use serde_json;
 
 use crate::commands::{aggregate::ensure_proxy_token, client::ServerClient};
 
@@ -15,6 +16,8 @@ use crate::commands::{aggregate::ensure_proxy_token, client::ServerClient};
 pub enum SnapshotsCommands {
     /// List snapshots with optional aggregate filters
     List(SnapshotsListArgs),
+    /// Create a snapshot of an aggregate state
+    Create(SnapshotsCreateArgs),
 }
 
 #[derive(Args)]
@@ -35,10 +38,24 @@ pub struct SnapshotsListArgs {
     pub json: bool,
 }
 
+#[derive(Args)]
+pub struct SnapshotsCreateArgs {
+    /// Aggregate type
+    pub aggregate: String,
+
+    /// Aggregate identifier
+    pub aggregate_id: String,
+
+    /// Optional comment to record with the snapshot
+    #[arg(long)]
+    pub comment: Option<String>,
+}
+
 pub fn execute(config_path: Option<PathBuf>, command: SnapshotsCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     match command {
         SnapshotsCommands::List(args) => list_snapshots(&config, args),
+        SnapshotsCommands::Create(args) => create_snapshot(&config, args),
     }
 }
 
@@ -69,6 +86,35 @@ fn list_snapshots(config: &Config, args: SnapshotsListArgs) -> Result<()> {
     Ok(())
 }
 
+fn create_snapshot(config: &Config, args: SnapshotsCreateArgs) -> Result<()> {
+    ensure_snake_case("aggregate_type", &args.aggregate)?;
+    ensure_aggregate_id(&args.aggregate_id)?;
+
+    match EventStore::open(
+        config.event_store_path(),
+        config.encryption_key()?,
+        config.snowflake_worker_id,
+    ) {
+        Ok(store) => {
+            let snapshot =
+                store.create_snapshot(&args.aggregate, &args.aggregate_id, args.comment.clone())?;
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        }
+        Err(EventError::Storage(message)) if is_lock_error(&message) => {
+            let snapshot = proxy_create_snapshot_via_socket(
+                config,
+                &args.aggregate,
+                &args.aggregate_id,
+                args.comment.as_deref(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        }
+        Err(err) => return Err(err.into()),
+    }
+
+    Ok(())
+}
+
 fn proxy_list_snapshots_via_socket(
     config: &Config,
     aggregate: Option<&str>,
@@ -82,6 +128,24 @@ fn proxy_list_snapshots_via_socket(
         .with_context(|| {
             format!(
                 "failed to list snapshots via running server socket {}",
+                config.socket.bind_addr
+            )
+        })
+}
+
+fn proxy_create_snapshot_via_socket(
+    config: &Config,
+    aggregate: &str,
+    aggregate_id: &str,
+    comment: Option<&str>,
+) -> Result<SnapshotRecord> {
+    let token = ensure_proxy_token(config, None)?;
+    let client = ServerClient::new(config)?;
+    client
+        .create_snapshot(&token, aggregate, aggregate_id, comment)
+        .with_context(|| {
+            format!(
+                "failed to create snapshot via running server socket {}",
                 config.socket.bind_addr
             )
         })

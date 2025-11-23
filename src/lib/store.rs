@@ -4906,6 +4906,8 @@ mod tests {
 
     #[test]
     fn list_snapshots_filters_by_version() {
+        use std::{thread, time::Duration};
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
         let store = EventStore::open(path, None, 0).unwrap();
@@ -4924,6 +4926,8 @@ mod tests {
         store
             .create_snapshot("order", "order-9", Some("v1".into()))
             .unwrap();
+
+        thread::sleep(Duration::from_millis(2));
 
         store
             .append(AppendEvent {
