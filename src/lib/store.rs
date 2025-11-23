@@ -1518,7 +1518,7 @@ fn pid_running(pid: u32) -> bool {
             let mut exit_code = 0;
             let success = GetExitCodeProcess(handle, &mut exit_code);
             let _ = CloseHandle(handle);
-            success != 0 && exit_code == STILL_ACTIVE
+            success != 0 && exit_code == STILL_ACTIVE as u32
         }
     }
 
