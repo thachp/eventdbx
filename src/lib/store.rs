@@ -1475,7 +1475,7 @@ fn lock_status(lock_path: &Path) -> io::Result<LockStatus> {
         if status == -1 {
             return Ok(LockStatus::Unknown);
         }
-        if flock.l_type == libc::F_UNLCK {
+        if flock.l_type == libc::F_UNLCK as libc::c_short {
             return Ok(LockStatus::NotLocked);
         }
         return Ok(LockStatus::LockedBy(Some(flock.l_pid as u32)));
@@ -1518,7 +1518,7 @@ fn pid_running(pid: u32) -> bool {
             let mut exit_code = 0;
             let success = GetExitCodeProcess(handle, &mut exit_code);
             let _ = CloseHandle(handle);
-            success != 0 && exit_code == STILL_ACTIVE
+            success != 0 && exit_code == STILL_ACTIVE as u32
         }
     }
 
