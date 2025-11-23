@@ -1524,7 +1524,7 @@ pub(crate) fn ensure_proxy_token(config: &Config, token: Option<String>) -> Resu
     if let Some(token) = env::var("EVENTDBX_TOKEN").ok().and_then(normalize_token) {
         return Ok(token);
     }
-    match cli_token::ensure_bootstrap_token(config) {
+    match cli_token::ensure_bootstrap_token(config, None) {
         Ok(token) => return Ok(token),
         Err(err) => {
             warn!(

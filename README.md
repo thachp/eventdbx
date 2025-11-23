@@ -104,7 +104,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
    ```
 
    - Add `--tenant <id>` (repeat the flag for multiple tenants) to bind the token to specific tenant ids. The server rejects any request where the supplied `tenantId` does not appear in the token’s claims.
-   - Need the root bootstrap credential instead? Run `dbx token bootstrap` to ensure `~/.eventdbx/cli.token` exists, or append `--stdout` to print a one-off token without persisting it (pass `--persist` alongside `--stdout` if you still want the file updated).
+   - Need the root bootstrap credential instead? Run `dbx token bootstrap` to ensure `~/.eventdbx/cli.token` exists, or append `--stdout` to print a one-off token without persisting it (pass `--persist` alongside `--stdout` if you still want the file updated). Bootstrap tokens expire after two hours by default; supply `--ttl <seconds>` (for example `--ttl 0` to disable) if you must override the expiration.
 
 5. **Append an event**
 

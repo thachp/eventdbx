@@ -17,14 +17,17 @@ const BOOTSTRAP_GROUP: &str = "cli";
 const BOOTSTRAP_USER: &str = "root";
 const BOOTSTRAP_SUBJECT: &str = "cli:bootstrap";
 const BOOTSTRAP_ISSUER: &str = "cli-bootstrap";
+const BOOTSTRAP_DEFAULT_TTL_SECS: u64 = 7_200;
 
-pub fn ensure_bootstrap_token(config: &Config) -> Result<String> {
+pub fn ensure_bootstrap_token(config: &Config, ttl_override: Option<u64>) -> Result<String> {
     let manager = open_token_manager(config)?;
-    if let Some(token) = load_existing_token(config, &manager)? {
-        return Ok(token);
+    if ttl_override.is_none() {
+        if let Some(token) = load_existing_token(config, &manager)? {
+            return Ok(token);
+        }
     }
 
-    let token_value = issue_new_bootstrap_token(&manager)?;
+    let token_value = issue_new_bootstrap_token(&manager, ttl_override)?;
     let path = config.cli_token_path();
     write_token_file(path.as_path(), &token_value)?;
     info!(
@@ -35,9 +38,9 @@ pub fn ensure_bootstrap_token(config: &Config) -> Result<String> {
     Ok(token_value)
 }
 
-pub fn issue_bootstrap_token(config: &Config) -> Result<String> {
+pub fn issue_bootstrap_token(config: &Config, ttl_override: Option<u64>) -> Result<String> {
     let manager = open_token_manager(config)?;
-    issue_new_bootstrap_token(&manager)
+    issue_new_bootstrap_token(&manager, ttl_override)
 }
 
 fn open_token_manager(config: &Config) -> Result<TokenManager> {
@@ -51,7 +54,8 @@ fn open_token_manager(config: &Config) -> Result<TokenManager> {
     )?)
 }
 
-fn issue_new_bootstrap_token(manager: &TokenManager) -> Result<String> {
+fn issue_new_bootstrap_token(manager: &TokenManager, ttl_override: Option<u64>) -> Result<String> {
+    let ttl_secs = ttl_override.unwrap_or(BOOTSTRAP_DEFAULT_TTL_SECS);
     let record = manager.issue(IssueTokenInput {
         subject: BOOTSTRAP_SUBJECT.to_string(),
         group: BOOTSTRAP_GROUP.to_string(),
@@ -59,7 +63,7 @@ fn issue_new_bootstrap_token(manager: &TokenManager) -> Result<String> {
         actions: vec![ROOT_ACTION.to_string()],
         resources: vec![ROOT_RESOURCE.to_string()],
         tenants: Vec::new(),
-        ttl_secs: Some(0),
+        ttl_secs: Some(ttl_secs),
         not_before: None,
         issued_by: BOOTSTRAP_ISSUER.to_string(),
         limits: JwtLimits {
@@ -180,6 +184,8 @@ fn write_token_file(path: &Path, token: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eventdbx::error::EventError;
+    use std::{thread, time};
     use tempfile::tempdir;
 
     #[test]
@@ -189,7 +195,7 @@ mod tests {
         config.data_dir = dir.path().to_path_buf();
         config.ensure_data_dir()?;
 
-        let first = ensure_bootstrap_token(&config)?;
+        let first = ensure_bootstrap_token(&config, None)?;
         assert!(!first.is_empty());
         let path = config.cli_token_path();
         assert!(path.exists());
@@ -215,9 +221,51 @@ mod tests {
         ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &jwt_config.public_key)
             .verify(signing_input.as_bytes(), &signature)
             .context("ring verification failed")?;
+        let claims = manager.verify(&first)?;
+        let exp = claims.exp.expect("bootstrap token should set exp");
+        let ttl_secs = exp - claims.iat;
+        assert!(
+            (ttl_secs - BOOTSTRAP_DEFAULT_TTL_SECS as i64).abs() <= 1,
+            "expected bootstrap TTL close to {BOOTSTRAP_DEFAULT_TTL_SECS}, got {ttl_secs}"
+        );
 
-        let second = ensure_bootstrap_token(&config)?;
+        let second = ensure_bootstrap_token(&config, None)?;
         assert_eq!(first, second);
+
+        Ok(())
+    }
+
+    #[test]
+    fn bootstrap_token_respects_override_and_expires() -> Result<()> {
+        let dir = tempdir().context("failed to create temp dir")?;
+        let mut config = Config::default();
+        config.data_dir = dir.path().to_path_buf();
+        config.auth.clock_skew_secs = 0;
+        config.ensure_data_dir()?;
+
+        let token = issue_bootstrap_token(&config, Some(1))?;
+        let manager = TokenManager::load(
+            config.jwt_manager_config()?,
+            config.tokens_path(),
+            config.jwt_revocations_path(),
+            config.encryption_key()?,
+        )?;
+
+        let claims = manager.verify(&token)?;
+        assert_eq!(
+            claims.exp.map(|exp| exp - claims.iat),
+            Some(1),
+            "override TTL should be applied"
+        );
+
+        thread::sleep(time::Duration::from_secs(2));
+        let err = manager
+            .verify(&token)
+            .expect_err("expired token should be rejected");
+        assert!(
+            matches!(err, EventError::TokenExpired),
+            "expected TokenExpired, got {err}"
+        );
 
         Ok(())
     }

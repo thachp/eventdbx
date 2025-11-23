@@ -106,6 +106,10 @@ pub struct TokenBootstrapArgs {
     /// Persist the token to cli.token even when printing to stdout
     #[arg(long, requires = "stdout", default_value_t = false)]
     pub persist: bool,
+
+    /// Override the bootstrap token TTL in seconds (use 0 to disable expiration)
+    #[arg(long = "ttl")]
+    pub ttl: Option<u64>,
 }
 
 pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<()> {
@@ -247,13 +251,13 @@ fn print_record(record: &TokenRecord) {
 fn handle_bootstrap_command(config: &Config, args: TokenBootstrapArgs) -> Result<()> {
     if args.stdout {
         let token = if args.persist {
-            cli_token::ensure_bootstrap_token(config)?
+            cli_token::ensure_bootstrap_token(config, args.ttl)?
         } else {
-            cli_token::issue_bootstrap_token(config)?
+            cli_token::issue_bootstrap_token(config, args.ttl)?
         };
         println!("{token}");
     } else {
-        cli_token::ensure_bootstrap_token(config)?;
+        cli_token::ensure_bootstrap_token(config, args.ttl)?;
         println!(
             "Bootstrap token stored at {}",
             config.cli_token_path().display()

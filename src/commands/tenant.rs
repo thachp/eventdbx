@@ -492,7 +492,7 @@ pub(crate) fn prepare_remote_client(
     config: &Config,
     tenant: &str,
 ) -> Result<(ServerClient, String)> {
-    let token = cli_token::ensure_bootstrap_token(config)?;
+    let token = cli_token::ensure_bootstrap_token(config, None)?;
     let client = ServerClient::new(config)?.with_tenant(Some(tenant.to_string()));
     Ok((client, token))
 }
