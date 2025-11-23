@@ -32,6 +32,7 @@ Each plugin instance can request the minimal payload it needs. When you run `dbx
 | `state-only`      | Latest state map only                                            | Cache warmers, read replicas     |
 | `schema-only`     | Aggregate schema only                                            | Schema registries                |
 | `event-and-schema`| Event + schema, no state                                         | Validation services, codegen     |
+| `extensions-only` | Extension metadata only; payload/state nulled before delivery    | Telemetry, policy hints, routing |
 
 Plugins receive payloads as JSON envelopes (HTTP/TCP) or Cap’n Proto messages (capnp/process). The queue persists the same envelope so you can inspect pending and dead jobs safely.
 

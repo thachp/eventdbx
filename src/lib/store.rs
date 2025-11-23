@@ -1564,7 +1564,9 @@ pub fn is_lock_error_message(message: &str) -> bool {
     lower.contains("lock file")
         || lower.contains("resource temporarily unavailable")
         || lower.contains("lock is held")
+        || lower.contains("is held by process")
         || lower.contains("lock hold")
+        || lower.contains("currently in use")
         || lower.contains("no locks available")
 }
 
