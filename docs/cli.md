@@ -90,7 +90,7 @@ Timestamp-sorted listings accept `ts:<field>:<order>:<scope>:<timestamp_ms>:<agg
 ## Plugins & queues
 
 - `dbx plugin install <plugin> <version> --source <path|url> [--bin <file>] [--checksum <sha256>] [--force]`
-- `dbx plugin config <type> …` – Configure `tcp`, `http`, `capnp`, `log`, or `process` emitters. Every `plugin config` command accepts `--payload <all|event-only|state-only|schema-only|event-and-schema>` so each plugin receives only the portions of the job it needs. For process plugins, add `--emit-events=<true|false>` when you need the worker running but do not want it to enqueue events.
+- `dbx plugin config <type> …` – Configure `tcp`, `http`, `capnp`, `log`, or `process` emitters. Every `plugin config` command accepts `--payload <all|event-only|state-only|schema-only|event-and-schema|extensions-only>` so each plugin receives only the portions of the job it needs. For process plugins, add `--emit-events=<true|false>` when you need the worker running but do not want it to enqueue events.
 - `dbx plugin enable <name>` / `dbx plugin disable <name>`
 - `dbx plugin test [<name>…]`
 - `dbx plugin start <name> [--foreground]`

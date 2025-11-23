@@ -51,4 +51,5 @@ EventDBX keeps every change as an immutable event so you can replay history, aud
 - [Getting started]({{ '/getting-started/' | relative_url }}) walks through schema setup, tokens, and common workflows.
 - [CLI reference]({{ '/cli/' | relative_url }}) details every subcommand with practical examples.
 - [Plugin architecture]({{ '/plugins/' | relative_url }}) explains how the job queue works and how to build new read-side connectors.
+- [Extensibility]({{ '/core-concepts/extensibility/' | relative_url }}) shows how to attach extension metadata and right-size plugin payloads.
 - [API reference]({{ '/apis/' | relative_url }}) covers REST, GraphQL, and gRPC routes exposed by companion plugins.
