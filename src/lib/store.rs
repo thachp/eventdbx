@@ -1475,7 +1475,7 @@ fn lock_status(lock_path: &Path) -> io::Result<LockStatus> {
         if status == -1 {
             return Ok(LockStatus::Unknown);
         }
-        if flock.l_type == libc::F_UNLCK {
+        if flock.l_type == libc::F_UNLCK as libc::c_short {
             return Ok(LockStatus::NotLocked);
         }
         return Ok(LockStatus::LockedBy(Some(flock.l_pid as u32)));
