@@ -25,7 +25,7 @@ use eventdbx::{
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
         self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState,
-        AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
+        AppendEvent, EventRecord, EventStore, SnapshotRecord, payload_to_map, select_state_field,
     },
     tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
     token::{IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, TokenManager},
@@ -874,14 +874,30 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             }
         }
         AggregateCommands::Snapshot(args) => {
-            let store = EventStore::open(
+            match EventStore::open(
                 config.event_store_path(),
                 config.encryption_key()?,
                 config.snowflake_worker_id,
-            )?;
-            let snapshot =
-                store.create_snapshot(&args.aggregate, &args.aggregate_id, args.comment.clone())?;
-            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            ) {
+                Ok(store) => {
+                    let snapshot = store.create_snapshot(
+                        &args.aggregate,
+                        &args.aggregate_id,
+                        args.comment.clone(),
+                    )?;
+                    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+                }
+                Err(EventError::Storage(message)) if is_lock_error(&message) => {
+                    let snapshot = proxy_snapshot_via_socket(
+                        &config,
+                        &args.aggregate,
+                        &args.aggregate_id,
+                        args.comment.as_deref(),
+                    )?;
+                    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+                }
+                Err(err) => return Err(err.into()),
+            }
         }
         AggregateCommands::Archive(args) => {
             let store = EventStore::open(
@@ -1542,7 +1558,25 @@ fn proxy_create_via_socket(
     Ok(state)
 }
 
-fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> {
+fn proxy_snapshot_via_socket(
+    config: &Config,
+    aggregate: &str,
+    aggregate_id: &str,
+    comment: Option<&str>,
+) -> Result<SnapshotRecord> {
+    let token = ensure_proxy_token(config, None)?;
+    let client = ServerClient::new(config)?;
+    client
+        .create_snapshot(&token, aggregate, aggregate_id, comment)
+        .with_context(|| {
+            format!(
+                "failed to create snapshot via running server socket {}",
+                config.socket.bind_addr
+            )
+        })
+}
+
+pub(crate) fn ensure_proxy_token(config: &Config, token: Option<String>) -> Result<String> {
     if let Some(token) = token.and_then(normalize_token) {
         return Ok(token);
     }
@@ -1619,7 +1653,10 @@ fn normalize_token(token: String) -> Option<String> {
 
 fn is_lock_error(message: &str) -> bool {
     let lower = message.to_lowercase();
-    lower.contains("lock file") || lower.contains("resource temporarily unavailable")
+    lower.contains("lock file")
+        || lower.contains("resource temporarily unavailable")
+        || lower.contains("store lock")
+        || lower.contains("store is in use")
 }
 
 fn export_aggregates(config: &Config, args: AggregateExportArgs) -> Result<()> {

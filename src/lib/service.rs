@@ -12,7 +12,7 @@ use crate::{
     store::{
         self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState,
         AppendEvent, EventArchiveScope, EventCursor, EventQueryScope, EventRecord, EventStore,
-        select_state_field,
+        SnapshotRecord, select_state_field,
     },
     tenant_store::{BYTES_PER_MEGABYTE, TenantAssignmentStore},
     token::{JwtClaims, TokenManager},
@@ -418,6 +418,76 @@ impl CoreContext {
         let store = self.store();
         let state = store.set_archive(&aggregate_type, &aggregate_id, archived, comment)?;
         Ok(self.sanitize_aggregate(state))
+    }
+
+    pub fn create_snapshot(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        comment: Option<String>,
+    ) -> Result<crate::store::SnapshotRecord> {
+        ensure_snake_case("aggregate_type", aggregate_type)?;
+        ensure_aggregate_id(aggregate_id)?;
+
+        if self.is_hidden_aggregate(aggregate_type) {
+            return Err(EventError::AggregateNotFound);
+        }
+
+        self.enforce_storage_quota()?;
+
+        let resource = Self::aggregate_resource(aggregate_type, aggregate_id);
+        self.tokens()
+            .authorize_action(token, "aggregate.append", Some(resource.as_str()))?;
+
+        self.store
+            .create_snapshot(aggregate_type, aggregate_id, comment)
+    }
+
+    pub fn list_snapshots(
+        &self,
+        token: &str,
+        aggregate_type: Option<&str>,
+        aggregate_id: Option<&str>,
+        version: Option<u64>,
+    ) -> Result<Vec<SnapshotRecord>> {
+        if let Some(value) = aggregate_type {
+            ensure_snake_case("aggregate_type", value)?;
+        }
+        if let Some(value) = aggregate_id {
+            ensure_aggregate_id(value)?;
+        }
+        if aggregate_id.is_some() && aggregate_type.is_none() {
+            return Err(EventError::InvalidSchema(
+                "aggregate type is required when providing aggregate id".into(),
+            ));
+        }
+
+        let resource = aggregate_type
+            .zip(aggregate_id)
+            .map(|(agg, id)| Self::aggregate_resource(agg, id));
+        if let Some(resource) = resource.as_deref() {
+            self.tokens()
+                .authorize_action(token, "aggregate.read", Some(resource))?;
+        } else {
+            self.tokens()
+                .authorize_action(token, "aggregate.read", None)?;
+        }
+
+        let snapshots = self
+            .store
+            .list_snapshots(aggregate_type, aggregate_id, version)?;
+        Ok(snapshots
+            .into_iter()
+            .filter_map(|mut snapshot| {
+                if self.is_hidden_aggregate(&snapshot.aggregate_type) {
+                    return None;
+                }
+                snapshot.state =
+                    self.filter_state_map(&snapshot.aggregate_type, snapshot.state.clone());
+                Some(snapshot)
+            })
+            .collect())
     }
 
     pub fn append_event(&self, input: AppendEventInput) -> Result<EventRecord> {

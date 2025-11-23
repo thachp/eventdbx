@@ -15,6 +15,7 @@ pub mod plugin;
 pub mod queue;
 pub mod schema;
 pub mod schema_version;
+pub mod snapshots;
 pub mod start;
 pub mod system;
 pub mod tenant;

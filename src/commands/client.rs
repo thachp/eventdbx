@@ -17,7 +17,7 @@ use eventdbx::{
     config::Config,
     control_capnp::{control_hello, control_hello_response, control_request, control_response},
     schema::AggregateSchema,
-    store::{AggregateState, EventRecord},
+    store::{AggregateState, EventRecord, SnapshotRecord},
 };
 use serde_json::{self, Value};
 
@@ -209,6 +209,79 @@ impl ServerClient {
             patch,
             metadata,
             note,
+        )
+    }
+
+    pub fn create_snapshot(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        comment: Option<&str>,
+    ) -> Result<SnapshotRecord> {
+        let connect_addr = self.connect_addr.clone();
+        let tenant = self.tenant.clone();
+        let token = token.to_string();
+        let aggregate_type = aggregate_type.to_string();
+        let aggregate_id = aggregate_id.to_string();
+        let comment = comment.map(|value| value.to_string());
+
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return tokio::task::block_in_place(move || {
+                create_snapshot_blocking(
+                    connect_addr,
+                    tenant.clone(),
+                    token,
+                    aggregate_type,
+                    aggregate_id,
+                    comment.clone(),
+                )
+            });
+        }
+
+        create_snapshot_blocking(
+            connect_addr,
+            tenant,
+            token,
+            aggregate_type,
+            aggregate_id,
+            comment,
+        )
+    }
+
+    pub fn list_snapshots(
+        &self,
+        token: &str,
+        aggregate_type: Option<&str>,
+        aggregate_id: Option<&str>,
+        version: Option<u64>,
+    ) -> Result<Vec<SnapshotRecord>> {
+        let connect_addr = self.connect_addr.clone();
+        let tenant = self.tenant.clone();
+        let token = token.to_string();
+        let aggregate_type = aggregate_type.map(|value| value.to_string());
+        let aggregate_id = aggregate_id.map(|value| value.to_string());
+
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return tokio::task::block_in_place(move || {
+                list_snapshots_blocking(
+                    connect_addr,
+                    tenant.clone(),
+                    token,
+                    aggregate_type.clone(),
+                    aggregate_id.clone(),
+                    version,
+                )
+            });
+        }
+
+        list_snapshots_blocking(
+            connect_addr,
+            tenant,
+            token,
+            aggregate_type,
+            aggregate_id,
+            version,
         )
     }
 
@@ -1243,6 +1316,145 @@ fn patch_event_blocking(
                 }
                 payload::AppendEvent(Err(err)) => Err(anyhow!(
                     "failed to decode append_event payload from CLI proxy: {}",
+                    err
+                )),
+                payload::Error(Ok(error)) => {
+                    let code = read_text(error.get_code(), "code")?;
+                    let message = read_text(error.get_message(), "message")?;
+                    Err(anyhow!("server returned {}: {}", code, message))
+                }
+                payload::Error(Err(err)) => Err(anyhow!(
+                    "failed to decode error payload from CLI proxy: {}",
+                    err
+                )),
+                _ => Err(anyhow!(
+                    "unexpected payload returned from CLI proxy response"
+                )),
+            }
+        },
+    )
+}
+
+fn create_snapshot_blocking(
+    connect_addr: String,
+    tenant: Option<String>,
+    token: String,
+    aggregate_type: String,
+    aggregate_id: String,
+    comment: Option<String>,
+) -> Result<SnapshotRecord> {
+    let request_id = next_request_id();
+
+    let (comment_text, has_comment) = match comment {
+        Some(value) => (value, true),
+        None => (String::new(), false),
+    };
+
+    send_control_request_blocking(
+        &connect_addr,
+        &token,
+        tenant.as_deref(),
+        request_id,
+        |request| {
+            let payload_builder = request.reborrow().init_payload();
+            let mut snapshot = payload_builder.init_create_snapshot();
+            snapshot.set_token(&token);
+            snapshot.set_aggregate_type(&aggregate_type);
+            snapshot.set_aggregate_id(&aggregate_id);
+            snapshot.set_comment(&comment_text);
+            snapshot.set_has_comment(has_comment);
+            Ok(())
+        },
+        |response| {
+            use control_response::payload;
+
+            match response
+                .get_payload()
+                .which()
+                .context("failed to decode create_snapshot response payload")?
+            {
+                payload::CreateSnapshot(Ok(snapshot)) => {
+                    let snapshot_json = read_text(snapshot.get_snapshot_json(), "snapshot_json")?;
+                    let snapshot: SnapshotRecord = serde_json::from_str(&snapshot_json)
+                        .context("failed to parse create_snapshot response payload")?;
+                    Ok(snapshot)
+                }
+                payload::CreateSnapshot(Err(err)) => Err(anyhow!(
+                    "failed to decode create_snapshot payload from CLI proxy: {}",
+                    err
+                )),
+                payload::Error(Ok(error)) => {
+                    let code = read_text(error.get_code(), "code")?;
+                    let message = read_text(error.get_message(), "message")?;
+                    Err(anyhow!("server returned {}: {}", code, message))
+                }
+                payload::Error(Err(err)) => Err(anyhow!(
+                    "failed to decode error payload from CLI proxy: {}",
+                    err
+                )),
+                _ => Err(anyhow!(
+                    "unexpected payload returned from CLI proxy response"
+                )),
+            }
+        },
+    )
+}
+
+fn list_snapshots_blocking(
+    connect_addr: String,
+    tenant: Option<String>,
+    token: String,
+    aggregate_type: Option<String>,
+    aggregate_id: Option<String>,
+    version: Option<u64>,
+) -> Result<Vec<SnapshotRecord>> {
+    let request_id = next_request_id();
+    let (version_value, has_version) = match version {
+        Some(value) => (value, true),
+        None => (0, false),
+    };
+    let (aggregate_type_text, has_aggregate_type) = match aggregate_type {
+        Some(value) => (value, true),
+        None => (String::new(), false),
+    };
+    let (aggregate_id_text, has_aggregate_id) = match aggregate_id {
+        Some(value) => (value, true),
+        None => (String::new(), false),
+    };
+
+    send_control_request_blocking(
+        &connect_addr,
+        &token,
+        tenant.as_deref(),
+        request_id,
+        |request| {
+            let payload_builder = request.reborrow().init_payload();
+            let mut req = payload_builder.init_list_snapshots();
+            req.set_token(&token);
+            req.set_aggregate_type(&aggregate_type_text);
+            req.set_has_aggregate_type(has_aggregate_type);
+            req.set_aggregate_id(&aggregate_id_text);
+            req.set_has_aggregate_id(has_aggregate_id);
+            req.set_version(version_value);
+            req.set_has_version(has_version);
+            Ok(())
+        },
+        |response| {
+            use control_response::payload;
+
+            match response
+                .get_payload()
+                .which()
+                .context("failed to decode list_snapshots response payload")?
+            {
+                payload::ListSnapshots(Ok(list)) => {
+                    let json = read_text(list.get_snapshots_json(), "snapshots_json")?;
+                    let snapshots: Vec<SnapshotRecord> = serde_json::from_str(&json)
+                        .context("failed to parse list_snapshots response payload")?;
+                    Ok(snapshots)
+                }
+                payload::ListSnapshots(Err(err)) => Err(anyhow!(
+                    "failed to decode list_snapshots payload from CLI proxy: {}",
                     err
                 )),
                 payload::Error(Ok(error)) => {

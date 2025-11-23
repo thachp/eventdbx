@@ -87,6 +87,12 @@ enum ControlReply {
     SetAggregateArchive {
         aggregate_json: Option<String>,
     },
+    CreateSnapshot {
+        snapshot_json: String,
+    },
+    ListSnapshots {
+        snapshots_json: String,
+    },
     ListSchemas(String),
     ReplaceSchemas(u32),
     TenantAssign {
@@ -181,6 +187,18 @@ enum ControlCommand {
         aggregate_id: String,
         archived: bool,
         note: Option<String>,
+    },
+    CreateSnapshot {
+        token: String,
+        aggregate_type: String,
+        aggregate_id: String,
+        comment: Option<String>,
+    },
+    ListSnapshots {
+        token: String,
+        aggregate_type: Option<String>,
+        aggregate_id: Option<String>,
+        version: Option<u64>,
     },
     ListSchemas {
         token: String,
@@ -304,6 +322,8 @@ fn control_command_name(command: &ControlCommand) -> &'static str {
         ControlCommand::SelectAggregate { .. } => "select_aggregate",
         ControlCommand::CreateAggregate { .. } => "create_aggregate",
         ControlCommand::SetAggregateArchive { .. } => "set_aggregate_archive",
+        ControlCommand::CreateSnapshot { .. } => "create_snapshot",
+        ControlCommand::ListSnapshots { .. } => "list_snapshots",
         ControlCommand::ListSchemas { .. } => "list_schemas",
         ControlCommand::ReplaceSchemas { .. } => "replace_schemas",
         ControlCommand::TenantAssign { .. } => "tenant_assign",
@@ -959,6 +979,14 @@ where
                                     builder.set_aggregate_json("");
                                 }
                             }
+                            ControlReply::CreateSnapshot { snapshot_json } => {
+                                let mut builder = payload.init_create_snapshot();
+                                builder.set_snapshot_json(&snapshot_json);
+                            }
+                            ControlReply::ListSnapshots { snapshots_json } => {
+                                let mut builder = payload.init_list_snapshots();
+                                builder.set_snapshots_json(&snapshots_json);
+                            }
                             ControlReply::ListSchemas(json) => {
                                 let mut builder = payload.init_list_schemas();
                                 builder.set_schemas_json(&json);
@@ -1368,6 +1396,72 @@ fn parse_control_command(
                 aggregate_id,
                 archived,
                 note,
+            })
+        }
+        payload::CreateSnapshot(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+            let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+            let comment = if req.get_has_comment() {
+                let value = read_control_text(req.get_comment(), "comment")?;
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                None
+            };
+
+            Ok(ControlCommand::CreateSnapshot {
+                token,
+                aggregate_type,
+                aggregate_id,
+                comment,
+            })
+        }
+        payload::ListSnapshots(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let aggregate_type = if req.get_has_aggregate_type() {
+                let value = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                None
+            };
+            let aggregate_id = if req.get_has_aggregate_id() {
+                let value = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            } else {
+                None
+            };
+            let version = if req.get_has_version() {
+                Some(req.get_version())
+            } else {
+                None
+            };
+
+            Ok(ControlCommand::ListSnapshots {
+                token,
+                aggregate_type,
+                aggregate_id,
+                version,
             })
         }
         payload::ListSchemas(req) => {
@@ -1802,6 +1896,52 @@ async fn execute_control_command(
             Ok(ControlReply::SetAggregateArchive {
                 aggregate_json: json,
             })
+        }
+        ControlCommand::CreateSnapshot {
+            token,
+            aggregate_type,
+            aggregate_id,
+            comment,
+        } => {
+            let snapshot = spawn_blocking({
+                let core = core.clone();
+                let aggregate_type = aggregate_type.clone();
+                let aggregate_id = aggregate_id.clone();
+                let token = token.clone();
+                let comment = comment.clone();
+                move || core.create_snapshot(&token, &aggregate_type, &aggregate_id, comment)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("create snapshot task failed: {err}")))??;
+
+            let snapshot_json = serde_json::to_string(&snapshot)?;
+            Ok(ControlReply::CreateSnapshot { snapshot_json })
+        }
+        ControlCommand::ListSnapshots {
+            token,
+            aggregate_type,
+            aggregate_id,
+            version,
+        } => {
+            let snapshots = spawn_blocking({
+                let core = core.clone();
+                let aggregate_type = aggregate_type.clone();
+                let aggregate_id = aggregate_id.clone();
+                let token = token.clone();
+                move || {
+                    core.list_snapshots(
+                        &token,
+                        aggregate_type.as_deref(),
+                        aggregate_id.as_deref(),
+                        version,
+                    )
+                }
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("list snapshots task failed: {err}")))??;
+
+            let snapshots_json = serde_json::to_string(&snapshots)?;
+            Ok(ControlReply::ListSnapshots { snapshots_json })
         }
         ControlCommand::ListSchemas { token } => {
             let tokens = core.tokens();

@@ -500,7 +500,10 @@ fn is_lock_error(err: &EventError) -> bool {
     match err {
         EventError::Storage(message) => {
             let lower = message.to_ascii_lowercase();
-            lower.contains("lock file") || lower.contains("resource temporarily unavailable")
+            lower.contains("lock file")
+                || lower.contains("resource temporarily unavailable")
+                || lower.contains("store lock")
+                || lower.contains("store is in use")
         }
         _ => false,
     }

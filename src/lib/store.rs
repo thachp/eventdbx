@@ -2,10 +2,11 @@ use std::{
     cmp::Ordering as StdOrdering,
     collections::{BTreeMap, BTreeSet},
     convert::TryInto,
-    fmt,
-    path::PathBuf,
+    fmt, fs, io,
+    path::{Path, PathBuf},
     str::{self, FromStr},
-    time::Instant,
+    thread,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -18,6 +19,10 @@ use serde_json::Value;
 
 use json_patch::Patch;
 use metrics::{counter, histogram};
+use tracing::warn;
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 use super::{
     encryption::{self, Encryptor},
@@ -42,6 +47,8 @@ const PREFIX_META_CREATED_INDEX: &str = "meta-created";
 const PREFIX_META_UPDATED_INDEX: &str = "meta-updated";
 const PREFIX_META_CREATED_INDEX_ARCHIVED: &str = "meta-created-arch";
 const PREFIX_META_UPDATED_INDEX_ARCHIVED: &str = "meta-updated-arch";
+const LOCK_RETRY_ATTEMPTS: usize = 5;
+const LOCK_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventRecord {
@@ -1377,13 +1384,196 @@ pub struct AggregatePositionEntry {
     pub version: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockStatus {
+    NotLocked,
+    LockedBy(Option<u32>),
+    Unknown,
+}
+
+fn open_db_with_lock_handling(
+    path: &Path,
+    options: &Options,
+    read_only: bool,
+) -> Result<DBWithThreadMode<MultiThreaded>> {
+    let lock_path = path.join("LOCK");
+    let mut last_error = None;
+
+    for attempt in 0..=LOCK_RETRY_ATTEMPTS {
+        match try_open_db(path, options, read_only) {
+            Ok(db) => return Ok(db),
+            Err(err) => {
+                let message = err.to_string();
+                last_error = Some(message.clone());
+                if !is_lock_error_message(&message) {
+                    return Err(EventError::Storage(message));
+                }
+
+                let status = lock_status(&lock_path)?;
+                match status {
+                    LockStatus::NotLocked => {
+                        cleanup_stale_lock(&lock_path);
+                    }
+                    LockStatus::LockedBy(pid_opt) => {
+                        if pid_opt.map_or(false, pid_running) {
+                            if attempt == LOCK_RETRY_ATTEMPTS {
+                                return Err(EventError::Storage(store_in_use_message(
+                                    path, pid_opt,
+                                )));
+                            }
+                        } else {
+                            cleanup_stale_lock(&lock_path);
+                        }
+                    }
+                    LockStatus::Unknown => {
+                        if attempt == LOCK_RETRY_ATTEMPTS {
+                            return Err(EventError::Storage(store_in_use_message(path, None)));
+                        }
+                    }
+                }
+            }
+        }
+
+        if attempt < LOCK_RETRY_ATTEMPTS {
+            thread::sleep(LOCK_RETRY_BACKOFF);
+        }
+    }
+
+    Err(EventError::Storage(
+        last_error.unwrap_or_else(|| "failed to open event store".into()),
+    ))
+}
+
+fn try_open_db(
+    path: &Path,
+    options: &Options,
+    read_only: bool,
+) -> std::result::Result<DBWithThreadMode<MultiThreaded>, rocksdb::Error> {
+    if read_only {
+        DBWithThreadMode::<MultiThreaded>::open_for_read_only(options, path, false)
+    } else {
+        DBWithThreadMode::<MultiThreaded>::open(options, path)
+    }
+}
+
+fn lock_status(lock_path: &Path) -> io::Result<LockStatus> {
+    if !lock_path.exists() {
+        return Ok(LockStatus::NotLocked);
+    }
+
+    #[cfg(unix)]
+    {
+        let file = std::fs::File::open(lock_path)?;
+        let mut flock = libc::flock {
+            l_type: libc::F_WRLCK as libc::c_short,
+            l_whence: libc::SEEK_SET as libc::c_short,
+            l_start: 0,
+            l_len: 0,
+            l_pid: 0,
+        };
+        let status = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut flock) };
+        if status == -1 {
+            return Ok(LockStatus::Unknown);
+        }
+        if flock.l_type == libc::F_UNLCK {
+            return Ok(LockStatus::NotLocked);
+        }
+        return Ok(LockStatus::LockedBy(Some(flock.l_pid as u32)));
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = lock_path;
+        Ok(LockStatus::Unknown)
+    }
+}
+
+fn pid_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if result == 0 {
+            return true;
+        }
+        if let Some(errno) = io::Error::last_os_error().raw_os_error() {
+            return errno != libc::ESRCH;
+        }
+        return false;
+    }
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, STILL_ACTIVE},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle == 0 {
+                return false;
+            }
+            let mut exit_code = 0;
+            let success = GetExitCodeProcess(handle, &mut exit_code);
+            let _ = CloseHandle(handle);
+            success != 0 && exit_code == STILL_ACTIVE
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+fn cleanup_stale_lock(lock_path: &Path) {
+    if let Err(err) = fs::remove_file(lock_path) {
+        if err.kind() != io::ErrorKind::NotFound {
+            warn!(
+                "failed to remove stale lock file {}: {}",
+                lock_path.display(),
+                err
+            );
+        }
+    } else {
+        warn!(
+            "removed stale event store lock file at {}",
+            lock_path.display()
+        );
+    }
+}
+
+fn store_in_use_message(path: &Path, pid: Option<u32>) -> String {
+    match pid {
+        Some(pid) => format!(
+            "event store lock at {} is held by process {pid}; stop the running dbx instance and retry",
+            path.display()
+        ),
+        None => format!(
+            "event store at {} is currently in use; stop the running dbx instance and retry",
+            path.display()
+        ),
+    }
+}
+
+fn is_lock_error_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("lock file")
+        || lower.contains("resource temporarily unavailable")
+        || lower.contains("lock is held")
+        || lower.contains("lock hold")
+        || lower.contains("no locks available")
+}
+
 impl EventStore {
     pub fn open(path: PathBuf, encryptor: Option<Encryptor>, worker_id: u16) -> Result<Self> {
         let mut options = Options::default();
         options.create_if_missing(true);
         configure_db_options(&mut options, false);
-        let db = DBWithThreadMode::<MultiThreaded>::open(&options, &path)
-            .map_err(|err| EventError::Storage(err.to_string()))?;
+        let db = open_db_with_lock_handling(&path, &options, false)?;
 
         if worker_id > MAX_WORKER_ID {
             return Err(EventError::Config(format!(
@@ -1405,8 +1595,7 @@ impl EventStore {
         let mut options = Options::default();
         options.create_if_missing(false);
         configure_db_options(&mut options, true);
-        let db = DBWithThreadMode::<MultiThreaded>::open_for_read_only(&options, &path, false)
-            .map_err(|err| EventError::Storage(err.to_string()))?;
+        let db = open_db_with_lock_handling(&path, &options, true)?;
 
         Ok(Self {
             db,
@@ -2128,6 +2317,55 @@ impl EventStore {
             .map_err(|err| EventError::Storage(err.to_string()))?;
 
         Ok(record)
+    }
+
+    pub fn list_snapshots(
+        &self,
+        aggregate_type: Option<&str>,
+        aggregate_id: Option<&str>,
+        version: Option<u64>,
+    ) -> Result<Vec<SnapshotRecord>> {
+        let start = Instant::now();
+        let mut segments = vec![PREFIX_SNAPSHOT];
+        if let Some(aggregate_type) = aggregate_type {
+            segments.push(aggregate_type);
+            if let Some(aggregate_id) = aggregate_id {
+                segments.push(aggregate_id);
+            }
+        }
+        let prefix = key_with_segments(&segments);
+        let result = (|| {
+            let mut snapshots = Vec::new();
+            let iter = self
+                .db
+                .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+
+            for item in iter {
+                let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+                if !key.starts_with(prefix.as_slice()) {
+                    break;
+                }
+
+                let snapshot: SnapshotRecord = serde_json::from_slice(&value).map_err(|err| {
+                    EventError::Storage(format!("failed to deserialize snapshot: {err}"))
+                })?;
+                if aggregate_type.map_or(true, |value| snapshot.aggregate_type == value)
+                    && aggregate_id.map_or(true, |value| snapshot.aggregate_id == value)
+                    && version.map_or(true, |v| v == snapshot.version)
+                {
+                    snapshots.push(snapshot);
+                }
+            }
+            Ok(snapshots)
+        })();
+
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_list_snapshots",
+            if result.is_ok() { "ok" } else { "err" },
+            duration,
+        );
+        result
     }
 
     pub fn set_archive(
@@ -3963,10 +4201,14 @@ fn event_cursor_matches_scope(cursor: &EventCursor, scope: EventQueryScope<'_>) 
 }
 
 fn snapshot_key(aggregate_type: &str, aggregate_id: &str, created_at: DateTime<Utc>) -> Vec<u8> {
-    let mut key = key_with_segments(&[PREFIX_SNAPSHOT, aggregate_type, aggregate_id]);
+    let mut key = snapshot_prefix(aggregate_type, aggregate_id);
     key.push(SEP);
     key.extend_from_slice(&created_at.timestamp_millis().to_be_bytes());
     key
+}
+
+fn snapshot_prefix(aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
+    key_with_segments(&[PREFIX_SNAPSHOT, aggregate_type, aggregate_id])
 }
 
 fn parse_event_version(key: &[u8]) -> Result<u64> {
@@ -4585,5 +4827,159 @@ mod tests {
         assert_eq!(super::select_state_field(&map, "missing"), None);
         assert_eq!(super::select_state_field(&map, ""), None);
         assert_eq!(super::select_state_field(&map, "profile.scores.5"), None);
+    }
+
+    #[test]
+    fn reports_store_in_use_on_active_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let _holder = EventStore::open(path.clone(), None, 0).unwrap();
+
+        let result = EventStore::open(path, None, 0);
+        match result {
+            Err(EventError::Storage(message)) => {
+                let lower = message.to_ascii_lowercase();
+                assert!(
+                    lower.contains("in use") || lower.contains("lock"),
+                    "expected lock error message, got {message}"
+                );
+            }
+            Err(other) => panic!("expected storage error for active lock, got {other:?}"),
+            Ok(_) => panic!("expected store open to fail while lock is held"),
+        }
+    }
+
+    #[test]
+    fn recovers_after_lock_is_released() {
+        use std::{thread, time::Duration};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+
+        // Create the store so the directory exists before the holder grabs the lock.
+        EventStore::open(path.clone(), None, 0).unwrap();
+
+        let holder_path = path.clone();
+        let handle = thread::spawn(move || {
+            let store = EventStore::open(holder_path, None, 0).unwrap();
+            thread::sleep(Duration::from_millis(150));
+            drop(store);
+        });
+
+        thread::sleep(Duration::from_millis(25));
+        let reopened = EventStore::open(path.clone(), None, 0).unwrap();
+        drop(reopened);
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn snapshot_does_not_leave_lock_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+
+        {
+            let store = EventStore::open(path.clone(), None, 0).unwrap();
+            store
+                .append(AppendEvent {
+                    aggregate_type: "account".into(),
+                    aggregate_id: "acct-42".into(),
+                    event_type: "created".into(),
+                    payload: serde_json::json!({ "status": "active" }),
+                    metadata: None,
+                    issued_by: None,
+                    note: None,
+                })
+                .unwrap();
+            store
+                .create_snapshot("account", "acct-42", Some("first".into()))
+                .unwrap();
+        }
+
+        let reopened = EventStore::open(path, None, 0).unwrap();
+        let snapshot = reopened
+            .create_snapshot("account", "acct-42", Some("second".into()))
+            .unwrap();
+        assert_eq!(snapshot.aggregate_id, "acct-42");
+        assert_eq!(snapshot.aggregate_type, "account");
+    }
+
+    #[test]
+    fn list_snapshots_filters_by_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None, 0).unwrap();
+
+        store
+            .append(AppendEvent {
+                aggregate_type: "order".into(),
+                aggregate_id: "order-9".into(),
+                event_type: "created".into(),
+                payload: serde_json::json!({ "status": "new" }),
+                metadata: None,
+                issued_by: None,
+                note: None,
+            })
+            .unwrap();
+        store
+            .create_snapshot("order", "order-9", Some("v1".into()))
+            .unwrap();
+
+        store
+            .append(AppendEvent {
+                aggregate_type: "order".into(),
+                aggregate_id: "order-9".into(),
+                event_type: "updated".into(),
+                payload: serde_json::json!({ "status": "shipped" }),
+                metadata: None,
+                issued_by: None,
+                note: None,
+            })
+            .unwrap();
+        store
+            .create_snapshot("order", "order-9", Some("v2".into()))
+            .unwrap();
+
+        let all = store
+            .list_snapshots(Some("order"), Some("order-9"), None)
+            .expect("list snapshots");
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|s| s.version == 1));
+        assert!(all.iter().any(|s| s.version == 2));
+
+        let filtered = store
+            .list_snapshots(Some("order"), Some("order-9"), Some(1))
+            .expect("list snapshots by version");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].version, 1);
+    }
+
+    #[test]
+    fn list_snapshots_all_aggregates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None, 0).unwrap();
+
+        for agg_id in &["a-1", "b-2"] {
+            store
+                .append(AppendEvent {
+                    aggregate_type: "person".into(),
+                    aggregate_id: agg_id.to_string(),
+                    event_type: "created".into(),
+                    payload: serde_json::json!({ "name": agg_id }),
+                    metadata: None,
+                    issued_by: None,
+                    note: None,
+                })
+                .unwrap();
+            store
+                .create_snapshot("person", agg_id, Some("checkpoint".into()))
+                .unwrap();
+        }
+
+        let snapshots = store
+            .list_snapshots(None, None, None)
+            .expect("list all snapshots");
+        assert_eq!(snapshots.len(), 2);
     }
 }
