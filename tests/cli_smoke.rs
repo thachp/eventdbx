@@ -2775,6 +2775,27 @@ fn aggregate_snapshot_creates_record() -> Result<()> {
         serde_json::from_str(output.trim()).context("failed to parse snapshot output")?;
     assert_eq!(snapshot["aggregate_id"], json!("snap-1"));
     assert_eq!(snapshot["state"]["status"], json!("ready"));
+    assert!(
+        snapshot
+            .get("snapshot_id")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "snapshot_id should be present"
+    );
+    let list = cli.run(&["snapshots", "list"])?;
+    assert!(
+        list.contains("snapshot_id="),
+        "list output should include snapshot_id:\n{}",
+        list
+    );
+    let snapshot_id = snapshot["snapshot_id"]
+        .as_str()
+        .context("snapshot missing snapshot_id string")?;
+    let fetched = cli.run_json(&["snapshots", "get", snapshot_id, "--json"])?;
+    assert_eq!(fetched["snapshot_id"], json!(snapshot_id));
+    assert_eq!(fetched["aggregate_id"], json!("snap-1"));
+    assert_eq!(fetched["state"]["status"], json!("ready"));
     Ok(())
 }
 

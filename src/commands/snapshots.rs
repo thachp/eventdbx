@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use eventdbx::{
     config::{Config, load_or_default},
     error::EventError,
+    snowflake::SnowflakeId,
     store::{EventStore, SnapshotRecord},
     validation::{ensure_aggregate_id, ensure_snake_case},
 };
@@ -18,6 +19,8 @@ pub enum SnapshotsCommands {
     List(SnapshotsListArgs),
     /// Create a snapshot of an aggregate state
     Create(SnapshotsCreateArgs),
+    /// Fetch a snapshot by id
+    Get(SnapshotsGetArgs),
 }
 
 #[derive(Args)]
@@ -51,11 +54,22 @@ pub struct SnapshotsCreateArgs {
     pub comment: Option<String>,
 }
 
+#[derive(Args)]
+pub struct SnapshotsGetArgs {
+    /// Snapshot identifier (snowflake)
+    pub snapshot_id: String,
+
+    /// Emit result as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 pub fn execute(config_path: Option<PathBuf>, command: SnapshotsCommands) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     match command {
         SnapshotsCommands::List(args) => list_snapshots(&config, args),
         SnapshotsCommands::Create(args) => create_snapshot(&config, args),
+        SnapshotsCommands::Get(args) => get_snapshot(&config, args),
     }
 }
 
@@ -115,6 +129,28 @@ fn create_snapshot(config: &Config, args: SnapshotsCreateArgs) -> Result<()> {
     Ok(())
 }
 
+fn get_snapshot(config: &Config, args: SnapshotsGetArgs) -> Result<()> {
+    let snapshot_id: SnowflakeId = args
+        .snapshot_id
+        .parse()
+        .with_context(|| format!("snapshot_id {} is not a valid snowflake", args.snapshot_id))?;
+
+    let snapshot =
+        match EventStore::open_read_only(config.event_store_path(), config.encryption_key()?) {
+            Ok(store) => store.find_snapshot_by_id(snapshot_id)?,
+            Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
+                proxy_get_snapshot_via_socket(config, snapshot_id)?
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+    let Some(snapshot) = snapshot else {
+        bail!("snapshot {} not found", snapshot_id);
+    };
+
+    print_snapshot(&snapshot, args.json)
+}
+
 fn proxy_list_snapshots_via_socket(
     config: &Config,
     aggregate: Option<&str>,
@@ -131,6 +167,25 @@ fn proxy_list_snapshots_via_socket(
                 config.socket.bind_addr
             )
         })
+}
+
+fn proxy_get_snapshot_via_socket(
+    config: &Config,
+    snapshot_id: SnowflakeId,
+) -> Result<Option<SnapshotRecord>> {
+    let token = ensure_proxy_token(config, None)?;
+    let client = ServerClient::new(config)?;
+    let snapshots = client
+        .list_snapshots(&token, None, None, None)
+        .with_context(|| {
+            format!(
+                "failed to list snapshots via running server socket {}",
+                config.socket.bind_addr
+            )
+        })?;
+    Ok(snapshots
+        .into_iter()
+        .find(|snapshot| snapshot.snapshot_id == Some(snapshot_id)))
 }
 
 fn proxy_create_snapshot_via_socket(
@@ -165,7 +220,8 @@ fn print_snapshots(snapshots: &[SnapshotRecord], json: bool) -> Result<()> {
     for snapshot in snapshots {
         let comment = snapshot.comment.as_deref().unwrap_or_default();
         println!(
-            "aggregate_type={} aggregate_id={} version={} created_at={} comment=\"{}\"",
+            "snapshot_id={} aggregate_type={} aggregate_id={} version={} created_at={} comment=\"{}\"",
+            snapshot_id_display(snapshot),
             snapshot.aggregate_type,
             snapshot.aggregate_id,
             snapshot.version,
@@ -174,4 +230,31 @@ fn print_snapshots(snapshots: &[SnapshotRecord], json: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn print_snapshot(snapshot: &SnapshotRecord, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(snapshot)?);
+        return Ok(());
+    }
+    let comment = snapshot.comment.as_deref().unwrap_or_default();
+    println!(
+        "snapshot_id={} aggregate_type={} aggregate_id={} version={} created_at={} comment=\"{}\"\nstate={}\nmerkle_root={}",
+        snapshot_id_display(snapshot),
+        snapshot.aggregate_type,
+        snapshot.aggregate_id,
+        snapshot.version,
+        snapshot.created_at.to_rfc3339(),
+        comment,
+        serde_json::to_string_pretty(&snapshot.state)?,
+        snapshot.merkle_root,
+    );
+    Ok(())
+}
+
+fn snapshot_id_display(snapshot: &SnapshotRecord) -> String {
+    snapshot
+        .snapshot_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }

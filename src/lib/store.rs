@@ -1368,6 +1368,8 @@ pub struct Transaction<'a> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<SnowflakeId>,
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub version: u64,
@@ -1680,6 +1682,10 @@ impl EventStore {
     }
 
     fn next_event_id(&self) -> SnowflakeId {
+        self.next_snowflake_id()
+    }
+
+    fn next_snowflake_id(&self) -> SnowflakeId {
         let mut guard = self.id_generator.lock();
         guard.next_id()
     }
@@ -2304,6 +2310,7 @@ impl EventStore {
         let state = self.get_aggregate_state(aggregate_type, aggregate_id)?;
         let created_at = Utc::now();
         let record = SnapshotRecord {
+            snapshot_id: Some(self.next_snowflake_id()),
             aggregate_type: state.aggregate_type.clone(),
             aggregate_id: state.aggregate_id.clone(),
             version: state.version,
@@ -2361,6 +2368,37 @@ impl EventStore {
         let duration = start.elapsed().as_secs_f64();
         record_store_op(
             "rocksdb_list_snapshots",
+            if result.is_ok() { "ok" } else { "err" },
+            duration,
+        );
+        result
+    }
+
+    pub fn find_snapshot_by_id(&self, snapshot_id: SnowflakeId) -> Result<Option<SnapshotRecord>> {
+        let start = Instant::now();
+        let prefix = key_with_segments(&[PREFIX_SNAPSHOT]);
+        let result = (|| {
+            let iter = self
+                .db
+                .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+            for item in iter {
+                let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+                if !key.starts_with(prefix.as_slice()) {
+                    break;
+                }
+                let snapshot: SnapshotRecord = serde_json::from_slice(&value).map_err(|err| {
+                    EventError::Storage(format!("failed to deserialize snapshot: {err}"))
+                })?;
+                if snapshot.snapshot_id == Some(snapshot_id) {
+                    return Ok(Some(snapshot));
+                }
+            }
+            Ok(None)
+        })();
+
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_find_snapshot",
             if result.is_ok() { "ok" } else { "err" },
             duration,
         );
