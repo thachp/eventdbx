@@ -43,6 +43,7 @@ const PREFIX_STATE: &str = "state";
 const PREFIX_META_ARCHIVED: &str = "meta-arch";
 const PREFIX_STATE_ARCHIVED: &str = "state-arch";
 const PREFIX_SNAPSHOT: &str = "snapshot";
+const PREFIX_SNAPSHOT_ID: &str = "snapidx";
 const PREFIX_META_CREATED_INDEX: &str = "meta-created";
 const PREFIX_META_UPDATED_INDEX: &str = "meta-updated";
 const PREFIX_META_CREATED_INDEX_ARCHIVED: &str = "meta-created-arch";
@@ -1368,6 +1369,8 @@ pub struct Transaction<'a> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<SnowflakeId>,
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub version: u64,
@@ -1680,6 +1683,10 @@ impl EventStore {
     }
 
     fn next_event_id(&self) -> SnowflakeId {
+        self.next_snowflake_id()
+    }
+
+    fn next_snowflake_id(&self) -> SnowflakeId {
         let mut guard = self.id_generator.lock();
         guard.next_id()
     }
@@ -2304,6 +2311,7 @@ impl EventStore {
         let state = self.get_aggregate_state(aggregate_type, aggregate_id)?;
         let created_at = Utc::now();
         let record = SnapshotRecord {
+            snapshot_id: Some(self.next_snowflake_id()),
             aggregate_type: state.aggregate_type.clone(),
             aggregate_id: state.aggregate_id.clone(),
             version: state.version,
@@ -2315,8 +2323,14 @@ impl EventStore {
 
         let key = snapshot_key(aggregate_type, aggregate_id, created_at);
         self.db
-            .put(key, serde_json::to_vec(&record)?)
+            .put(key.clone(), serde_json::to_vec(&record)?)
             .map_err(|err| EventError::Storage(err.to_string()))?;
+        if let Some(snapshot_id) = record.snapshot_id {
+            let index_key = snapshot_index_key(snapshot_id);
+            self.db
+                .put(index_key, key)
+                .map_err(|err| EventError::Storage(err.to_string()))?;
+        }
 
         Ok(record)
     }
@@ -2361,6 +2375,58 @@ impl EventStore {
         let duration = start.elapsed().as_secs_f64();
         record_store_op(
             "rocksdb_list_snapshots",
+            if result.is_ok() { "ok" } else { "err" },
+            duration,
+        );
+        result
+    }
+
+    pub fn find_snapshot_by_id(&self, snapshot_id: SnowflakeId) -> Result<Option<SnapshotRecord>> {
+        let start = Instant::now();
+        let result = (|| {
+            // Fast path: use secondary index to jump to the snapshot key.
+            let index_key = snapshot_index_key(snapshot_id);
+            if let Some(snapshot_key) = self
+                .db
+                .get(index_key)
+                .map_err(|err| EventError::Storage(err.to_string()))?
+            {
+                let Some(value) = self
+                    .db
+                    .get(snapshot_key)
+                    .map_err(|err| EventError::Storage(err.to_string()))?
+                else {
+                    return Ok(None);
+                };
+                let snapshot: SnapshotRecord = serde_json::from_slice(&value).map_err(|err| {
+                    EventError::Storage(format!("failed to deserialize snapshot: {err}"))
+                })?;
+                return Ok(Some(snapshot));
+            }
+
+            // Backward-compatibility: scan in case the index is missing for older snapshots.
+            let prefix = key_with_segments(&[PREFIX_SNAPSHOT]);
+            let iter = self
+                .db
+                .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+            for item in iter {
+                let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+                if !key.starts_with(prefix.as_slice()) {
+                    break;
+                }
+                let snapshot: SnapshotRecord = serde_json::from_slice(&value).map_err(|err| {
+                    EventError::Storage(format!("failed to deserialize snapshot: {err}"))
+                })?;
+                if snapshot.snapshot_id == Some(snapshot_id) {
+                    return Ok(Some(snapshot));
+                }
+            }
+            Ok(None)
+        })();
+
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_find_snapshot",
             if result.is_ok() { "ok" } else { "err" },
             duration,
         );
@@ -4210,6 +4276,10 @@ fn snapshot_prefix(aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
     key_with_segments(&[PREFIX_SNAPSHOT, aggregate_type, aggregate_id])
 }
 
+fn snapshot_index_key(snapshot_id: SnowflakeId) -> Vec<u8> {
+    key_with_segments(&[PREFIX_SNAPSHOT_ID, &snapshot_id.to_string()])
+}
+
 fn parse_event_version(key: &[u8]) -> Result<u64> {
     if key.len() < 8 {
         return Err(EventError::Storage("event key too short".into()));
@@ -4648,6 +4718,12 @@ mod tests {
 
         let state = store.set_archive("order", "order-1", false, None).unwrap();
         assert!(!state.archived);
+
+        // Verify snapshot lookup by id uses index.
+        let found = store
+            .find_snapshot_by_id(snapshot.snapshot_id.expect("snapshot id"))
+            .unwrap();
+        assert!(found.is_some());
     }
 
     #[test]

@@ -17,6 +17,7 @@ use eventdbx::{
     config::Config,
     control_capnp::{control_hello, control_hello_response, control_request, control_response},
     schema::AggregateSchema,
+    snowflake::SnowflakeId,
     store::{AggregateState, EventRecord, SnapshotRecord},
 };
 use serde_json::{self, Value};
@@ -283,6 +284,23 @@ impl ServerClient {
             aggregate_id,
             version,
         )
+    }
+
+    pub fn get_snapshot(
+        &self,
+        token: &str,
+        snapshot_id: SnowflakeId,
+    ) -> Result<Option<SnapshotRecord>> {
+        let connect_addr = self.connect_addr.clone();
+        let tenant = self.tenant.clone();
+        let token = token.to_string();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return tokio::task::block_in_place(move || {
+                get_snapshot_blocking(connect_addr, tenant.clone(), token, snapshot_id)
+            });
+        }
+
+        get_snapshot_blocking(connect_addr, tenant, token, snapshot_id)
     }
 
     pub fn get_aggregate(
@@ -1455,6 +1473,65 @@ fn list_snapshots_blocking(
                 }
                 payload::ListSnapshots(Err(err)) => Err(anyhow!(
                     "failed to decode list_snapshots payload from CLI proxy: {}",
+                    err
+                )),
+                payload::Error(Ok(error)) => {
+                    let code = read_text(error.get_code(), "code")?;
+                    let message = read_text(error.get_message(), "message")?;
+                    Err(anyhow!("server returned {}: {}", code, message))
+                }
+                payload::Error(Err(err)) => Err(anyhow!(
+                    "failed to decode error payload from CLI proxy: {}",
+                    err
+                )),
+                _ => Err(anyhow!(
+                    "unexpected payload returned from CLI proxy response"
+                )),
+            }
+        },
+    )
+}
+
+fn get_snapshot_blocking(
+    connect_addr: String,
+    tenant: Option<String>,
+    token: String,
+    snapshot_id: SnowflakeId,
+) -> Result<Option<SnapshotRecord>> {
+    let request_id = next_request_id();
+
+    send_control_request_blocking(
+        &connect_addr,
+        &token,
+        tenant.as_deref(),
+        request_id,
+        |request| {
+            let payload_builder = request.reborrow().init_payload();
+            let mut req = payload_builder.init_get_snapshot();
+            req.set_token(&token);
+            req.set_snapshot_id(u64::from(snapshot_id));
+            Ok(())
+        },
+        |response| {
+            use control_response::payload;
+
+            match response
+                .get_payload()
+                .which()
+                .context("failed to decode get_snapshot response payload")?
+            {
+                payload::GetSnapshot(Ok(snapshot)) => {
+                    let found = snapshot.get_found();
+                    if !found {
+                        return Ok(None);
+                    }
+                    let json = read_text(snapshot.get_snapshot_json(), "snapshot_json")?;
+                    let parsed: SnapshotRecord = serde_json::from_str(&json)
+                        .context("failed to parse get_snapshot response payload")?;
+                    Ok(Some(parsed))
+                }
+                payload::GetSnapshot(Err(err)) => Err(anyhow!(
+                    "failed to decode get_snapshot payload from CLI proxy: {}",
                     err
                 )),
                 payload::Error(Ok(error)) => {

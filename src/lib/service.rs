@@ -9,6 +9,7 @@ use crate::{
     filter::FilterExpr,
     restrict::{self, RestrictMode},
     schema::SchemaManager,
+    snowflake::SnowflakeId,
     store::{
         self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState,
         AppendEvent, EventArchiveScope, EventCursor, EventQueryScope, EventRecord, EventStore,
@@ -488,6 +489,26 @@ impl CoreContext {
                 Some(snapshot)
             })
             .collect())
+    }
+
+    pub fn find_snapshot_by_id(
+        &self,
+        token: &str,
+        snapshot_id: SnowflakeId,
+    ) -> Result<Option<SnapshotRecord>> {
+        let Some(mut snapshot) = self.store.find_snapshot_by_id(snapshot_id)? else {
+            return Ok(None);
+        };
+
+        if self.is_hidden_aggregate(&snapshot.aggregate_type) {
+            return Ok(None);
+        }
+
+        let resource = Self::aggregate_resource(&snapshot.aggregate_type, &snapshot.aggregate_id);
+        self.tokens()
+            .authorize_action(token, "aggregate.read", Some(resource.as_str()))?;
+        snapshot.state = self.filter_state_map(&snapshot.aggregate_type, snapshot.state.clone());
+        Ok(Some(snapshot))
     }
 
     pub fn append_event(&self, input: AppendEventInput) -> Result<EventRecord> {

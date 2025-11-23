@@ -3,12 +3,14 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use assert_cmd::{Command, cargo::cargo_bin_cmd};
+use base64::Engine as _;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use chrono::{DateTime, Utc};
 use eventdbx::{
-    plugin::queue::PluginQueueStore, snowflake::SnowflakeId, validation::MAX_EVENT_PAYLOAD_BYTES,
+    plugin::queue::PluginQueueStore, snowflake::SnowflakeId, token::JwtClaims,
+    validation::MAX_EVENT_PAYLOAD_BYTES,
 };
 
 struct CliTest {
@@ -56,6 +58,19 @@ macro_rules! cli_success_contains_test {
             Ok(())
         }
     };
+}
+
+fn decode_jwt_claims(token: &str) -> Result<JwtClaims> {
+    let parts: Vec<&str> = token.trim().split('.').collect();
+    if parts.len() != 3 {
+        anyhow::bail!("token must contain three segments");
+    }
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .context("failed to decode token payload")?;
+    let claims: JwtClaims =
+        serde_json::from_slice(&payload).context("failed to parse token claims")?;
+    Ok(claims)
 }
 
 impl CliTest {
@@ -302,6 +317,15 @@ fn token_bootstrap_writes_file_by_default() -> Result<()> {
         "expected bootstrap token written to disk to contain three segments, got: {}",
         token
     );
+    let claims = decode_jwt_claims(token)?;
+    let exp = claims
+        .exp
+        .ok_or_else(|| anyhow::anyhow!("bootstrap token missing expiration in claims"))?;
+    let ttl_secs = exp - claims.iat;
+    assert!(
+        (ttl_secs - 7_200).abs() <= 2,
+        "expected bootstrap token TTL close to 7200 seconds, got {ttl_secs}"
+    );
     Ok(())
 }
 
@@ -324,6 +348,39 @@ fn token_bootstrap_stdout_prints_token_without_writing_file() -> Result<()> {
         "expected --stdout bootstrap to skip writing {}, but file exists",
         token_path.display()
     );
+    Ok(())
+}
+
+#[test]
+fn token_bootstrap_override_expires() -> Result<()> {
+    let cli = CliTest::new()?;
+    let token_path = cli.data_dir().join("cli.token");
+    if token_path.exists() {
+        fs::remove_file(&token_path).context("failed to remove existing cli.token")?;
+    }
+    let mut config = cli.load_config()?;
+    config.auth.clock_skew_secs = 0;
+    fs::write(cli.config_path(), toml::to_string(&config)?)
+        .context("failed to write updated config")?;
+
+    let stdout = cli.run(&["token", "bootstrap", "--stdout", "--ttl", "1"])?;
+    let token = stdout.trim();
+    let claims = decode_jwt_claims(token)?;
+    assert_eq!(
+        claims.exp.map(|exp| exp - claims.iat),
+        Some(1),
+        "TTL override should propagate to bootstrap token"
+    );
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let failure = cli.run_failure(&["token", "refresh", "--token", token])?;
+    assert!(
+        failure.stderr.contains("token has expired") || failure.stderr.contains("token_expired"),
+        "expected expiration error after TTL\nstdout:\n{}\nstderr:\n{}",
+        failure.stdout,
+        failure.stderr
+    );
+
     Ok(())
 }
 
@@ -2718,6 +2775,27 @@ fn aggregate_snapshot_creates_record() -> Result<()> {
         serde_json::from_str(output.trim()).context("failed to parse snapshot output")?;
     assert_eq!(snapshot["aggregate_id"], json!("snap-1"));
     assert_eq!(snapshot["state"]["status"], json!("ready"));
+    assert!(
+        snapshot
+            .get("snapshot_id")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "snapshot_id should be present"
+    );
+    let list = cli.run(&["snapshots", "list"])?;
+    assert!(
+        list.contains("snapshot_id="),
+        "list output should include snapshot_id:\n{}",
+        list
+    );
+    let snapshot_id = snapshot["snapshot_id"]
+        .as_str()
+        .context("snapshot missing snapshot_id string")?;
+    let fetched = cli.run_json(&["snapshots", "get", snapshot_id, "--json"])?;
+    assert_eq!(fetched["snapshot_id"], json!(snapshot_id));
+    assert_eq!(fetched["aggregate_id"], json!("snap-1"));
+    assert_eq!(fetched["state"]["status"], json!("ready"));
     Ok(())
 }
 

@@ -25,6 +25,7 @@ struct ControlRequest {
     tenantSchemaPublish @18 :Schema.TenantSchemaPublishRequest;
     createSnapshot @19 :CreateSnapshotRequest;
     listSnapshots @20 :ListSnapshotsRequest;
+    getSnapshot @21 :GetSnapshotRequest;
   }
 }
 
@@ -51,6 +52,7 @@ struct ControlResponse {
     tenantSchemaPublish @18 :Schema.TenantSchemaPublishResponse;
     createSnapshot @19 :CreateSnapshotResponse;
     listSnapshots @20 :ListSnapshotsResponse;
+    getSnapshot @21 :GetSnapshotResponse;
   }
 }
 
@@ -216,6 +218,16 @@ struct ListSnapshotsRequest {
 
 struct ListSnapshotsResponse {
   snapshotsJson @0 :Text;
+}
+
+struct GetSnapshotRequest {
+  token @0 :Text;
+  snapshotId @1 :UInt64;
+}
+
+struct GetSnapshotResponse {
+  found @0 :Bool;
+  snapshotJson @1 :Text;
 }
 
 struct ControlError {

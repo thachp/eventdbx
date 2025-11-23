@@ -643,11 +643,11 @@ impl<'a> Lexer<'a> {
 }
 
 fn is_identifier_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_' || ch == '$'
+    ch.is_ascii_alphabetic() || ch == '_' || ch == '$' || ch == '@'
 }
 
 fn is_identifier_part(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '$'
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '$' || ch == '@'
 }
 
 struct Parser {
@@ -1047,6 +1047,24 @@ mod tests {
 
         let expr = parse_shorthand(r#"name.first = "Jane""#).expect("parse succeeds");
         assert!(!expr.matches_aggregate(&aggregate));
+    }
+
+    #[test]
+    fn parse_shorthand_allows_at_prefixed_segments() {
+        let expr = parse_shorthand(r#"extensions.@trace.correlation_id = "cli-22""#)
+            .expect("parse succeeds");
+        match expr {
+            FilterExpr::Comparison { field, op } => {
+                assert_eq!(field, "extensions.@trace.correlation_id");
+                match op {
+                    ComparisonOp::Equals(FilterValue::String(value)) => {
+                        assert_eq!(value, "cli-22");
+                    }
+                    _ => panic!("expected string equals comparison"),
+                }
+            }
+            _ => panic!("expected comparison expression"),
+        }
     }
 
     #[test]

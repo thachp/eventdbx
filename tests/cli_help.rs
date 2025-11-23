@@ -227,6 +227,10 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "Create a snapshot of an aggregate state",
     },
     HelpCase {
+        path: &["snapshots", "get"],
+        expected_snippet: "Fetch a snapshot by id",
+    },
+    HelpCase {
         path: &["upgrade"],
         expected_snippet: "Upgrade or switch the EventDBX CLI binary",
     },

@@ -43,6 +43,7 @@ use crate::{
         AppendEventInput, CoreContext, CreateAggregateInput, SetAggregateArchiveInput,
         normalize_optional_note,
     },
+    snowflake::SnowflakeId,
     store::{
         self, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState, EventCursor,
         EventRecord,
@@ -92,6 +93,10 @@ enum ControlReply {
     },
     ListSnapshots {
         snapshots_json: String,
+    },
+    GetSnapshot {
+        found: bool,
+        snapshot_json: Option<String>,
     },
     ListSchemas(String),
     ReplaceSchemas(u32),
@@ -199,6 +204,10 @@ enum ControlCommand {
         aggregate_type: Option<String>,
         aggregate_id: Option<String>,
         version: Option<u64>,
+    },
+    GetSnapshot {
+        token: String,
+        snapshot_id: SnowflakeId,
     },
     ListSchemas {
         token: String,
@@ -324,6 +333,7 @@ fn control_command_name(command: &ControlCommand) -> &'static str {
         ControlCommand::SetAggregateArchive { .. } => "set_aggregate_archive",
         ControlCommand::CreateSnapshot { .. } => "create_snapshot",
         ControlCommand::ListSnapshots { .. } => "list_snapshots",
+        ControlCommand::GetSnapshot { .. } => "get_snapshot",
         ControlCommand::ListSchemas { .. } => "list_schemas",
         ControlCommand::ReplaceSchemas { .. } => "replace_schemas",
         ControlCommand::TenantAssign { .. } => "tenant_assign",
@@ -983,6 +993,18 @@ where
                                 let mut builder = payload.init_create_snapshot();
                                 builder.set_snapshot_json(&snapshot_json);
                             }
+                            ControlReply::GetSnapshot {
+                                found,
+                                snapshot_json,
+                            } => {
+                                let mut builder = payload.init_get_snapshot();
+                                builder.set_found(found);
+                                if let Some(json) = snapshot_json {
+                                    builder.set_snapshot_json(&json);
+                                } else {
+                                    builder.set_snapshot_json("");
+                                }
+                            }
                             ControlReply::ListSnapshots { snapshots_json } => {
                                 let mut builder = payload.init_list_snapshots();
                                 builder.set_snapshots_json(&snapshots_json);
@@ -1464,6 +1486,16 @@ fn parse_control_command(
                 version,
             })
         }
+        payload::GetSnapshot(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            Ok(ControlCommand::GetSnapshot {
+                token,
+                snapshot_id: SnowflakeId::from_u64(req.get_snapshot_id()),
+            })
+        }
         payload::ListSchemas(req) => {
             let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
             let token = read_control_text(req.get_token(), "token")?
@@ -1942,6 +1974,25 @@ async fn execute_control_command(
 
             let snapshots_json = serde_json::to_string(&snapshots)?;
             Ok(ControlReply::ListSnapshots { snapshots_json })
+        }
+        ControlCommand::GetSnapshot { token, snapshot_id } => {
+            let snapshot = spawn_blocking({
+                let core = core.clone();
+                let token = token.clone();
+                move || core.find_snapshot_by_id(&token, snapshot_id)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("get snapshot task failed: {err}")))??;
+
+            let (found, snapshot_json) = if let Some(snapshot) = snapshot {
+                (true, Some(serde_json::to_string(&snapshot)?))
+            } else {
+                (false, None)
+            };
+            Ok(ControlReply::GetSnapshot {
+                found,
+                snapshot_json,
+            })
         }
         ControlCommand::ListSchemas { token } => {
             let tokens = core.tokens();
