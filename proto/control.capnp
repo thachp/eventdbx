@@ -126,6 +126,8 @@ struct AppendEventRequest {
   hasNote @6 :Bool;
   metadataJson @7 :Text;
   hasMetadata @8 :Bool;
+  publishTargets @9 :List(PublishTarget);
+  hasPublishTargets @10 :Bool;
 }
 
 struct AppendEventResponse {
@@ -142,6 +144,8 @@ struct PatchEventRequest {
   hasNote @6 :Bool;
   metadataJson @7 :Text;
   hasMetadata @8 :Bool;
+  publishTargets @9 :List(PublishTarget);
+  hasPublishTargets @10 :Bool;
 }
 
 struct VerifyAggregateRequest {
@@ -175,6 +179,8 @@ struct CreateAggregateRequest {
   hasNote @6 :Bool;
   metadataJson @7 :Text;
   hasMetadata @8 :Bool;
+  publishTargets @9 :List(PublishTarget);
+  hasPublishTargets @10 :Bool;
 }
 
 struct CreateAggregateResponse {
@@ -204,6 +210,14 @@ struct CreateSnapshotRequest {
 
 struct CreateSnapshotResponse {
   snapshotJson @0 :Text;
+}
+
+struct PublishTarget {
+  plugin @0 :Text;
+  mode @1 :Text;
+  hasMode @2 :Bool;
+  priority @3 :Text;
+  hasPriority @4 :Bool;
 }
 
 struct ListSnapshotsRequest {

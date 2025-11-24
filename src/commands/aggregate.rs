@@ -16,11 +16,11 @@ use tempfile::tempdir;
 use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
 use eventdbx::{
-    config::{Config, load_or_default},
+    config::{Config, PluginPayloadMode, load_or_default},
     error::EventError,
     filter,
     merkle::compute_merkle_root,
-    plugin::PluginManager,
+    plugin::{JobPriority, PluginManager, PublishTarget},
     restrict,
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
@@ -41,6 +41,13 @@ use eventdbx::restrict::RestrictMode;
 use crate::commands::{cli_token, client::ServerClient, is_lock_error_message};
 use tracing::warn;
 
+#[derive(Clone, Debug)]
+pub struct PublishTargetArg {
+    pub plugin: String,
+    pub mode: Option<PluginPayloadMode>,
+    pub priority: Option<JobPriority>,
+}
+
 #[derive(Subcommand)]
 pub enum AggregateCommands {
     /// Create a new aggregate instance
@@ -55,8 +62,6 @@ pub enum AggregateCommands {
     Select(AggregateSelectArgs),
     /// Retrieve the state of an aggregate
     Get(AggregateGetArgs),
-    /// Replay events for an aggregate instance
-    Replay(AggregateReplayArgs),
     /// Verify an aggregate's Merkle root
     Verify(AggregateVerifyArgs),
     /// Archive an aggregate instance
@@ -106,6 +111,10 @@ pub struct AggregateCreateArgs {
     /// Emit results as JSON
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Explicit plugin publish targets as PLUGIN[:MODE[:PRIORITY]]
+    #[arg(long, value_parser = parse_publish_target, value_name = "PLUGIN[:MODE[:PRIORITY]]")]
+    pub publish: Vec<PublishTargetArg>,
 }
 
 #[derive(Args)]
@@ -142,6 +151,10 @@ pub struct AggregateApplyArgs {
     /// Optional note associated with the event (up to 128 characters)
     #[arg(long, value_name = "NOTE")]
     pub note: Option<String>,
+
+    /// Explicit plugin publish targets as PLUGIN[:MODE[:PRIORITY]]
+    #[arg(long, value_parser = parse_publish_target, value_name = "PLUGIN[:MODE[:PRIORITY]]")]
+    pub publish: Vec<PublishTargetArg>,
 }
 
 #[derive(Args)]
@@ -174,6 +187,10 @@ pub struct AggregatePatchArgs {
     /// Optional note associated with the event (up to 128 characters)
     #[arg(long, value_name = "NOTE")]
     pub note: Option<String>,
+
+    /// Explicit plugin publish targets as PLUGIN[:MODE[:PRIORITY]] for this patch
+    #[arg(long, value_parser = parse_publish_target, value_name = "PLUGIN[:MODE[:PRIORITY]]")]
+    pub publish: Vec<PublishTargetArg>,
 }
 
 #[derive(Args)]
@@ -191,27 +208,6 @@ pub struct AggregateGetArgs {
     /// Include event history in the output
     #[arg(long, default_value_t = false)]
     pub include_events: bool,
-}
-
-#[derive(Args)]
-pub struct AggregateReplayArgs {
-    /// Aggregate type
-    pub aggregate: String,
-
-    /// Aggregate identifier
-    pub aggregate_id: String,
-
-    /// Number of events to skip
-    #[arg(long, default_value_t = 0)]
-    pub skip: usize,
-
-    /// Number of events to return
-    #[arg(long)]
-    pub take: Option<usize>,
-
-    /// Emit results as JSON
-    #[arg(long, default_value_t = false)]
-    pub json: bool,
 }
 
 #[derive(Args)]
@@ -361,6 +357,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 note,
                 token,
                 json,
+                publish,
             } = args;
 
             if payload_arg.is_some() && !fields.is_empty() {
@@ -391,6 +388,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 note,
                 token,
                 json,
+                publish,
             };
 
             execute_create_command(&config, command)?;
@@ -723,6 +721,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 payload: payload_arg,
                 metadata,
                 note,
+                publish,
             } = args;
             if payload_arg.is_some() && !fields.is_empty() {
                 bail!("--payload cannot be used together with --field");
@@ -753,6 +752,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 patch: None,
                 metadata: metadata_value,
                 note,
+                publish,
             };
 
             execute_append_command(&config, command)?;
@@ -767,6 +767,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 patch,
                 metadata,
                 note,
+                publish,
             } = args;
 
             let patch_value = serde_json::from_str::<Value>(&patch)
@@ -789,6 +790,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 patch: Some(patch_value),
                 metadata: metadata_value,
                 note,
+                publish,
             };
 
             execute_append_command(&config, command)?;
@@ -818,25 +820,6 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             });
 
             println!("{}", serde_json::to_string_pretty(&output)?);
-        }
-        AggregateCommands::Replay(args) => {
-            let store =
-                EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
-            let events = store.list_events(&args.aggregate, &args.aggregate_id)?;
-            let iter = events.into_iter().skip(args.skip);
-            let events: Vec<_> = if let Some(limit) = args.take {
-                iter.take(limit).collect()
-            } else {
-                iter.collect()
-            };
-
-            if args.json {
-                println!("{}", serde_json::to_string_pretty(&events)?);
-            } else {
-                for event in events {
-                    println!("{}", serde_json::to_string_pretty(&event)?);
-                }
-            }
         }
         AggregateCommands::Verify(args) => {
             let store =
@@ -1046,6 +1029,7 @@ struct CreateCommand {
     note: Option<String>,
     token: Option<String>,
     json: bool,
+    publish: Vec<PublishTargetArg>,
 }
 
 fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()> {
@@ -1058,6 +1042,7 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
         note,
         token,
         json,
+        publish,
     } = command;
 
     let verbose = config.verbose_responses();
@@ -1096,6 +1081,9 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
         None
     };
     let encryption = config.encryption_key()?;
+    let publish_targets = build_publish_targets(&publish)?;
+    let publish_slice = (!publish_targets.is_empty()).then_some(publish_targets.as_slice());
+
     match EventStore::open(
         config.event_store_path(),
         encryption,
@@ -1135,9 +1123,12 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
                 let schema = schema_manager.get(&record.aggregate_type).ok();
                 match store.get_aggregate_state(&record.aggregate_type, &record.aggregate_id) {
                     Ok(current_state) => {
-                        if let Err(err) =
-                            plugins.notify_event(&record, &current_state, schema.as_ref())
-                        {
+                        if let Err(err) = plugins.notify_event_for_targets(
+                            &record,
+                            &current_state,
+                            schema.as_ref(),
+                            publish_slice,
+                        ) {
                             eprintln!("plugin notification failed: {}", err);
                         }
                     }
@@ -1166,6 +1157,11 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
             Ok(())
         }
         Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
+            if publish_slice.is_some() {
+                bail!(
+                    "explicit publish targets are not supported when proxying to a running server"
+                );
+            }
             let state = proxy_create_via_socket(
                 config,
                 token,
@@ -1208,6 +1204,7 @@ struct AppendCommand {
     patch: Option<Value>,
     metadata: Option<Value>,
     note: Option<String>,
+    publish: Vec<PublishTargetArg>,
 }
 
 fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()> {
@@ -1221,6 +1218,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
         patch,
         metadata,
         note,
+        publish,
     } = command;
 
     let verbose = config.verbose_responses();
@@ -1260,7 +1258,13 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
         }
     }
 
+    let publish_targets = build_publish_targets(&publish)?;
+    let publish_slice = (!publish_targets.is_empty()).then_some(publish_targets.as_slice());
+
     if stage {
+        if publish_slice.is_some() {
+            bail!("--publish cannot be combined with --stage");
+        }
         match EventStore::open(
             config.event_store_path(),
             config.encryption_key()?,
@@ -1388,9 +1392,12 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 let schema = schema_manager.get(&record.aggregate_type).ok();
                 match store.get_aggregate_state(&record.aggregate_type, &record.aggregate_id) {
                     Ok(current_state) => {
-                        if let Err(err) =
-                            plugins.notify_event(&record, &current_state, schema.as_ref())
-                        {
+                        if let Err(err) = plugins.notify_event_for_targets(
+                            &record,
+                            &current_state,
+                            schema.as_ref(),
+                            publish_slice,
+                        ) {
                             eprintln!("plugin notification failed: {}", err);
                         }
                     }
@@ -1405,6 +1412,11 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
             Ok(())
         }
         Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
+            if publish_slice.is_some() {
+                bail!(
+                    "explicit publish targets are not supported when proxying to a running server"
+                );
+            }
             let record = proxy_append_via_socket(
                 config,
                 token,
@@ -1591,6 +1603,76 @@ fn normalize_token(token: String) -> Option<String> {
         Some(trimmed.to_string())
     }
 }
+
+fn parse_publish_target(raw: &str) -> std::result::Result<PublishTargetArg, String> {
+    let parts: Vec<&str> = raw.split(':').collect();
+    if parts.is_empty() {
+        return Err("publish target cannot be empty".into());
+    }
+    if parts.len() > 3 {
+        return Err("publish target format is PLUGIN[:MODE[:PRIORITY]]".into());
+    }
+    let plugin = parts[0].trim();
+    if plugin.is_empty() {
+        return Err("publish target name cannot be empty".into());
+    }
+
+    let mode = parts.get(1).and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        parse_publish_mode(trimmed).ok()
+    });
+
+    let priority = parts.get(2).and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        parse_publish_priority(trimmed).ok()
+    });
+
+    Ok(PublishTargetArg {
+        plugin: plugin.to_string(),
+        mode,
+        priority,
+    })
+}
+
+fn parse_publish_mode(raw: &str) -> std::result::Result<PluginPayloadMode, String> {
+    match raw.to_ascii_lowercase().as_str() {
+        "all" => Ok(PluginPayloadMode::All),
+        "event-only" => Ok(PluginPayloadMode::EventOnly),
+        "state-only" => Ok(PluginPayloadMode::StateOnly),
+        "schema-only" => Ok(PluginPayloadMode::SchemaOnly),
+        "event-and-schema" => Ok(PluginPayloadMode::EventAndSchema),
+        "extensions-only" => Ok(PluginPayloadMode::ExtensionsOnly),
+        other => Err(format!("invalid publish mode '{}'", other)),
+    }
+}
+
+fn parse_publish_priority(raw: &str) -> std::result::Result<JobPriority, String> {
+    match raw.to_ascii_lowercase().as_str() {
+        "low" => Ok(JobPriority::Low),
+        "normal" => Ok(JobPriority::Normal),
+        "high" => Ok(JobPriority::High),
+        other => Err(format!("invalid publish priority '{}'", other)),
+    }
+}
+
+fn build_publish_targets(inputs: &[PublishTargetArg]) -> Result<Vec<PublishTarget>> {
+    let mut targets = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        targets.push(PublishTarget {
+            plugin: input.plugin.clone(),
+            mode: input.mode,
+            priority: input.priority,
+        });
+    }
+    Ok(targets)
+}
+
 fn export_aggregates(config: &Config, args: AggregateExportArgs) -> Result<()> {
     let AggregateExportArgs {
         aggregate,

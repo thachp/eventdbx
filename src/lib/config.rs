@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     env, fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -278,7 +279,16 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
         let auth_updated = cfg.ensure_auth_keys()?;
         cfg.ensure_data_dir()?;
         let migrated = cfg.migrate_plugins()?;
-        if updated || migrated || auth_updated {
+        let plugins_relocated = cfg.migrate_plugin_config_to_root()?;
+        let queue_relocated = cfg.migrate_plugin_queue_to_root()?;
+        let runtime_relocated = cfg.migrate_plugin_runtime_to_root()?;
+        if updated
+            || migrated
+            || auth_updated
+            || plugins_relocated
+            || queue_relocated
+            || runtime_relocated
+        {
             cfg.save(&config_path)?;
         }
         Ok((cfg, config_path))
@@ -288,6 +298,9 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
         cfg.ensure_auth_keys()?;
         cfg.ensure_data_dir()?;
         let _ = cfg.migrate_plugins()?;
+        let _ = cfg.migrate_plugin_config_to_root()?;
+        let _ = cfg.migrate_plugin_queue_to_root()?;
+        let _ = cfg.migrate_plugin_runtime_to_root()?;
         cfg.save(&config_path)?;
         Ok((cfg, config_path))
     }
@@ -582,14 +595,26 @@ impl Config {
     }
 
     pub fn plugins_path(&self) -> PathBuf {
+        self.data_dir.join("plugins.json")
+    }
+
+    pub fn legacy_plugins_path(&self) -> PathBuf {
         self.domain_data_dir().join("plugins.json")
     }
 
     pub fn plugin_queue_path(&self) -> PathBuf {
+        self.data_dir.join("plugin_queue.json")
+    }
+
+    pub fn legacy_plugin_queue_path(&self) -> PathBuf {
         self.domain_data_dir().join("plugin_queue.json")
     }
 
     pub fn plugin_queue_db_path(&self) -> PathBuf {
+        self.data_dir.join("plugin_queue.db")
+    }
+
+    pub fn legacy_plugin_queue_db_path(&self) -> PathBuf {
         self.domain_data_dir().join("plugin_queue.db")
     }
 
@@ -613,11 +638,21 @@ impl Config {
     }
 
     pub fn load_plugins(&self) -> Result<Vec<PluginDefinition>> {
+        self.migrate_plugin_config_to_root()?;
+
         let path = self.plugins_path();
         if !path.exists() {
-            return Ok(Vec::new());
+            let legacy_path = self.legacy_plugins_path();
+            if !legacy_path.exists() {
+                return Ok(Vec::new());
+            }
+            return self.load_plugins_from(&legacy_path);
         }
 
+        self.load_plugins_from(&path)
+    }
+
+    fn load_plugins_from(&self, path: &Path) -> Result<Vec<PluginDefinition>> {
         let contents = fs::read_to_string(&path)?;
         if contents.trim().is_empty() {
             return Ok(Vec::new());
@@ -635,6 +670,36 @@ impl Config {
         let payload = serde_json::to_string_pretty(plugins)?;
         fs::write(path, payload)?;
         Ok(())
+    }
+
+    pub fn migrate_plugin_config_to_root(&self) -> Result<bool> {
+        let source = self.legacy_plugins_path();
+        let dest = self.plugins_path();
+        migrate_path_if_absent(&source, &dest)
+    }
+
+    pub fn migrate_plugin_queue_to_root(&self) -> Result<bool> {
+        let mut migrated = false;
+
+        let legacy_json = self.legacy_plugin_queue_path();
+        let json_dest = self.plugin_queue_path();
+        if migrate_path_if_absent(&legacy_json, &json_dest)? {
+            migrated = true;
+        }
+
+        let legacy_db = self.legacy_plugin_queue_db_path();
+        let db_dest = self.plugin_queue_db_path();
+        if migrate_path_if_absent(&legacy_db, &db_dest)? {
+            migrated = true;
+        }
+
+        Ok(migrated)
+    }
+
+    pub fn migrate_plugin_runtime_to_root(&self) -> Result<bool> {
+        let legacy_run = self.domain_data_dir().join("plugins").join("run");
+        let dest = self.data_dir.join("plugins").join("run");
+        migrate_path_if_absent(&legacy_run, &dest)
     }
 }
 
@@ -797,7 +862,6 @@ fn default_emit_events() -> bool {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginConfig {
     Tcp(TcpPluginConfig),
-    Capnp(CapnpPluginConfig),
     Http(HttpPluginConfig),
     Log(LogPluginConfig),
     Process(ProcessPluginConfig),
@@ -807,7 +871,6 @@ impl PluginConfig {
     pub fn kind(&self) -> PluginKind {
         match self {
             PluginConfig::Tcp(_) => PluginKind::Tcp,
-            PluginConfig::Capnp(_) => PluginKind::Capnp,
             PluginConfig::Http(_) => PluginKind::Http,
             PluginConfig::Log(_) => PluginKind::Log,
             PluginConfig::Process(_) => PluginKind::Process,
@@ -819,7 +882,6 @@ impl PluginConfig {
 #[serde(rename_all = "lowercase")]
 pub enum PluginKind {
     Tcp,
-    Capnp,
     Http,
     Log,
     Process,
@@ -862,12 +924,6 @@ impl PluginPayloadMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpPluginConfig {
-    pub host: String,
-    pub port: u16,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapnpPluginConfig {
     pub host: String,
     pub port: u16,
 }
@@ -977,4 +1033,86 @@ mod tests {
         let payload = toml::to_string(&config).expect("config should serialize");
         assert!(payload.contains("restrict = \"strict\""));
     }
+}
+
+fn migrate_path_if_absent(source: &Path, dest: &Path) -> Result<bool> {
+    if dest.exists() || !source.exists() {
+        return Ok(false);
+    }
+
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    if let Err(err) = fs::rename(source, dest) {
+        copy_path_recursively(source, dest).map_err(|copy_err| {
+            EventError::Config(format!(
+                "failed to move {} to {} (rename error: {}; copy error: {})",
+                source.display(),
+                dest.display(),
+                err,
+                copy_err
+            ))
+        })?;
+
+        // Clean up the legacy path after a successful copy to avoid duplicate configs.
+        match fs::metadata(source) {
+            Ok(metadata) => {
+                let cleanup = if metadata.is_dir() {
+                    fs::remove_dir_all(source)
+                } else {
+                    fs::remove_file(source).or_else(|remove_err| {
+                        if remove_err.kind() == ErrorKind::NotFound {
+                            Ok(())
+                        } else {
+                            Err(remove_err)
+                        }
+                    })
+                };
+
+                if let Err(remove_err) = cleanup {
+                    return Err(EventError::Config(format!(
+                        "migrated {} to {} but failed to remove legacy source: {}",
+                        source.display(),
+                        dest.display(),
+                        remove_err
+                    )));
+                }
+            }
+            Err(meta_err) if meta_err.kind() == ErrorKind::NotFound => return Ok(true),
+            Err(meta_err) => {
+                return Err(EventError::Config(format!(
+                    "migrated {} to {} but failed to inspect legacy source: {}",
+                    source.display(),
+                    dest.display(),
+                    meta_err
+                )));
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+fn copy_path_recursively(source: &Path, dest: &Path) -> Result<()> {
+    let metadata = fs::metadata(source)?;
+    if metadata.is_dir() {
+        fs::create_dir_all(dest)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let child_source = entry.path();
+            let child_dest = dest.join(entry.file_name());
+            copy_path_recursively(&child_source, &child_dest)?;
+        }
+    } else {
+        fs::copy(source, dest).map_err(|err| {
+            EventError::Config(format!(
+                "failed to copy {} to {}: {}",
+                source.display(),
+                dest.display(),
+                err
+            ))
+        })?;
+    }
+    Ok(())
 }

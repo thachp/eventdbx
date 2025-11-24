@@ -74,7 +74,6 @@ Run without flags to print the current configuration. The first invocation must 
 - `dbx aggregate patch --aggregate <type> --aggregate-id <id> --event <name> --patch <json> [--stage] [--metadata <json>] [--note <text>]`
 - `dbx aggregate list [--cursor <token>] [--take <n>] [--stage]`
 - `dbx aggregate get --aggregate <type> --aggregate-id <id> [--include-events]`
-- `dbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
 - `dbx aggregate verify --aggregate <type> --aggregate-id <id>`
 - `dbx aggregate snapshot --aggregate <type> --aggregate-id <id> [--comment <text>]`
 - `dbx aggregate archive|restore --aggregate <type> --aggregate-id <id>`
@@ -90,7 +89,7 @@ Timestamp-sorted listings accept `ts:<field>:<order>:<scope>:<timestamp_ms>:<agg
 ## Plugins & queues
 
 - `dbx plugin install <plugin> <version> --source <path|url> [--bin <file>] [--checksum <sha256>] [--force]`
-- `dbx plugin config <type> …` – Configure `tcp`, `http`, `capnp`, `log`, or `process` emitters. Every `plugin config` command accepts `--payload <all|event-only|state-only|schema-only|event-and-schema|extensions-only>` so each plugin receives only the portions of the job it needs. For process plugins, add `--emit-events=<true|false>` when you need the worker running but do not want it to enqueue events.
+- `dbx plugin config <type> …` – Configure `tcp`, `http`, `log`, or `process` emitters. Every `plugin config` command accepts `--payload <all|event-only|state-only|schema-only|event-and-schema|extensions-only>` so each plugin receives only the portions of the job it needs. For process plugins, add `--emit-events=<true|false>` when you need the worker running but do not want it to enqueue events.
 - `dbx plugin enable <name>` / `dbx plugin disable <name>`
 - `dbx plugin test [<name>…]`
 - `dbx plugin start <name> [--foreground]`
@@ -98,7 +97,7 @@ Timestamp-sorted listings accept `ts:<field>:<order>:<scope>:<timestamp_ms>:<agg
 - `dbx plugin status [<name>]`
 - `dbx plugin remove <name> [--disable]`
 - `dbx plugin list`
-- `dbx plugin replay <plugin> <aggregate> [<aggregate_id>]`
+- `dbx plugin replay <plugin> <aggregate> [<aggregate_id>] [--payload-mode <all|event-only|state-only|schema-only|event-and-schema|extensions-only>]`
 - `dbx queue`
 - `dbx queue clear`
 - `dbx queue retry [--event-id <job-id>]`

@@ -9,6 +9,7 @@ use tracing::warn;
 
 use crate::{
     error::{EventError, Result},
+    plugin::JobPriority,
     schema::AggregateSchema,
     snowflake::{SnowflakeGenerator, SnowflakeId},
     store::{AggregateState, EventRecord},
@@ -24,6 +25,8 @@ const PROCESSING_TIMEOUT_MS: i64 = 60_000;
 pub struct JobRecord {
     pub id: u64,
     pub plugin: String,
+    #[serde(default)]
+    pub priority: JobPriority,
     pub payload: Value,
     pub status: JobStatus,
     pub attempts: u8,
@@ -102,11 +105,18 @@ impl PluginQueueStore {
         Ok(store)
     }
 
-    pub fn enqueue_job(&self, plugin: &str, payload: Value, created_at: i64) -> Result<JobRecord> {
+    pub fn enqueue_job(
+        &self,
+        plugin: &str,
+        payload: Value,
+        created_at: i64,
+        priority: JobPriority,
+    ) -> Result<JobRecord> {
         let id = self.next_id().as_u64();
         let record = JobRecord {
             id,
             plugin: plugin.to_string(),
+            priority,
             payload,
             status: JobStatus::Pending,
             attempts: 0,
@@ -137,20 +147,17 @@ impl PluginQueueStore {
         let mut iter = self
             .db
             .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
-        let mut selected: Vec<JobRecord> = Vec::new();
+        let mut candidates: Vec<(Box<[u8]>, JobRecord)> = Vec::new();
         let mut batch = WriteBatch::default();
 
-        while selected.len() < limit {
-            let Some(item) = iter.next() else {
-                break;
-            };
+        while let Some(item) = iter.next() {
             let (key, _) = item.map_err(|err| EventError::Storage(err.to_string()))?;
             if !key.starts_with(prefix.as_slice()) {
                 break;
             }
 
             let job_id = parse_job_id(&key)?;
-            let mut job = match self.load_job(job_id)? {
+            let job = match self.load_job(job_id)? {
                 Some(job) => job,
                 None => {
                     batch.delete(key.clone());
@@ -169,6 +176,24 @@ impl PluginQueueStore {
                 }
             }
 
+            candidates.push((key, job));
+        }
+
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        candidates.sort_by(|a, b| {
+            let (_, left) = a;
+            let (_, right) = b;
+            match right.priority.cmp(&left.priority) {
+                std::cmp::Ordering::Equal => left.created_at.cmp(&right.created_at),
+                other => other,
+            }
+        });
+
+        let mut selected: Vec<JobRecord> = Vec::new();
+        for (key, mut job) in candidates.into_iter().take(limit) {
             job.status = JobStatus::Processing;
             job.attempts = job.attempts.saturating_add(1);
             job.next_retry_at = Some(now + PROCESSING_TIMEOUT_MS);
@@ -561,7 +586,12 @@ impl PluginQueueStore {
                 event.aggregate_id,
                 event.event_type,
             );
-            let _ = self.enqueue_job("legacy", payload, Utc::now().timestamp_millis())?;
+            let _ = self.enqueue_job(
+                "legacy",
+                payload,
+                Utc::now().timestamp_millis(),
+                JobPriority::Normal,
+            )?;
         }
 
         for event in legacy.dead_events.into_iter() {
@@ -571,7 +601,12 @@ impl PluginQueueStore {
                 event.aggregate_id,
                 event.event_type,
             );
-            let job = self.enqueue_job("legacy", payload, Utc::now().timestamp_millis())?;
+            let job = self.enqueue_job(
+                "legacy",
+                payload,
+                Utc::now().timestamp_millis(),
+                JobPriority::Normal,
+            )?;
             let _ = self.fail_job(
                 job.id,
                 "migrated from legacy dead queue".to_string(),
@@ -707,7 +742,7 @@ mod tests {
         let store = open_store(&tmp)?;
         let now = Utc::now().timestamp_millis();
 
-        let job = store.enqueue_job("rest", json!({}), now)?;
+        let job = store.enqueue_job("rest", json!({}), now, JobPriority::Normal)?;
         store.complete_job(job.id)?;
 
         assert_eq!(store.clear_done(None)?, 1);
@@ -723,8 +758,9 @@ mod tests {
         let now = Utc::now().timestamp_millis();
         let earlier = now - 60_000;
 
-        let old_job = store.enqueue_job("rest", json!({ "id": 1 }), earlier)?;
-        let new_job = store.enqueue_job("rest", json!({ "id": 2 }), now)?;
+        let old_job =
+            store.enqueue_job("rest", json!({ "id": 1 }), earlier, JobPriority::Normal)?;
+        let new_job = store.enqueue_job("rest", json!({ "id": 2 }), now, JobPriority::Normal)?;
         store.complete_job(old_job.id)?;
         store.complete_job(new_job.id)?;
 
@@ -743,7 +779,12 @@ mod tests {
         let now = Utc::now().timestamp_millis();
 
         for idx in 0..5 {
-            let job = store.enqueue_job("rest", json!({ "seq": idx }), now + idx as i64)?;
+            let job = store.enqueue_job(
+                "rest",
+                json!({ "seq": idx }),
+                now + idx as i64,
+                JobPriority::Normal,
+            )?;
             store.complete_job(job.id)?;
         }
 
@@ -761,7 +802,7 @@ mod tests {
         let store = open_store(&tmp)?;
         let now = Utc::now().timestamp_millis();
 
-        let job = store.enqueue_job("rest", json!({}), now)?;
+        let job = store.enqueue_job("rest", json!({}), now, JobPriority::Normal)?;
         store.complete_job(job.id)?;
 
         assert_eq!(store.truncate_done(0)?, 1);

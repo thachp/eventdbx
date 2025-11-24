@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use eventdbx::config::{
-    CapnpPluginConfig, Config, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition,
-    PluginKind, PluginPayloadMode, ProcessPluginConfig, TcpPluginConfig, load_or_default,
+    Config, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition, PluginKind,
+    PluginPayloadMode, ProcessPluginConfig, TcpPluginConfig, load_or_default,
 };
 use eventdbx::plugin::{
     Plugin, PluginDelivery, PluginManager, establish_connection, instantiate_plugin,
@@ -203,9 +203,6 @@ pub enum PluginConfigureCommands {
     /// Configure the TCP plugin
     #[command(name = "tcp")]
     Tcp(PluginTcpConfigureArgs),
-    /// Configure the Cap'n Proto plugin
-    #[command(name = "capnp")]
-    Capnp(PluginCapnpConfigureArgs),
     /// Configure the HTTP plugin
     #[command(name = "http")]
     Http(PluginHttpConfigureArgs),
@@ -232,29 +229,6 @@ pub struct PluginTcpConfigureArgs {
     pub disable: bool,
 
     /// Name for this TCP plugin instance
-    #[arg(long)]
-    pub name: String,
-
-    /// Payload components to deliver to the plugin
-    #[arg(long = "payload", value_enum)]
-    pub payload: Option<PayloadModeArg>,
-}
-
-#[derive(Args)]
-pub struct PluginCapnpConfigureArgs {
-    /// Hostname or IP of the Cap'n Proto service
-    #[arg(long)]
-    pub host: String,
-
-    /// Port of the Cap'n Proto service
-    #[arg(long)]
-    pub port: u16,
-
-    /// Disable the plugin after configuring
-    #[arg(long, default_value_t = false)]
-    pub disable: bool,
-
-    /// Name for this Cap'n Proto plugin instance
     #[arg(long)]
     pub name: String,
 
@@ -410,6 +384,27 @@ pub struct PluginReplayArgs {
 
     /// Specific aggregate instance (omit to replay all instances)
     pub aggregate_id: Option<String>,
+
+    /// Override the plugin payload mode for this replay
+    #[arg(long = "payload-mode", visible_alias = "payload_mode", value_enum)]
+    pub payload: Option<PayloadModeArg>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PluginReplayReport {
+    pub plugin: String,
+    pub aggregate: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggregate_id: Option<String>,
+    pub payload_mode: PluginPayloadMode,
+    pub aggregates_replayed: usize,
+    pub events_replayed: usize,
+}
+
+#[derive(Default)]
+struct ReplayCounters {
+    aggregates: usize,
+    events: usize,
 }
 
 pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<()> {
@@ -484,51 +479,6 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 config.save_plugins(&plugins)?;
                 println!(
                     "TCP plugin '{}' {}",
-                    label,
-                    if args.disable {
-                        "disabled"
-                    } else {
-                        "configured"
-                    }
-                );
-            }
-            PluginConfigureCommands::Capnp(args) => {
-                let payload_mode = args.payload;
-                let name = args.name.trim();
-                if name.is_empty() {
-                    bail!("plugin name cannot be empty");
-                }
-                let name_owned = name.to_string();
-                let label = display_label(name);
-                match find_plugin_mut(&mut plugins, PluginKind::Capnp, Some(name))? {
-                    Some(plugin) => {
-                        plugin.enabled = !args.disable;
-                        plugin.name = Some(name_owned.clone());
-                        plugin.config = PluginConfig::Capnp(CapnpPluginConfig {
-                            host: args.host,
-                            port: args.port,
-                        });
-                        if let Some(mode) = payload_mode {
-                            plugin.payload_mode = mode.into();
-                        }
-                    }
-                    None => {
-                        ensure_unique_plugin_name(&plugins, name)?;
-                        plugins.push(PluginDefinition {
-                            enabled: !args.disable,
-                            emit_events: true,
-                            name: Some(name_owned.clone()),
-                            payload_mode: payload_mode.unwrap_or_default().into(),
-                            config: PluginConfig::Capnp(CapnpPluginConfig {
-                                host: args.host,
-                                port: args.port,
-                            }),
-                        });
-                    }
-                }
-                config.save_plugins(&plugins)?;
-                println!(
-                    "Cap'n Proto plugin '{}' {}",
                     label,
                     if args.disable {
                         "disabled"
@@ -794,12 +744,16 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
             println!("Plugin '{}' removed", name);
         }
         PluginCommands::Replay(args) => {
-            replay(
-                Some(path.clone()),
-                args.plugin,
-                args.aggregate,
-                args.aggregate_id,
+            let report = replay(
+                &config,
+                &args.plugin,
+                &args.aggregate,
+                args.aggregate_id.as_deref(),
+                0,
+                None,
+                args.payload.map(Into::into),
             )?;
+            print_replay_report(&report);
         }
         PluginCommands::Test(args) => {
             run_plugin_test(&config, &plugins, args)?;
@@ -965,8 +919,8 @@ fn start_process_worker(
     }
 
     let identifier = resolve_process_identifier(plugin, settings);
-    let domain_dir = config.domain_data_dir();
-    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
+    let data_dir = config.data_dir.clone();
+    let worker_pid_path = process_worker_pid_path(data_dir.as_path(), &identifier);
 
     if let Some(existing_pid) = read_pid_file(&worker_pid_path)? {
         if is_pid_running(existing_pid) {
@@ -1042,9 +996,9 @@ fn stop_process_worker(
         .ok_or_else(|| anyhow!("no process plugin named '{}' is configured", name))?;
 
     let identifier = resolve_process_identifier(plugin, settings);
-    let domain_dir = config.domain_data_dir();
-    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
-    let runtime_pid_path = status_file_path(domain_dir.as_path(), &identifier);
+    let data_dir = config.data_dir.clone();
+    let worker_pid_path = process_worker_pid_path(data_dir.as_path(), &identifier);
+    let runtime_pid_path = status_file_path(data_dir.as_path(), &identifier);
 
     if let Some(pid) = read_pid_file(&worker_pid_path)? {
         if is_pid_running(pid) {
@@ -1139,11 +1093,11 @@ fn print_process_status(
     settings: &ProcessPluginConfig,
 ) -> Result<()> {
     let identifier = resolve_process_identifier(definition, settings);
-    let domain_dir = config.domain_data_dir();
-    let status_path = status_file_path(domain_dir.as_path(), &identifier);
-    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
+    let data_dir = config.data_dir.clone();
+    let status_path = status_file_path(data_dir.as_path(), &identifier);
+    let worker_pid_path = process_worker_pid_path(data_dir.as_path(), &identifier);
 
-    let status = read_process_runtime_state(domain_dir.as_path(), &identifier);
+    let status = read_process_runtime_state(data_dir.as_path(), &identifier);
     let label = match status {
         ProcessRuntimeState::Running { pid } => format!("running (pid {})", pid),
         ProcessRuntimeState::Stopped => "stopped".to_string(),
@@ -1436,8 +1390,8 @@ pub async fn run_plugin_worker(config_path: Option<PathBuf>, args: PluginWorkerA
         _ => plugin_kind_name(PluginKind::Process).to_string(),
     };
 
-    let domain_dir = config.domain_data_dir();
-    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
+    let data_dir = config.data_dir.clone();
+    let worker_pid_path = process_worker_pid_path(data_dir.as_path(), &identifier);
     write_pid_file(&worker_pid_path, std::process::id() as u32)?;
     let _guard = WorkerPidGuard {
         path: worker_pid_path.clone(),
@@ -2225,29 +2179,48 @@ fn parse_semver_loose(value: &str) -> Option<Version> {
 }
 
 pub fn replay(
-    config_path: Option<PathBuf>,
-    plugin_name: String,
-    aggregate: String,
-    aggregate_id: Option<String>,
-) -> Result<()> {
-    run_blocking(move || replay_blocking(config_path, plugin_name, aggregate, aggregate_id))
+    config: &Config,
+    plugin_name: &str,
+    aggregate: &str,
+    aggregate_id: Option<&str>,
+    skip: usize,
+    take: Option<usize>,
+    payload_mode: Option<PluginPayloadMode>,
+) -> Result<PluginReplayReport> {
+    let config = config.clone();
+    let plugin_name = plugin_name.to_string();
+    let aggregate = aggregate.to_string();
+    let aggregate_id = aggregate_id.map(|value| value.to_string());
+
+    run_blocking(move || {
+        replay_blocking(
+            config,
+            plugin_name,
+            aggregate,
+            aggregate_id,
+            skip,
+            take,
+            payload_mode,
+        )
+    })
 }
 
 fn replay_blocking(
-    config_path: Option<PathBuf>,
+    config: Config,
     plugin_name: String,
     aggregate: String,
     aggregate_id: Option<String>,
-) -> Result<()> {
-    let (config, _) = load_or_default(config_path)?;
-    let store = EventStore::open(
-        config.event_store_path(),
-        config.encryption_key()?,
-        config.snowflake_worker_id,
-    )?;
+    skip: usize,
+    take: Option<usize>,
+    payload_mode: Option<PluginPayloadMode>,
+) -> Result<PluginReplayReport> {
+    let store = EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
     let schema_manager = SchemaManager::load(config.schema_store_path())?;
 
-    let plugin_defs = config.load_plugins()?;
+    let mut plugin_defs = config.load_plugins()?;
+    if plugin_defs.is_empty() && !config.plugins.is_empty() {
+        plugin_defs = config.plugins.clone();
+    }
 
     let target_plugin = plugin_defs
         .iter()
@@ -2261,44 +2234,87 @@ fn replay_blocking(
         .cloned()
         .ok_or_else(|| anyhow!("no enabled plugin named '{}' is configured", plugin_name))?;
 
+    if !target_plugin.emit_events {
+        bail!(
+            "plugin '{}' is configured with emit_events=false; enable event delivery to replay events",
+            target_plugin.name.as_deref().unwrap_or(&plugin_name)
+        );
+    }
+
+    let mode = payload_mode.unwrap_or(target_plugin.payload_mode);
+    let plugin_label = replay_plugin_label(&target_plugin);
     let plugin_instance = instantiate_plugin(&target_plugin, &config);
     let plugin = plugin_instance.as_ref();
     let schema = schema_manager.get(&aggregate).ok();
 
-    if let Some(aggregate_id) = aggregate_id {
-        replay_single(&store, plugin, &aggregate, &aggregate_id, schema.as_ref())?
+    let counters = if let Some(aggregate_id) = aggregate_id.as_deref() {
+        replay_single(
+            &store,
+            plugin,
+            mode,
+            &aggregate,
+            aggregate_id,
+            schema.as_ref(),
+            skip,
+            take,
+        )?
     } else {
-        replay_all(&store, plugin, &aggregate, schema.as_ref())?;
-    }
+        replay_all(
+            &store,
+            plugin,
+            mode,
+            &aggregate,
+            schema.as_ref(),
+            skip,
+            take,
+        )?
+    };
 
-    Ok(())
+    Ok(PluginReplayReport {
+        plugin: plugin_label,
+        aggregate,
+        aggregate_id,
+        payload_mode: mode,
+        aggregates_replayed: counters.aggregates,
+        events_replayed: counters.events,
+    })
 }
 
 fn replay_single(
     store: &EventStore,
     plugin: &dyn Plugin,
+    mode: PluginPayloadMode,
     aggregate: &str,
     aggregate_id: &str,
     schema: Option<&AggregateSchema>,
-) -> Result<()> {
+    skip: usize,
+    take: Option<usize>,
+) -> Result<ReplayCounters> {
     let events = match store.list_events(aggregate, aggregate_id) {
         Ok(events) => events,
-        Err(EventError::AggregateNotFound) => {
-            println!("no events found for {}::{}", aggregate, aggregate_id);
-            return Ok(());
-        }
+        Err(EventError::AggregateNotFound) => return Ok(ReplayCounters::default()),
         Err(err) => return Err(err.into()),
     };
     if events.is_empty() {
-        println!("no events found for {}::{}", aggregate, aggregate_id);
-        return Ok(());
+        return Ok(ReplayCounters::default());
     }
 
     let mut state_map = BTreeMap::new();
-    for event in events {
+    let mut delivered = 0usize;
+    for (index, event) in events.into_iter().enumerate() {
         for (key, value) in payload_to_map(&event.payload) {
             state_map.insert(key, value);
         }
+
+        if index < skip {
+            continue;
+        }
+        if let Some(limit) = take {
+            if delivered >= limit {
+                break;
+            }
+        }
+
         let state = AggregateState {
             aggregate_type: aggregate.to_string(),
             aggregate_id: aggregate_id.to_string(),
@@ -2309,35 +2325,134 @@ fn replay_single(
             updated_at: None,
             archived: false,
         };
-        plugin.notify_event(PluginDelivery {
-            record: Some(&event),
-            state: Some(&state),
-            schema,
-        })?;
+        let owned_record = sanitized_replay_record(mode, &event);
+        let delivery = delivery_for_mode(mode, &event, &owned_record, &state, schema);
+        plugin.notify_event(delivery)?;
+        drop(owned_record);
+        delivered += 1;
     }
 
-    println!("replayed {}::{}", aggregate, aggregate_id);
-    Ok(())
+    Ok(ReplayCounters {
+        aggregates: usize::from(delivered > 0),
+        events: delivered,
+    })
 }
 
 fn replay_all(
     store: &EventStore,
     plugin: &dyn Plugin,
+    mode: PluginPayloadMode,
     aggregate: &str,
     schema: Option<&AggregateSchema>,
-) -> Result<()> {
-    let mut total = 0;
+    skip: usize,
+    take: Option<usize>,
+) -> Result<ReplayCounters> {
+    let mut totals = ReplayCounters::default();
     let aggregates = store.list_aggregate_ids(aggregate)?;
     for aggregate_id in aggregates {
-        replay_single(store, plugin, aggregate, &aggregate_id, schema)?;
-        total += 1;
+        let counters = replay_single(
+            store,
+            plugin,
+            mode,
+            aggregate,
+            &aggregate_id,
+            schema,
+            skip,
+            take,
+        )?;
+        totals.aggregates += counters.aggregates;
+        totals.events += counters.events;
     }
-    if total == 0 {
-        println!("no aggregates found for '{}'", aggregate);
+    Ok(totals)
+}
+
+fn delivery_for_mode<'a>(
+    mode: PluginPayloadMode,
+    record: &'a EventRecord,
+    owned_record: &'a Option<EventRecord>,
+    state: &'a AggregateState,
+    schema: Option<&'a AggregateSchema>,
+) -> PluginDelivery<'a> {
+    let record_ref = owned_record
+        .as_ref()
+        .or_else(|| mode.includes_event().then_some(record));
+    let state_ref = if mode.includes_state() {
+        Some(state)
     } else {
-        println!("replayed {} aggregate(s) for '{}'", total, aggregate);
+        None
+    };
+    let schema_ref = if mode.includes_schema() { schema } else { None };
+
+    PluginDelivery {
+        record: record_ref,
+        state: state_ref,
+        schema: schema_ref,
     }
-    Ok(())
+}
+
+fn sanitized_replay_record(mode: PluginPayloadMode, record: &EventRecord) -> Option<EventRecord> {
+    match mode {
+        PluginPayloadMode::ExtensionsOnly => {
+            let mut sanitized = record.clone();
+            sanitized.payload = serde_json::Value::Null;
+            Some(sanitized)
+        }
+        _ => None,
+    }
+}
+
+fn print_replay_report(report: &PluginReplayReport) {
+    let payload = payload_mode_label(report.payload_mode);
+    match (
+        &report.aggregate_id,
+        report.events_replayed,
+        report.aggregates_replayed,
+    ) {
+        (Some(id), 0, _) => {
+            println!(
+                "no events replayed for {}::{} via plugin {} (payload={})",
+                report.aggregate, id, report.plugin, payload
+            );
+        }
+        (Some(id), events, _) => {
+            println!(
+                "replayed {} event(s) for {}::{} via plugin {} (payload={})",
+                events, report.aggregate, id, report.plugin, payload
+            );
+        }
+        (None, 0, 0) => {
+            println!(
+                "no aggregates found for '{}' via plugin {} (payload={})",
+                report.aggregate, report.plugin, payload
+            );
+        }
+        (None, events, aggregates) => {
+            println!(
+                "replayed {} event(s) across {} aggregate(s) for '{}' via plugin {} (payload={})",
+                events, aggregates, report.aggregate, report.plugin, payload
+            );
+        }
+    }
+}
+
+fn replay_plugin_label(definition: &PluginDefinition) -> String {
+    match definition.name.as_deref() {
+        Some(name) if !name.trim().is_empty() => {
+            format!("{} ({})", plugin_kind_name(definition.config.kind()), name)
+        }
+        _ => plugin_kind_name(definition.config.kind()).to_string(),
+    }
+}
+
+fn payload_mode_label(mode: PluginPayloadMode) -> &'static str {
+    match mode {
+        PluginPayloadMode::All => "all",
+        PluginPayloadMode::EventOnly => "event-only",
+        PluginPayloadMode::StateOnly => "state-only",
+        PluginPayloadMode::SchemaOnly => "schema-only",
+        PluginPayloadMode::EventAndSchema => "event-and-schema",
+        PluginPayloadMode::ExtensionsOnly => "extensions-only",
+    }
 }
 
 fn list_plugins(config: &Config, plugins: &[PluginDefinition], json: bool) -> Result<()> {
@@ -2364,13 +2479,13 @@ fn list_plugins(config: &Config, plugins: &[PluginDefinition], json: bool) -> Re
         }
     };
 
-    let domain_dir = config.domain_data_dir();
+    let data_dir = config.data_dir.clone();
     let configured_with_runtime: Vec<ConfiguredPluginInfo> = plugins
         .iter()
         .cloned()
         .map(|definition| {
             let runtime = process_instance_identifier(&definition)
-                .map(|identifier| read_process_runtime_state(domain_dir.as_path(), &identifier));
+                .map(|identifier| read_process_runtime_state(data_dir.as_path(), &identifier));
             ConfiguredPluginInfo {
                 definition,
                 runtime,
@@ -2736,7 +2851,6 @@ fn display_label(name: &str) -> &str {
 pub(crate) fn plugin_kind_name(kind: PluginKind) -> &'static str {
     match kind {
         PluginKind::Tcp => "tcp",
-        PluginKind::Capnp => "capnp",
         PluginKind::Http => "http",
         PluginKind::Log => "log",
         PluginKind::Process => "process",
