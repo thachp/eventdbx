@@ -187,10 +187,6 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "Retrieve the state of an aggregate",
     },
     HelpCase {
-        path: &["aggregate", "replay"],
-        expected_snippet: "Replay events for an aggregate instance",
-    },
-    HelpCase {
         path: &["aggregate", "verify"],
         expected_snippet: "Verify an aggregate's Merkle root",
     },

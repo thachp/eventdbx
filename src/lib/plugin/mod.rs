@@ -21,8 +21,6 @@ pub mod registry;
 use queue::{JobPayload, PluginQueueStore};
 mod tcp;
 use tcp::TcpPlugin;
-mod capnp;
-use capnp::CapnpPlugin;
 mod http;
 use http::HttpPlugin;
 mod log;
@@ -123,6 +121,21 @@ impl PluginManager {
                 plugin,
                 emit_events: definition.emit_events,
             });
+        }
+
+        if let Err(err) = config.migrate_plugin_queue_to_root() {
+            warn!(
+                target: "eventdbx.plugin",
+                "failed to migrate plugin queue to system scope: {}",
+                err
+            );
+        }
+        if let Err(err) = config.migrate_plugin_runtime_to_root() {
+            warn!(
+                target: "eventdbx.plugin",
+                "failed to migrate plugin runtime files to system scope: {}",
+                err
+            );
         }
 
         let queue = match PluginQueueStore::open_with_legacy(
@@ -675,10 +688,6 @@ pub fn establish_connection(definition: &PluginDefinition) -> Result<()> {
             let plugin = TcpPlugin::new(settings.clone());
             plugin.ensure_ready()
         }
-        PluginConfig::Capnp(settings) => {
-            let plugin = CapnpPlugin::new(settings.clone());
-            plugin.ensure_ready()
-        }
         PluginConfig::Http(settings) => {
             let plugin = HttpPlugin::new(settings.clone());
             plugin.ensure_ready()
@@ -694,7 +703,6 @@ pub fn establish_connection(definition: &PluginDefinition) -> Result<()> {
 pub fn instantiate_plugin(definition: &PluginDefinition, config: &Config) -> Box<dyn Plugin> {
     match &definition.config {
         PluginConfig::Tcp(settings) => Box::new(TcpPlugin::new(settings.clone())),
-        PluginConfig::Capnp(settings) => Box::new(CapnpPlugin::new(settings.clone())),
         PluginConfig::Http(settings) => Box::new(HttpPlugin::new(settings.clone())),
         PluginConfig::Log(settings) => Box::new(LogPlugin::new(settings.clone())),
         PluginConfig::Process(settings) => {
@@ -702,7 +710,7 @@ pub fn instantiate_plugin(definition: &PluginDefinition, config: &Config) -> Box
                 .name
                 .clone()
                 .unwrap_or_else(|| settings.name.clone());
-            let data_root = config.domain_data_dir();
+            let data_root = config.data_dir.clone();
             match ProcessPlugin::new(identifier.clone(), settings.clone(), data_root.as_path()) {
                 Ok(plugin) => Box::new(plugin),
                 Err(err) => {
@@ -755,7 +763,6 @@ fn plugin_label(definition: &PluginDefinition) -> String {
 fn plugin_kind_name(kind: PluginKind) -> &'static str {
     match kind {
         PluginKind::Tcp => "tcp",
-        PluginKind::Capnp => "capnp",
         PluginKind::Http => "http",
         PluginKind::Log => "log",
         PluginKind::Process => "process",

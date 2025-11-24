@@ -34,15 +34,14 @@ Each plugin instance can request the minimal payload it needs. When you run `dbx
 | `event-and-schema`| Event + schema, no state                                         | Validation services, codegen     |
 | `extensions-only` | Extension metadata only; payload/state nulled before delivery    | Telemetry, policy hints, routing |
 
-Plugins receive payloads as JSON envelopes (HTTP/TCP) or Cap’n Proto messages (capnp/process). The queue persists the same envelope so you can inspect pending and dead jobs safely.
+Plugins receive payloads as JSON envelopes (HTTP/TCP/process/log). The queue persists the same envelope so you can inspect pending and dead jobs safely.
 
 ## Built-in plugin types
 
 - **HTTP** – POSTs payloads to a remote endpoint; use headers for auth. Great for webhooks, SaaS connectors, or serverless consumers.
 - **TCP** – Streams JSON lines over a raw TCP socket.
-- **Cap’n Proto** – Sends Cap’n Proto messages (handy for low-latency services written in Rust/C++).
 - **Log** – Writes event/state/schema data to the EventDBX log sink for debugging or audit transcripts.
-- **Process** – Supervises an executable installed via `dbx plugin install`; the binary receives Cap'n Proto frames on stdin/stdout.
+- **Process** – Supervises an executable installed via `dbx plugin install`; the binary receives plugin envelopes from stdin/stdout per the SDK.
 
 All of these live in the [dbx-plugins workspace](https://github.com/eventdbx/dbx-plugins). Use those implementations as templates for new connectors.
 

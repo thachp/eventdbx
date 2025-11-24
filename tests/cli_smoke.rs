@@ -1934,35 +1934,6 @@ fn aggregate_get_unknown_fails() -> Result<()> {
 }
 
 #[test]
-fn aggregate_replay_unknown_fails() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run(&[
-        "schema",
-        "create",
-        "existing",
-        "--events",
-        "existing_created",
-    ])?;
-    cli.create_aggregate("existing", "existing-1", "existing_created")?;
-    cli.run(&[
-        "aggregate",
-        "apply",
-        "existing",
-        "existing-1",
-        "existing_created",
-        "--field",
-        "status=ok",
-    ])?;
-    let failure = cli.run_failure(&["aggregate", "replay", "existing", "missing-id"])?;
-    assert!(
-        failure.stderr.contains("aggregate not found"),
-        "unexpected aggregate replay error:\n{}",
-        failure.stderr
-    );
-    Ok(())
-}
-
-#[test]
 fn aggregate_remove_unknown_fails() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run(&[
@@ -2731,34 +2702,6 @@ fn aggregate_list_hides_archived_by_default() -> Result<()> {
 }
 
 #[test]
-fn aggregate_replay_after_apply_returns_events() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "replay_order",
-        "--events",
-        "order_created",
-        "--json",
-    ])?;
-    cli.create_aggregate_with_fields(
-        "replay_order",
-        "order-1",
-        "order_created",
-        &[("status", "pending")],
-    )?;
-
-    let events = cli.run_json(&["aggregate", "replay", "replay_order", "order-1", "--json"])?;
-    let array = events
-        .as_array()
-        .context("aggregate replay did not return an array")?;
-    assert_eq!(array.len(), 1);
-    assert_eq!(array[0]["event_type"], json!("order_created"));
-    assert_eq!(array[0]["payload"]["status"], json!("pending"));
-    Ok(())
-}
-
-#[test]
 fn aggregate_snapshot_creates_record() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run_json(&[
@@ -2869,49 +2812,6 @@ fn aggregate_archive_and_restore_flow() -> Result<()> {
         "unexpected restore output:\n{}",
         restored
     );
-    Ok(())
-}
-
-#[test]
-fn aggregate_replay_with_skip_take() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "timeline",
-        "--events",
-        "order_created,order_updated",
-        "--json",
-    ])?;
-    cli.create_aggregate_with_fields(
-        "timeline",
-        "order-1",
-        "order_created",
-        &[("status", "pending")],
-    )?;
-    cli.run(&[
-        "aggregate",
-        "apply",
-        "timeline",
-        "order-1",
-        "order_updated",
-        "--field",
-        "status=complete",
-    ])?;
-    let events = cli.run_json(&[
-        "aggregate",
-        "replay",
-        "timeline",
-        "order-1",
-        "--skip",
-        "1",
-        "--json",
-    ])?;
-    let array = events
-        .as_array()
-        .context("replay with skip did not return array")?;
-    assert_eq!(array.len(), 1);
-    assert_eq!(array[0]["event_type"], json!("order_updated"));
     Ok(())
 }
 

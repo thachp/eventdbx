@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use eventdbx::config::{
-    CapnpPluginConfig, Config, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition,
-    PluginKind, PluginPayloadMode, ProcessPluginConfig, TcpPluginConfig, load_or_default,
+    Config, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition, PluginKind,
+    PluginPayloadMode, ProcessPluginConfig, TcpPluginConfig, load_or_default,
 };
 use eventdbx::plugin::{
     Plugin, PluginDelivery, PluginManager, establish_connection, instantiate_plugin,
@@ -203,9 +203,6 @@ pub enum PluginConfigureCommands {
     /// Configure the TCP plugin
     #[command(name = "tcp")]
     Tcp(PluginTcpConfigureArgs),
-    /// Configure the Cap'n Proto plugin
-    #[command(name = "capnp")]
-    Capnp(PluginCapnpConfigureArgs),
     /// Configure the HTTP plugin
     #[command(name = "http")]
     Http(PluginHttpConfigureArgs),
@@ -232,29 +229,6 @@ pub struct PluginTcpConfigureArgs {
     pub disable: bool,
 
     /// Name for this TCP plugin instance
-    #[arg(long)]
-    pub name: String,
-
-    /// Payload components to deliver to the plugin
-    #[arg(long = "payload", value_enum)]
-    pub payload: Option<PayloadModeArg>,
-}
-
-#[derive(Args)]
-pub struct PluginCapnpConfigureArgs {
-    /// Hostname or IP of the Cap'n Proto service
-    #[arg(long)]
-    pub host: String,
-
-    /// Port of the Cap'n Proto service
-    #[arg(long)]
-    pub port: u16,
-
-    /// Disable the plugin after configuring
-    #[arg(long, default_value_t = false)]
-    pub disable: bool,
-
-    /// Name for this Cap'n Proto plugin instance
     #[arg(long)]
     pub name: String,
 
@@ -505,51 +479,6 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 config.save_plugins(&plugins)?;
                 println!(
                     "TCP plugin '{}' {}",
-                    label,
-                    if args.disable {
-                        "disabled"
-                    } else {
-                        "configured"
-                    }
-                );
-            }
-            PluginConfigureCommands::Capnp(args) => {
-                let payload_mode = args.payload;
-                let name = args.name.trim();
-                if name.is_empty() {
-                    bail!("plugin name cannot be empty");
-                }
-                let name_owned = name.to_string();
-                let label = display_label(name);
-                match find_plugin_mut(&mut plugins, PluginKind::Capnp, Some(name))? {
-                    Some(plugin) => {
-                        plugin.enabled = !args.disable;
-                        plugin.name = Some(name_owned.clone());
-                        plugin.config = PluginConfig::Capnp(CapnpPluginConfig {
-                            host: args.host,
-                            port: args.port,
-                        });
-                        if let Some(mode) = payload_mode {
-                            plugin.payload_mode = mode.into();
-                        }
-                    }
-                    None => {
-                        ensure_unique_plugin_name(&plugins, name)?;
-                        plugins.push(PluginDefinition {
-                            enabled: !args.disable,
-                            emit_events: true,
-                            name: Some(name_owned.clone()),
-                            payload_mode: payload_mode.unwrap_or_default().into(),
-                            config: PluginConfig::Capnp(CapnpPluginConfig {
-                                host: args.host,
-                                port: args.port,
-                            }),
-                        });
-                    }
-                }
-                config.save_plugins(&plugins)?;
-                println!(
-                    "Cap'n Proto plugin '{}' {}",
                     label,
                     if args.disable {
                         "disabled"
@@ -990,8 +919,8 @@ fn start_process_worker(
     }
 
     let identifier = resolve_process_identifier(plugin, settings);
-    let domain_dir = config.domain_data_dir();
-    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
+    let data_dir = config.data_dir.clone();
+    let worker_pid_path = process_worker_pid_path(data_dir.as_path(), &identifier);
 
     if let Some(existing_pid) = read_pid_file(&worker_pid_path)? {
         if is_pid_running(existing_pid) {
@@ -1067,9 +996,9 @@ fn stop_process_worker(
         .ok_or_else(|| anyhow!("no process plugin named '{}' is configured", name))?;
 
     let identifier = resolve_process_identifier(plugin, settings);
-    let domain_dir = config.domain_data_dir();
-    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
-    let runtime_pid_path = status_file_path(domain_dir.as_path(), &identifier);
+    let data_dir = config.data_dir.clone();
+    let worker_pid_path = process_worker_pid_path(data_dir.as_path(), &identifier);
+    let runtime_pid_path = status_file_path(data_dir.as_path(), &identifier);
 
     if let Some(pid) = read_pid_file(&worker_pid_path)? {
         if is_pid_running(pid) {
@@ -1164,11 +1093,11 @@ fn print_process_status(
     settings: &ProcessPluginConfig,
 ) -> Result<()> {
     let identifier = resolve_process_identifier(definition, settings);
-    let domain_dir = config.domain_data_dir();
-    let status_path = status_file_path(domain_dir.as_path(), &identifier);
-    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
+    let data_dir = config.data_dir.clone();
+    let status_path = status_file_path(data_dir.as_path(), &identifier);
+    let worker_pid_path = process_worker_pid_path(data_dir.as_path(), &identifier);
 
-    let status = read_process_runtime_state(domain_dir.as_path(), &identifier);
+    let status = read_process_runtime_state(data_dir.as_path(), &identifier);
     let label = match status {
         ProcessRuntimeState::Running { pid } => format!("running (pid {})", pid),
         ProcessRuntimeState::Stopped => "stopped".to_string(),
@@ -1461,8 +1390,8 @@ pub async fn run_plugin_worker(config_path: Option<PathBuf>, args: PluginWorkerA
         _ => plugin_kind_name(PluginKind::Process).to_string(),
     };
 
-    let domain_dir = config.domain_data_dir();
-    let worker_pid_path = process_worker_pid_path(domain_dir.as_path(), &identifier);
+    let data_dir = config.data_dir.clone();
+    let worker_pid_path = process_worker_pid_path(data_dir.as_path(), &identifier);
     write_pid_file(&worker_pid_path, std::process::id() as u32)?;
     let _guard = WorkerPidGuard {
         path: worker_pid_path.clone(),
@@ -2550,13 +2479,13 @@ fn list_plugins(config: &Config, plugins: &[PluginDefinition], json: bool) -> Re
         }
     };
 
-    let domain_dir = config.domain_data_dir();
+    let data_dir = config.data_dir.clone();
     let configured_with_runtime: Vec<ConfiguredPluginInfo> = plugins
         .iter()
         .cloned()
         .map(|definition| {
             let runtime = process_instance_identifier(&definition)
-                .map(|identifier| read_process_runtime_state(domain_dir.as_path(), &identifier));
+                .map(|identifier| read_process_runtime_state(data_dir.as_path(), &identifier));
             ConfiguredPluginInfo {
                 definition,
                 runtime,
@@ -2922,7 +2851,6 @@ fn display_label(name: &str) -> &str {
 pub(crate) fn plugin_kind_name(kind: PluginKind) -> &'static str {
     match kind {
         PluginKind::Tcp => "tcp",
-        PluginKind::Capnp => "capnp",
         PluginKind::Http => "http",
         PluginKind::Log => "log",
         PluginKind::Process => "process",

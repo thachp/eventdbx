@@ -62,6 +62,9 @@ pub fn execute(config_path: Option<PathBuf>, args: QueueArgs) -> Result<()> {
         config.save_plugins(&plugins)?;
     }
 
+    config.migrate_plugin_queue_to_root()?;
+    config.migrate_plugin_runtime_to_root()?;
+
     let queue_store = PluginQueueStore::open_with_legacy(
         config.plugin_queue_db_path().as_path(),
         config.plugin_queue_path().as_path(),
