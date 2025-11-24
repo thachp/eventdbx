@@ -313,7 +313,6 @@ Schemas are stored on disk; when restriction is `default` or `strict`, incoming 
 - `dbx aggregate list [--cursor <token>] [--take <n>] [--stage]`  
   Lists aggregates with version, Merkle root, and archive status; pass `--stage` to display queued events instead.
 - `dbx aggregate get --aggregate <type> --aggregate-id <id> [--version <u64>] [--include-events]`
-- `dbx aggregate replay --aggregate <type> --aggregate-id <id> [--skip <n>] [--take <n>]`
 - `dbx aggregate verify --aggregate <type> --aggregate-id <id>`
 - `dbx aggregate snapshot --aggregate <type> --aggregate-id <id> [--comment <text>]`
 - `dbx aggregate archive --aggregate <type> --aggregate-id <id> [--comment <text>]`
@@ -347,7 +346,6 @@ Every aggregate command ultimately turns into a small set of RocksDB reads or wr
 - `aggregate select`: uses the same state lookup as `get` (O(log N)) and walks each requested dot path in-memory; no additional RocksDB reads are taken, so cost is dominated by the selected payload size.
 - `aggregate apply`: validates the payload, merges it into the materialized state, and appends the event in a single batch write. Time is proportional to the payload size being processed.
 - `aggregate patch`: reads the current state (same cost as `get`), applies the JSON Patch document, then appends the result—effectively O(payload + patch_ops).
-- `aggregate replay` / `aggregate list --include-events`: scans the requested slice of the event stream for that aggregate (O(Eₐ)).
 - `aggregate verify`: recomputes the Merkle root for the aggregate’s events (O(Eₐ)).
 
 In practice those costs are dominated by payload size and the number of events you ask the CLI to stream; hot aggregates tend to stay in the RocksDB block cache, keeping per-operation latency close to constant.
@@ -359,7 +357,6 @@ In practice those costs are dominated by payload size and the number of events y
 | `aggregate select` | O(log N + P_selected)    | Same state read as `get`; dot-path traversal happens in memory.  |
 | `aggregate apply`  | O(P)                     | Payload validation + merge + append in one RocksDB batch.        |
 | `aggregate patch`  | O(log N + P + patch_ops) | Reads state, applies JSON Patch, then appends the patch payload. |
-| `aggregate replay` | O(Eₐ)                    | Linear in the number of events streamed.                         |
 | `aggregate verify` | O(Eₐ)                    | Recomputes the Merkle root across the aggregate’s events.        |
 
 Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply --stage` to add entries to this queue, inspect them with `aggregate list --stage`, and persist the entire batch with `aggregate commit`. Events are validated against the active schema whenever restriction is `default` or `strict`; the strict mode also insists that a schema exists before anything can be staged. The commit operation writes every pending event in one RocksDB batch, guaranteeing all-or-nothing persistence.
@@ -380,7 +377,7 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `dbx queue`
 - `dbx queue clear`
 - `dbx queue retry [--event-id <job-id>]`
-- `dbx plugin replay <plugin-name> <aggregate> [<aggregate_id>]`
+- `dbx plugin replay <plugin-name> <aggregate> [<aggregate_id>] [--payload-mode <all|event-only|state-only|schema-only|event-and-schema|extensions-only>]`
 
 Plugins consume jobs from a durable RocksDB-backed queue. EventDBX enqueues a job for every aggregate mutation, and each plugin can opt into the data it needs—event payloads, materialized state, schemas, or combinations thereof. Clearing dead entries prompts for confirmation to avoid accidental removal. Manual retries run the failed jobs immediately; use `--event-id` to target a specific entry.
 
@@ -430,7 +427,7 @@ EventDBX supervises the subprocess, restarts it on failure, and delivers every `
 
 Failed deliveries are automatically queued and retried with exponential backoff. The server keeps attempting until the plugin succeeds or the aggregate is removed, ensuring transient outages do not drop notifications. Use `dbx queue` to inspect pending/dead event IDs.
 
-Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instance requires a unique `--name` so you can update, enable, disable, remove, or replay it later. `plugin enable` validates connectivity (creating directories, touching files, or checking network access) before marking the plugin active. Remove a plugin only after disabling it with `plugin disable <name>`. `plugin replay` resends stored events for a single aggregate instance—or every instance of a type—through the selected plugin.
+Plugin configurations are stored in `.eventdbx/plugins.json`. Each plugin instance requires a unique `--name` so you can update, enable, disable, remove, or replay it later. `plugin enable` validates connectivity (creating directories, touching files, or checking network access) before marking the plugin active. Remove a plugin only after disabling it with `plugin disable <name>`. `plugin replay` resends stored events for a single aggregate instance—or every instance of a type—through the selected plugin; include `--payload-mode` to temporarily override the configured payload shape for the replay.
 
 Need point-in-time snapshots instead of streaming plugins? Use `dbx aggregate export` to capture aggregate state as CSV or JSON on demand.
 

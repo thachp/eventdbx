@@ -55,8 +55,6 @@ pub enum AggregateCommands {
     Select(AggregateSelectArgs),
     /// Retrieve the state of an aggregate
     Get(AggregateGetArgs),
-    /// Replay events for an aggregate instance
-    Replay(AggregateReplayArgs),
     /// Verify an aggregate's Merkle root
     Verify(AggregateVerifyArgs),
     /// Archive an aggregate instance
@@ -191,27 +189,6 @@ pub struct AggregateGetArgs {
     /// Include event history in the output
     #[arg(long, default_value_t = false)]
     pub include_events: bool,
-}
-
-#[derive(Args)]
-pub struct AggregateReplayArgs {
-    /// Aggregate type
-    pub aggregate: String,
-
-    /// Aggregate identifier
-    pub aggregate_id: String,
-
-    /// Number of events to skip
-    #[arg(long, default_value_t = 0)]
-    pub skip: usize,
-
-    /// Number of events to return
-    #[arg(long)]
-    pub take: Option<usize>,
-
-    /// Emit results as JSON
-    #[arg(long, default_value_t = false)]
-    pub json: bool,
 }
 
 #[derive(Args)]
@@ -818,25 +795,6 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             });
 
             println!("{}", serde_json::to_string_pretty(&output)?);
-        }
-        AggregateCommands::Replay(args) => {
-            let store =
-                EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
-            let events = store.list_events(&args.aggregate, &args.aggregate_id)?;
-            let iter = events.into_iter().skip(args.skip);
-            let events: Vec<_> = if let Some(limit) = args.take {
-                iter.take(limit).collect()
-            } else {
-                iter.collect()
-            };
-
-            if args.json {
-                println!("{}", serde_json::to_string_pretty(&events)?);
-            } else {
-                for event in events {
-                    println!("{}", serde_json::to_string_pretty(&event)?);
-                }
-            }
         }
         AggregateCommands::Verify(args) => {
             let store =
