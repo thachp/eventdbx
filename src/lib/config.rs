@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     env, fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -1053,6 +1054,41 @@ fn migrate_path_if_absent(source: &Path, dest: &Path) -> Result<bool> {
                 copy_err
             ))
         })?;
+
+        // Clean up the legacy path after a successful copy to avoid duplicate configs.
+        match fs::metadata(source) {
+            Ok(metadata) => {
+                let cleanup = if metadata.is_dir() {
+                    fs::remove_dir_all(source)
+                } else {
+                    fs::remove_file(source).or_else(|remove_err| {
+                        if remove_err.kind() == ErrorKind::NotFound {
+                            Ok(())
+                        } else {
+                            Err(remove_err)
+                        }
+                    })
+                };
+
+                if let Err(remove_err) = cleanup {
+                    return Err(EventError::Config(format!(
+                        "migrated {} to {} but failed to remove legacy source: {}",
+                        source.display(),
+                        dest.display(),
+                        remove_err
+                    )));
+                }
+            }
+            Err(meta_err) if meta_err.kind() == ErrorKind::NotFound => return Ok(true),
+            Err(meta_err) => {
+                return Err(EventError::Config(format!(
+                    "migrated {} to {} but failed to inspect legacy source: {}",
+                    source.display(),
+                    dest.display(),
+                    meta_err
+                )));
+            }
+        }
     }
 
     Ok(true)

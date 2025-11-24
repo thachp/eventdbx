@@ -152,21 +152,7 @@ impl PluginManager {
             });
         }
 
-        if let Err(err) = config.migrate_plugin_queue_to_root() {
-            warn!(
-                target: "eventdbx.plugin",
-                "failed to migrate plugin queue to system scope: {}",
-                err
-            );
-        }
-        if let Err(err) = config.migrate_plugin_runtime_to_root() {
-            warn!(
-                target: "eventdbx.plugin",
-                "failed to migrate plugin runtime files to system scope: {}",
-                err
-            );
-        }
-
+        // Config migrations run during load_or_default; open_with_legacy still tolerates older paths.
         let queue = match PluginQueueStore::open_with_legacy(
             config.plugin_queue_db_path().as_path(),
             config.plugin_queue_path().as_path(),

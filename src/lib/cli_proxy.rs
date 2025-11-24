@@ -2323,7 +2323,7 @@ fn decode_publish_targets(
         };
 
         targets.push(PublishTarget {
-            plugin: plugin.to_string(),
+            plugin,
             mode,
             priority,
         });

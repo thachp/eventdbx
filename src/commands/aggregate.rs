@@ -1664,12 +1664,8 @@ fn parse_publish_priority(raw: &str) -> std::result::Result<JobPriority, String>
 fn build_publish_targets(inputs: &[PublishTargetArg]) -> Result<Vec<PublishTarget>> {
     let mut targets = Vec::with_capacity(inputs.len());
     for input in inputs {
-        let plugin = input.plugin.trim();
-        if plugin.is_empty() {
-            bail!("publish target name cannot be empty");
-        }
         targets.push(PublishTarget {
-            plugin: plugin.to_string(),
+            plugin: input.plugin.clone(),
             mode: input.mode,
             priority: input.priority,
         });
