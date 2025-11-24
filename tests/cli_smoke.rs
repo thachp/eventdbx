@@ -9,7 +9,9 @@ use tempfile::TempDir;
 
 use chrono::{DateTime, Utc};
 use eventdbx::{
-    plugin::queue::PluginQueueStore, snowflake::SnowflakeId, token::JwtClaims,
+    plugin::{JobPriority, queue::PluginQueueStore},
+    snowflake::SnowflakeId,
+    token::JwtClaims,
     validation::MAX_EVENT_PAYLOAD_BYTES,
 };
 
@@ -547,6 +549,7 @@ fn queue_clear_prompts_and_respects_confirmation() -> Result<()> {
                 "test",
                 serde_json::json!({"event_id": SnowflakeId::from_u64(42).to_string()}),
                 Utc::now().timestamp_millis(),
+                JobPriority::Normal,
             )
             .map_err(anyhow::Error::from)?;
         let dispatched = store
@@ -585,6 +588,7 @@ fn queue_status_displays_dead_events() -> Result<()> {
                 "alpha",
                 serde_json::json!({"event_id": SnowflakeId::from_u64(99).to_string()}),
                 Utc::now().timestamp_millis(),
+                JobPriority::Normal,
             )
             .map_err(anyhow::Error::from)?;
         let job = store
@@ -592,6 +596,7 @@ fn queue_status_displays_dead_events() -> Result<()> {
                 "alpha",
                 serde_json::json!({"event_id": SnowflakeId::from_u64(100).to_string()}),
                 Utc::now().timestamp_millis(),
+                JobPriority::Normal,
             )
             .map_err(anyhow::Error::from)?;
         let dispatched = store

@@ -10,8 +10,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use capnp::message::ReaderOptions;
 use capnp::serialize::{OwnedSegments, write_message_to_words};
+use capnp::{message::ReaderOptions, struct_list};
 use capnp_futures::serialize::{read_message, try_read_message};
 use futures::AsyncWriteExt;
 use serde_json::{self, Value};
@@ -27,12 +27,14 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     cli_capnp::{cli_request, cli_response},
-    config::Config,
-    control_capnp::{control_hello, control_hello_response, control_request, control_response},
+    config::{Config, PluginPayloadMode},
+    control_capnp::{
+        control_hello, control_hello_response, control_request, control_response, publish_target,
+    },
     error::EventError,
     filter::{self, FilterExpr},
     observability,
-    plugin::PluginManager,
+    plugin::{JobPriority, PluginManager, PublishTarget},
     replication_noise::{
         MAX_NOISE_FRAME_PAYLOAD, perform_server_handshake, read_encrypted_frame,
         write_encrypted_frame,
@@ -157,6 +159,7 @@ enum ControlCommand {
         payload: Option<Value>,
         metadata: Option<Value>,
         note: Option<String>,
+        publish: Vec<PublishTarget>,
     },
     PatchEvent {
         token: String,
@@ -166,6 +169,7 @@ enum ControlCommand {
         patch: Value,
         metadata: Option<Value>,
         note: Option<String>,
+        publish: Vec<PublishTarget>,
     },
     VerifyAggregate {
         aggregate_type: String,
@@ -185,6 +189,7 @@ enum ControlCommand {
         payload: Value,
         metadata: Option<Value>,
         note: Option<String>,
+        publish: Vec<PublishTarget>,
     },
     SetAggregateArchive {
         token: String,
@@ -1244,6 +1249,14 @@ fn parse_control_command(
             } else {
                 None
             };
+            let publish = if req.get_has_publish_targets() {
+                let targets = req.get_publish_targets().map_err(|err| {
+                    EventError::Serialization(format!("failed to read publish_targets: {err}"))
+                })?;
+                decode_publish_targets(targets)?
+            } else {
+                Vec::new()
+            };
 
             Ok(ControlCommand::AppendEvent {
                 token,
@@ -1253,6 +1266,7 @@ fn parse_control_command(
                 payload,
                 metadata,
                 note,
+                publish,
             })
         }
         payload::PatchEvent(req) => {
@@ -1297,6 +1311,14 @@ fn parse_control_command(
             } else {
                 None
             };
+            let publish = if req.get_has_publish_targets() {
+                let targets = req.get_publish_targets().map_err(|err| {
+                    EventError::Serialization(format!("failed to read publish_targets: {err}"))
+                })?;
+                decode_publish_targets(targets)?
+            } else {
+                Vec::new()
+            };
 
             Ok(ControlCommand::PatchEvent {
                 token,
@@ -1306,6 +1328,7 @@ fn parse_control_command(
                 patch,
                 metadata,
                 note,
+                publish,
             })
         }
         payload::CreateAggregate(req) => {
@@ -1348,6 +1371,14 @@ fn parse_control_command(
             } else {
                 None
             };
+            let publish = if req.get_has_publish_targets() {
+                let targets = req.get_publish_targets().map_err(|err| {
+                    EventError::Serialization(format!("failed to read publish_targets: {err}"))
+                })?;
+                decode_publish_targets(targets)?
+            } else {
+                Vec::new()
+            };
 
             Ok(ControlCommand::CreateAggregate {
                 token,
@@ -1357,6 +1388,7 @@ fn parse_control_command(
                 payload,
                 metadata,
                 note,
+                publish,
             })
         }
         payload::VerifyAggregate(req) => {
@@ -1750,6 +1782,7 @@ async fn execute_control_command(
             payload,
             metadata,
             note,
+            publish,
         } => {
             let input = AppendEventInput {
                 token,
@@ -1760,6 +1793,7 @@ async fn execute_control_command(
                 patch: None,
                 metadata,
                 note,
+                publish,
             };
             let verbose = config_verbose(&shared_config)?;
             handle_append_event_command(
@@ -1779,6 +1813,7 @@ async fn execute_control_command(
             patch,
             metadata,
             note,
+            publish,
         } => {
             let input = AppendEventInput {
                 token,
@@ -1789,6 +1824,7 @@ async fn execute_control_command(
                 patch: Some(patch),
                 metadata,
                 note,
+                publish,
             };
             let verbose = config_verbose(&shared_config)?;
             handle_append_event_command(
@@ -1856,6 +1892,7 @@ async fn execute_control_command(
             payload,
             metadata,
             note,
+            publish,
         } => {
             let verbose = config_verbose(&shared_config)?;
             let aggregate = spawn_blocking({
@@ -1867,6 +1904,7 @@ async fn execute_control_command(
                 let payload = payload.clone();
                 let metadata = metadata.clone();
                 let note = note.clone();
+                let publish = publish.clone();
                 move || {
                     core.create_aggregate(CreateAggregateInput {
                         token,
@@ -1876,6 +1914,7 @@ async fn execute_control_command(
                         payload,
                         metadata,
                         note,
+                        publish,
                     })
                 }
             })
@@ -2243,6 +2282,82 @@ where
     Ok(())
 }
 
+fn decode_publish_targets(
+    list: struct_list::Reader<'_, publish_target::Owned>,
+) -> std::result::Result<Vec<PublishTarget>, EventError> {
+    let mut targets = Vec::with_capacity(list.len() as usize);
+    for entry in list.iter() {
+        let plugin_reader = entry
+            .get_plugin()
+            .map_err(|err| EventError::Serialization(err.to_string()))?;
+        let plugin = plugin_reader
+            .to_str()
+            .map_err(|err| EventError::Serialization(err.to_string()))?
+            .to_string();
+        if plugin.trim().is_empty() {
+            return Err(EventError::InvalidSchema(
+                "publish target plugin cannot be empty".into(),
+            ));
+        }
+
+        let mode = if entry.get_has_mode() {
+            let raw = entry
+                .get_mode()
+                .map_err(|err| EventError::Serialization(err.to_string()))?
+                .to_str()
+                .map_err(|err| EventError::Serialization(err.to_string()))?;
+            Some(parse_publish_mode(raw)?)
+        } else {
+            None
+        };
+
+        let priority = if entry.get_has_priority() {
+            let raw = entry
+                .get_priority()
+                .map_err(|err| EventError::Serialization(err.to_string()))?
+                .to_str()
+                .map_err(|err| EventError::Serialization(err.to_string()))?;
+            Some(parse_publish_priority(raw)?)
+        } else {
+            None
+        };
+
+        targets.push(PublishTarget {
+            plugin: plugin.to_string(),
+            mode,
+            priority,
+        });
+    }
+    Ok(targets)
+}
+
+fn parse_publish_mode(raw: &str) -> std::result::Result<PluginPayloadMode, EventError> {
+    match raw.to_ascii_lowercase().as_str() {
+        "all" => Ok(PluginPayloadMode::All),
+        "event-only" => Ok(PluginPayloadMode::EventOnly),
+        "state-only" => Ok(PluginPayloadMode::StateOnly),
+        "schema-only" => Ok(PluginPayloadMode::SchemaOnly),
+        "event-and-schema" => Ok(PluginPayloadMode::EventAndSchema),
+        "extensions-only" => Ok(PluginPayloadMode::ExtensionsOnly),
+        other => Err(EventError::InvalidSchema(format!(
+            "invalid publish mode '{}'",
+            other
+        ))),
+    }
+}
+
+fn parse_publish_priority(raw: &str) -> std::result::Result<JobPriority, EventError> {
+    match raw.to_ascii_lowercase().as_str() {
+        "low" => Ok(JobPriority::Low),
+        "normal" => Ok(JobPriority::Normal),
+        "high" => Ok(JobPriority::High),
+        other => Err(EventError::InvalidSchema(format!(
+            "invalid publish priority '{}'",
+            other
+        ))),
+    }
+}
+
 fn authorize_tenant_admin(
     core: &CoreContext,
     token: &str,
@@ -2264,9 +2379,11 @@ async fn handle_append_event_command(
     task_label: &'static str,
     verbose: bool,
 ) -> std::result::Result<ControlReply, EventError> {
+    let publish_targets = input.publish.clone();
+    let input_for_task = input;
     let record = spawn_blocking({
         let core = core.clone();
-        move || core.append_event(input)
+        move || core.append_event(input_for_task)
     })
     .await
     .map_err(|err| EventError::Storage(format!("{task_label} task failed: {err}")))??;
@@ -2328,7 +2445,14 @@ async fn handle_append_event_command(
 
         match state_result {
             Ok(current_state) => {
-                if let Err(err) = plugins.notify_event(&record, &current_state, schema.as_ref()) {
+                let publish_slice =
+                    (!publish_targets.is_empty()).then_some(publish_targets.as_slice());
+                if let Err(err) = plugins.notify_event_for_targets(
+                    &record,
+                    &current_state,
+                    schema.as_ref(),
+                    publish_slice,
+                ) {
                     error!("plugin notification failed: {}", err);
                 }
             }
@@ -2550,6 +2674,7 @@ pub async fn invoke(args: &[String], addr: &str) -> Result<CliCommandResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capnp::message::Builder;
     use tempfile::TempDir;
 
     #[test]
@@ -2572,5 +2697,70 @@ mod tests {
 
         let resolved = probe_dir_for_cli(dir.path()).expect("expected CLI path");
         assert_eq!(resolved, dbx);
+    }
+
+    #[test]
+    fn parses_publish_targets_from_append_control_request() -> crate::error::Result<()> {
+        let mut message = Builder::new_default();
+        {
+            let mut request = message.init_root::<control_request::Builder>();
+            request.set_id(42);
+            let mut payload = request.reborrow().init_payload();
+            let mut append = payload.reborrow().init_append_event();
+            append.set_token("t");
+            append.set_aggregate_type("animal");
+            append.set_aggregate_id("a-1");
+            append.set_event_type("created");
+            append.set_payload_json("{}");
+            append.set_has_note(false);
+            append.set_note("");
+            append.set_has_metadata(false);
+            append.set_metadata_json("");
+
+            let mut targets = append.reborrow().init_publish_targets(2);
+            {
+                let mut target = targets.reborrow().get(0);
+                target.set_plugin("search-indexer");
+                target.set_has_mode(true);
+                target.set_mode("all");
+                target.set_has_priority(true);
+                target.set_priority("high");
+            }
+            {
+                let mut target = targets.reborrow().get(1);
+                target.set_plugin("analytics-engine");
+                target.set_has_mode(false);
+                target.set_has_priority(false);
+                target.set_mode("");
+                target.set_priority("");
+            }
+            append.set_has_publish_targets(true);
+        }
+
+        let words = write_message_to_words(&message);
+        let mut words_slice: &[u8] = &words;
+        let reader =
+            capnp::serialize::read_message_from_flat_slice(&mut words_slice, ReaderOptions::new())
+                .map_err(|err| EventError::Serialization(err.to_string()))?;
+        let command = parse_control_command(
+            reader
+                .get_root::<control_request::Reader>()
+                .map_err(|err| EventError::Serialization(err.to_string()))?,
+        )?;
+
+        match command {
+            ControlCommand::AppendEvent { publish, .. } => {
+                assert_eq!(publish.len(), 2);
+                assert_eq!(publish[0].plugin, "search-indexer");
+                assert_eq!(publish[0].mode, Some(PluginPayloadMode::All));
+                assert_eq!(publish[0].priority, Some(JobPriority::High));
+                assert_eq!(publish[1].plugin, "analytics-engine");
+                assert!(publish[1].mode.is_none());
+                assert!(publish[1].priority.is_none());
+            }
+            _ => panic!("unexpected command parsed"),
+        }
+
+        Ok(())
     }
 }

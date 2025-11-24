@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use tracing::{error, warn};
 
 use crate::{
@@ -40,10 +42,32 @@ pub trait Plugin: Send + Sync {
 }
 
 struct PluginEntry {
+    identifier: String,
     label: String,
     mode: PluginPayloadMode,
     plugin: Box<dyn Plugin>,
     emit_events: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobPriority {
+    Low,
+    Normal,
+    High,
+}
+
+impl Default for JobPriority {
+    fn default() -> Self {
+        JobPriority::Normal
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishTarget {
+    pub plugin: String,
+    pub mode: Option<PluginPayloadMode>,
+    pub priority: Option<JobPriority>,
 }
 
 struct QueuePruner {
@@ -114,8 +138,13 @@ impl PluginManager {
                 continue;
             }
             let label = plugin_label(&definition);
+            let identifier = definition
+                .name
+                .clone()
+                .unwrap_or_else(|| plugin_kind_name(definition.config.kind()).to_string());
             let plugin = instantiate_plugin(&definition, config);
             entries.push(PluginEntry {
+                identifier,
                 label,
                 mode: definition.payload_mode,
                 plugin,
@@ -176,19 +205,66 @@ impl PluginManager {
         state: &AggregateState,
         schema: Option<&AggregateSchema>,
     ) -> Result<()> {
+        self.notify_event_for_targets(record, state, schema, None)
+    }
+
+    pub fn notify_event_for_targets(
+        &self,
+        record: &EventRecord,
+        state: &AggregateState,
+        schema: Option<&AggregateSchema>,
+        targets: Option<&[PublishTarget]>,
+    ) -> Result<()> {
         if self.plugins.is_empty() || self.plugins.iter().all(|entry| !entry.emit_events) {
             return Ok(());
         }
 
-        for entry in self.plugins.iter() {
-            if !entry.emit_events {
-                continue;
-            }
+        let selected: Vec<(&PluginEntry, PluginPayloadMode, JobPriority)> =
+            if let Some(targets) = targets {
+                if targets.is_empty() {
+                    return Ok(());
+                }
+                let mut seen = HashSet::new();
+                let mut matched = Vec::new();
+                for target in targets {
+                    let key = target.plugin.trim();
+                    if key.is_empty() {
+                        return Err(EventError::Config(
+                            "publish target name cannot be empty".into(),
+                        ));
+                    }
+                    if !seen.insert(key.to_ascii_lowercase()) {
+                        continue;
+                    }
+                    let entry = self
+                        .plugins
+                        .iter()
+                        .find(|entry| entry.identifier.eq_ignore_ascii_case(key))
+                        .ok_or_else(|| {
+                            EventError::Config(format!("plugin '{}' is not configured", key))
+                        })?;
+                    if !entry.emit_events {
+                        return Err(EventError::Config(format!("plugin '{}' is disabled", key)));
+                    }
+                    let mode = target.mode.unwrap_or(entry.mode);
+                    let priority = target.priority.unwrap_or_default();
+                    matched.push((entry, mode, priority));
+                }
+                matched
+            } else {
+                self.plugins
+                    .iter()
+                    .filter(|entry| entry.emit_events)
+                    .map(|entry| (entry, entry.mode, JobPriority::Normal))
+                    .collect()
+            };
+
+        for (entry, mode, priority) in selected {
             if let Some(queue) = &self.queue {
-                let job_payload = build_job_payload(entry.mode, record, state, schema);
+                let job_payload = build_job_payload(mode, record, state, schema);
                 let payload_value = serde_json::to_value(&job_payload)?;
                 let now = Utc::now().timestamp_millis();
-                match queue.enqueue_job(&entry.label, payload_value, now) {
+                match queue.enqueue_job(&entry.label, payload_value, now, priority) {
                     Ok(_) => {
                         self.maybe_prune_done(queue, now);
                         if let Err(err) = self.process_jobs_for_plugin(queue, entry) {
@@ -207,7 +283,6 @@ impl PluginManager {
                             entry.label,
                             err
                         );
-                        let mode = entry.mode;
                         let owned_record = sanitized_record_for_mode(mode, record);
                         let record_ref = owned_record
                             .as_ref()
@@ -230,7 +305,6 @@ impl PluginManager {
                     }
                 }
             } else {
-                let mode = entry.mode;
                 let owned_record = sanitized_record_for_mode(mode, record);
                 let record_ref = owned_record
                     .as_ref()
@@ -545,6 +619,7 @@ mod tests {
 
         let manager = PluginManager {
             plugins: Arc::new(vec![PluginEntry {
+                identifier: "failing".into(),
                 label: "failing".into(),
                 mode: PluginPayloadMode::All,
                 plugin: Box::new(FailingPlugin),
@@ -574,6 +649,7 @@ mod tests {
 
         let failing_manager = PluginManager {
             plugins: Arc::new(vec![PluginEntry {
+                identifier: "failing".into(),
                 label: "failing".into(),
                 mode: PluginPayloadMode::All,
                 plugin: Box::new(FailingPlugin),
@@ -594,6 +670,7 @@ mod tests {
 
         let success_manager = PluginManager {
             plugins: Arc::new(vec![PluginEntry {
+                identifier: "failing".into(),
                 label: "failing".into(),
                 mode: PluginPayloadMode::All,
                 plugin: Box::new(SuccessfulPlugin),
@@ -619,10 +696,16 @@ mod tests {
         let queue_store = PluginQueueStore::open(queue_path.as_path())?;
 
         let now = Utc::now().timestamp_millis();
-        let old_job = queue_store.enqueue_job("rest", json!({"kind": "old"}), now - 120_000)?;
+        let old_job = queue_store.enqueue_job(
+            "rest",
+            json!({"kind": "old"}),
+            now - 120_000,
+            JobPriority::Normal,
+        )?;
         queue_store.complete_job(old_job.id)?;
 
-        let fresh_job = queue_store.enqueue_job("rest", json!({"kind": "fresh"}), now)?;
+        let fresh_job =
+            queue_store.enqueue_job("rest", json!({"kind": "fresh"}), now, JobPriority::Normal)?;
         queue_store.complete_job(fresh_job.id)?;
 
         let pruner = QueuePruner::from_config(PluginQueuePruneConfig {
@@ -656,7 +739,12 @@ mod tests {
         let now = Utc::now().timestamp_millis();
         for idx in 0..4 {
             let created_at = now + idx as i64;
-            let job = queue_store.enqueue_job("rest", json!({"seq": idx}), created_at)?;
+            let job = queue_store.enqueue_job(
+                "rest",
+                json!({"seq": idx}),
+                created_at,
+                JobPriority::Normal,
+            )?;
             queue_store.complete_job(job.id)?;
         }
 

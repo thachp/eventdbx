@@ -7,6 +7,7 @@ use std::{
 use crate::{
     error::{EventError, Result},
     filter::FilterExpr,
+    plugin::PublishTarget,
     restrict::{self, RestrictMode},
     schema::SchemaManager,
     snowflake::SnowflakeId,
@@ -347,6 +348,7 @@ impl CoreContext {
             payload,
             metadata,
             note,
+            publish: _,
         } = input;
 
         ensure_snake_case("aggregate_type", &aggregate_type)?;
@@ -386,6 +388,7 @@ impl CoreContext {
             patch: None,
             metadata,
             note,
+            publish: Vec::new(),
         };
         let _record = self.append_event_internal(append_input, true)?;
 
@@ -530,6 +533,7 @@ impl CoreContext {
             patch,
             metadata,
             note,
+            publish: _,
         } = input;
 
         enum EventBody {
@@ -715,6 +719,7 @@ pub struct AppendEventInput {
     pub patch: Option<Value>,
     pub metadata: Option<Value>,
     pub note: Option<String>,
+    pub publish: Vec<PublishTarget>,
 }
 
 #[derive(Debug, Clone)]
@@ -726,6 +731,7 @@ pub struct CreateAggregateInput {
     pub payload: Value,
     pub metadata: Option<Value>,
     pub note: Option<String>,
+    pub publish: Vec<PublishTarget>,
 }
 
 #[derive(Debug, Clone)]
