@@ -1,11 +1,13 @@
-use std::fs;
 use std::path::PathBuf;
+use std::{fs, io::Read};
 
 use anyhow::{Context, Result};
 use assert_cmd::{Command, cargo::cargo_bin_cmd};
 use base64::Engine as _;
+use csv::StringRecord;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use zip::ZipArchive;
 
 use chrono::{DateTime, Utc};
 use eventdbx::{
@@ -2860,6 +2862,159 @@ fn aggregate_export_json_creates_file() -> Result<()> {
         "export file missing aggregate id: {}",
         contents
     );
+    Ok(())
+}
+
+#[test]
+fn aggregate_export_csv_sorts_headers_and_rows() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&[
+        "schema",
+        "create",
+        "exportcsv",
+        "--events",
+        "export_created",
+    ])?;
+    cli.create_aggregate_with_fields(
+        "exportcsv",
+        "exp-2",
+        "export_created",
+        &[("status", "shipped"), ("total", "12")],
+    )?;
+    cli.create_aggregate_with_fields(
+        "exportcsv",
+        "exp-1",
+        "export_created",
+        &[("status", "ready"), ("total", "10")],
+    )?;
+
+    let output_path = cli.home.join("export.csv");
+    let stdout = cli.run(&[
+        "aggregate",
+        "export",
+        "exportcsv",
+        "--format",
+        "csv",
+        "--output",
+        output_path.to_string_lossy().as_ref(),
+    ])?;
+    assert!(
+        stdout.contains("Exported 1 aggregate type(s) in CSV format"),
+        "unexpected export output:\n{}",
+        stdout
+    );
+    let contents = fs::read_to_string(&output_path)?;
+    let mut reader = csv::Reader::from_reader(contents.as_bytes());
+    let headers = reader.headers()?.clone();
+    assert_eq!(
+        headers,
+        vec!["__aggregate_id", "status", "total"],
+        "headers should include aggregate id plus sorted field names"
+    );
+    let rows = reader
+        .records()
+        .collect::<std::result::Result<Vec<_>, csv::Error>>()?;
+    assert_eq!(
+        rows,
+        vec![
+            StringRecord::from(vec!["exp-1", "ready", "10"]),
+            StringRecord::from(vec!["exp-2", "shipped", "12"])
+        ],
+        "rows should be sorted by aggregate id"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn aggregate_export_all_errors_when_output_is_file() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "first", "--events", "first_created"])?;
+    cli.run(&["schema", "create", "second", "--events", "second_created"])?;
+    cli.create_aggregate("first", "first-1", "first_created")?;
+    cli.create_aggregate("second", "second-1", "second_created")?;
+
+    let output_path = cli.home.join("multi.json");
+    fs::write(&output_path, "{}")?;
+    let failure = cli.run_failure(&[
+        "aggregate",
+        "export",
+        "--all",
+        "--format",
+        "json",
+        "--output",
+        output_path.to_string_lossy().as_ref(),
+    ])?;
+    assert!(
+        failure
+            .stderr
+            .contains("output path must be a directory when exporting multiple aggregate types"),
+        "unexpected export error message:\n{}\nstdout:\n{}",
+        failure.stderr,
+        failure.stdout
+    );
+    Ok(())
+}
+
+#[test]
+fn aggregate_export_all_to_zip_includes_each_type() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "alpha", "--events", "alpha_created"])?;
+    cli.run(&["schema", "create", "beta", "--events", "beta_created"])?;
+    cli.create_aggregate_with_fields("alpha", "alpha-1", "alpha_created", &[("status", "ok")])?;
+    cli.create_aggregate_with_fields("beta", "beta-1", "beta_created", &[("count", "1")])?;
+
+    let output_dir = cli.home.join("exports");
+    fs::create_dir_all(&output_dir)?;
+    let stdout = cli.run(&[
+        "aggregate",
+        "export",
+        "--all",
+        "--format",
+        "json",
+        "--zip",
+        "--output",
+        output_dir.to_string_lossy().as_ref(),
+    ])?;
+    let zip_path = output_dir.join("aggregates_json.zip");
+    assert!(
+        zip_path.exists(),
+        "expected zip archive at {}",
+        zip_path.display()
+    );
+    assert!(
+        stdout.contains(zip_path.to_string_lossy().as_ref()),
+        "export output should mention archive path:\n{}",
+        stdout
+    );
+
+    let file = fs::File::open(&zip_path)?;
+    let mut archive = ZipArchive::new(file)?;
+
+    let mut alpha_contents = String::new();
+    {
+        let mut alpha_file = archive
+            .by_name("alpha.json")
+            .context("missing alpha.json in archive")?;
+        alpha_file.read_to_string(&mut alpha_contents)?;
+    }
+    let alpha_records: Vec<Value> = serde_json::from_str(&alpha_contents)?;
+    assert_eq!(alpha_records.len(), 1);
+    assert_eq!(alpha_records[0]["__aggregate_id"], json!("alpha-1"));
+    assert_eq!(alpha_records[0]["status"], json!("ok"));
+
+    let mut beta_contents = String::new();
+    {
+        let mut beta_file = archive
+            .by_name("beta.json")
+            .context("missing beta.json in archive")?;
+        beta_file.read_to_string(&mut beta_contents)?;
+    }
+    let beta_records: Vec<Value> = serde_json::from_str(&beta_contents)?;
+    assert_eq!(beta_records.len(), 1);
+    assert_eq!(beta_records[0]["__aggregate_id"], json!("beta-1"));
+    assert_eq!(beta_records[0]["count"], json!("1"));
+
     Ok(())
 }
 
