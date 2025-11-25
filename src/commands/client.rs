@@ -30,13 +30,13 @@ static NO_NOISE_OVERRIDE: AtomicBool = AtomicBool::new(false);
 static NO_NOISE_OVERRIDE_SET: AtomicBool = AtomicBool::new(false);
 
 pub fn set_no_noise(no_noise: bool) {
-    NO_NOISE_OVERRIDE.store(no_noise, Ordering::Relaxed);
-    NO_NOISE_OVERRIDE_SET.store(true, Ordering::Relaxed);
+    NO_NOISE_OVERRIDE.store(no_noise, Ordering::Release);
+    NO_NOISE_OVERRIDE_SET.store(true, Ordering::Release);
 }
 
 fn resolve_no_noise(config_value: bool) -> bool {
-    if NO_NOISE_OVERRIDE_SET.load(Ordering::Relaxed) {
-        NO_NOISE_OVERRIDE.load(Ordering::Relaxed)
+    if NO_NOISE_OVERRIDE_SET.load(Ordering::Acquire) {
+        NO_NOISE_OVERRIDE.load(Ordering::Acquire)
     } else {
         config_value
     }

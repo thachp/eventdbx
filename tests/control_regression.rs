@@ -646,6 +646,13 @@ async fn control_capnp_regression_flows() -> Result<()> {
     let outcome = server_task.await.context("control handler task panicked")?;
     outcome.context("control handler returned error")?;
 
+    {
+        let mut guard = shared_config
+            .write()
+            .expect("config lock poisoned while enabling no_noise for plaintext test");
+        guard.no_noise = true;
+    }
+
     let (mut plain_writer, mut plain_reader, mut plain_transport, plain_task) =
         open_control_session(
             Arc::clone(&core_provider),
