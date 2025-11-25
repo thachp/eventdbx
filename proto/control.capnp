@@ -60,11 +60,13 @@ struct ControlHello {
   protocolVersion @0 :UInt16;
   token @1 :Text;
   tenantId @2 :Text;
+  noNoise @3 :Bool;
 }
 
 struct ControlHelloResponse {
   accepted @0 :Bool;
   message @1 :Text;
+  noNoise @2 :Bool;
 }
 
 struct ListAggregatesRequest {

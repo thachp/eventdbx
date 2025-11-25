@@ -50,11 +50,17 @@ pub struct ConfigArgs {
 
     #[arg(long = "shard-map-path")]
     pub shard_map_path: Option<PathBuf>,
+
+    #[arg(long = "no-noise", action = clap::ArgAction::SetTrue)]
+    pub no_noise: bool,
+
+    #[arg(long = "noise", action = clap::ArgAction::SetTrue, conflicts_with = "no_noise")]
+    pub noise: bool,
 }
 
 pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
     let (mut config, path) = load_or_default(config_path)?;
-    if !has_updates(&args) {
+    if !has_updates(&args, &config) {
         let contents = toml::to_string_pretty(&config)?;
         println!("{contents}");
         return Ok(());
@@ -76,6 +82,8 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         multi_tenant,
         shard_count,
         shard_map_path,
+        no_noise,
+        noise,
     } = args;
 
     let data_encryption_key = normalize_secret(data_encryption_key);
@@ -94,6 +102,13 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         } else {
             None
         };
+    let no_noise_update = if no_noise {
+        Some(true)
+    } else if noise {
+        Some(false)
+    } else {
+        None
+    };
 
     config.apply_update(ConfigUpdate {
         port,
@@ -109,6 +124,7 @@ pub fn execute(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<()> {
         socket: None,
         snowflake_worker_id,
         tenants: tenant_update,
+        no_noise: no_noise_update,
     });
 
     if !was_initialized && !config.is_initialized() {
@@ -145,7 +161,7 @@ pub fn normalize_secret(input: Option<String>) -> Option<String> {
     })
 }
 
-fn has_updates(args: &ConfigArgs) -> bool {
+fn has_updates(args: &ConfigArgs, config: &Config) -> bool {
     args.port.is_some()
         || args.data_dir.is_some()
         || args.cache_threshold.is_some()
@@ -164,4 +180,6 @@ fn has_updates(args: &ConfigArgs) -> bool {
         || args.multi_tenant.is_some()
         || args.shard_count.is_some()
         || args.shard_map_path.is_some()
+        || (args.no_noise && !config.no_noise)
+        || (args.noise && config.no_noise)
 }

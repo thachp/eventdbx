@@ -10,6 +10,28 @@ pub const MAX_NOISE_FRAME_PAYLOAD: usize = 65_535;
 const AEAD_TAG_LEN: usize = 16;
 const HANDSHAKE_MESSAGE_MAX: usize = 1024;
 
+#[derive(Debug)]
+pub enum FrameTransport {
+    Noise(TransportState),
+    Plain,
+}
+
+impl FrameTransport {
+    pub fn plain() -> Self {
+        FrameTransport::Plain
+    }
+
+    pub fn is_noise(&self) -> bool {
+        matches!(self, FrameTransport::Noise(_))
+    }
+}
+
+impl From<TransportState> for FrameTransport {
+    fn from(state: TransportState) -> Self {
+        FrameTransport::Noise(state)
+    }
+}
+
 fn derive_psk(token: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(token);
@@ -79,6 +101,17 @@ fn ensure_frame_size(len: usize) -> Result<()> {
             "frame length {} exceeds allowed maximum {}",
             len,
             MAX_NOISE_FRAME_PAYLOAD + AEAD_TAG_LEN
+        );
+    }
+    Ok(())
+}
+
+fn ensure_plaintext_frame_size(len: usize) -> Result<()> {
+    if len > MAX_NOISE_FRAME_PAYLOAD {
+        bail!(
+            "frame length {} exceeds allowed maximum {}",
+            len,
+            MAX_NOISE_FRAME_PAYLOAD
         );
     }
     Ok(())
@@ -179,6 +212,48 @@ where
     Ok(Some(plaintext))
 }
 
+pub async fn write_session_frame<W>(
+    writer: &mut W,
+    transport: &mut FrameTransport,
+    plaintext: &[u8],
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match transport {
+        FrameTransport::Noise(state) => write_encrypted_frame(writer, state, plaintext).await,
+        FrameTransport::Plain => {
+            ensure_plaintext_frame_size(plaintext.len())?;
+            send_frame(writer, plaintext).await?;
+            writer
+                .flush()
+                .await
+                .context("failed to flush control frame")?;
+            Ok(())
+        }
+    }
+}
+
+pub async fn read_session_frame<R>(
+    reader: &mut R,
+    transport: &mut FrameTransport,
+) -> Result<Option<Vec<u8>>>
+where
+    R: AsyncRead + Unpin,
+{
+    match transport {
+        FrameTransport::Noise(state) => read_encrypted_frame(reader, state).await,
+        FrameTransport::Plain => {
+            let frame = match read_frame(reader).await? {
+                Some(frame) => frame,
+                None => return Ok(None),
+            };
+            ensure_plaintext_frame_size(frame.len())?;
+            Ok(Some(frame))
+        }
+    }
+}
+
 async fn send_frame<W>(writer: &mut W, payload: &[u8]) -> Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -270,6 +345,39 @@ pub fn read_encrypted_frame_blocking<R: Read>(
     };
     let plaintext = decrypt_payload(state, &frame)?;
     Ok(Some(plaintext))
+}
+
+pub fn write_session_frame_blocking<W: Write>(
+    writer: &mut W,
+    transport: &mut FrameTransport,
+    plaintext: &[u8],
+) -> Result<()> {
+    match transport {
+        FrameTransport::Noise(state) => write_encrypted_frame_blocking(writer, state, plaintext),
+        FrameTransport::Plain => {
+            ensure_plaintext_frame_size(plaintext.len())?;
+            send_frame_blocking(writer, plaintext)?;
+            writer.flush()?;
+            Ok(())
+        }
+    }
+}
+
+pub fn read_session_frame_blocking<R: Read>(
+    reader: &mut R,
+    transport: &mut FrameTransport,
+) -> Result<Option<Vec<u8>>> {
+    match transport {
+        FrameTransport::Noise(state) => read_encrypted_frame_blocking(reader, state),
+        FrameTransport::Plain => {
+            let frame = match read_frame_blocking(reader)? {
+                Some(frame) => frame,
+                None => return Ok(None),
+            };
+            ensure_plaintext_frame_size(frame.len())?;
+            Ok(Some(frame))
+        }
+    }
 }
 
 fn send_frame_blocking<W: Write>(writer: &mut W, payload: &[u8]) -> Result<()> {

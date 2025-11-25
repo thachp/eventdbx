@@ -36,6 +36,10 @@ struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
 
+    /// Disable Noise encryption for the control channel (Cap'n Proto framing only)
+    #[arg(long, env = "EVENTDBX_NO_NOISE", global = true)]
+    no_noise: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -127,7 +131,12 @@ async fn main() -> Result<()> {
     logging::init()?;
     observability::init()?;
 
-    let Cli { config, command } = Cli::parse();
+    let Cli {
+        config,
+        command,
+        no_noise,
+    } = Cli::parse();
+    commands::client::set_no_noise(no_noise);
 
     if !matches!(&command, Commands::Upgrade(_)) {
         if let Err(err) = commands::upgrade::maybe_print_upgrade_notice().await {

@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     io::Write,
     net::{IpAddr, SocketAddr, TcpStream},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -10,8 +11,8 @@ use capnp::{
     message::Builder, message::ReaderOptions, serialize, serialize::write_message_to_words,
 };
 use eventdbx::replication_noise::{
-    perform_client_handshake_blocking, read_encrypted_frame_blocking,
-    write_encrypted_frame_blocking,
+    FrameTransport, perform_client_handshake_blocking, read_session_frame_blocking,
+    write_session_frame_blocking,
 };
 use eventdbx::{
     config::Config,
@@ -21,14 +22,38 @@ use eventdbx::{
     store::{AggregateState, EventRecord, SnapshotRecord},
 };
 use serde_json::{self, Value};
+use tracing::debug;
 
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
 const DEFAULT_PAGE_SIZE: usize = 256;
+static NO_NOISE_OVERRIDE: AtomicBool = AtomicBool::new(false);
+static NO_NOISE_OVERRIDE_SET: AtomicBool = AtomicBool::new(false);
+
+pub fn set_no_noise(no_noise: bool) {
+    NO_NOISE_OVERRIDE.store(no_noise, Ordering::Relaxed);
+    NO_NOISE_OVERRIDE_SET.store(true, Ordering::Relaxed);
+}
+
+fn resolve_no_noise(config_value: bool) -> bool {
+    if NO_NOISE_OVERRIDE_SET.load(Ordering::Relaxed) {
+        NO_NOISE_OVERRIDE.load(Ordering::Relaxed)
+    } else {
+        config_value
+    }
+}
 
 #[derive(Clone)]
 pub struct ServerClient {
     connect_addr: String,
     tenant: Option<String>,
+    no_noise: bool,
+}
+
+#[derive(Clone)]
+struct ControlEndpoint {
+    connect_addr: String,
+    tenant: Option<String>,
+    no_noise: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -41,10 +66,12 @@ pub struct TenantSchemaPublishResult {
 impl ServerClient {
     pub fn new(config: &Config) -> Result<Self> {
         let connect_addr = normalize_connect_addr(&config.socket.bind_addr);
+        let no_noise = resolve_no_noise(config.no_noise);
 
         Ok(Self {
             connect_addr,
             tenant: Some(config.active_domain().to_string()),
+            no_noise,
         })
     }
 
@@ -57,13 +84,36 @@ impl ServerClient {
         Self {
             connect_addr: connect_addr.into(),
             tenant,
+            no_noise: resolve_no_noise(false),
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_tenant(mut self, tenant: Option<String>) -> Self {
         self.tenant = tenant;
         self
+    }
+
+    fn endpoint(&self) -> ControlEndpoint {
+        ControlEndpoint {
+            connect_addr: self.connect_addr.clone(),
+            tenant: self.tenant.clone(),
+            no_noise: self.no_noise,
+        }
+    }
+
+    fn send_control_request<Build, Handle, T>(
+        &self,
+        token: &str,
+        request_id: u64,
+        build: Build,
+        handle: Handle,
+    ) -> Result<T>
+    where
+        Build: FnOnce(&mut control_request::Builder<'_>) -> Result<()>,
+        Handle: FnOnce(control_response::Reader<'_>) -> Result<T>,
+    {
+        let endpoint = self.endpoint();
+        send_control_request_blocking(&endpoint, token, request_id, build, handle)
     }
 
     pub fn create_aggregate(
@@ -76,8 +126,7 @@ impl ServerClient {
         metadata: Option<&Value>,
         note: Option<&str>,
     ) -> Result<Option<AggregateState>> {
-        let connect_addr = self.connect_addr.clone();
-        let tenant = self.tenant.clone();
+        let endpoint = self.endpoint();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
@@ -89,8 +138,7 @@ impl ServerClient {
         if tokio::runtime::Handle::try_current().is_ok() {
             return tokio::task::block_in_place(move || {
                 create_aggregate_blocking(
-                    connect_addr,
-                    tenant.clone(),
+                    endpoint.clone(),
                     token,
                     aggregate_type,
                     aggregate_id,
@@ -103,8 +151,7 @@ impl ServerClient {
         }
 
         create_aggregate_blocking(
-            connect_addr,
-            tenant,
+            endpoint,
             token,
             aggregate_type,
             aggregate_id,
@@ -125,8 +172,7 @@ impl ServerClient {
         metadata: Option<&Value>,
         note: Option<&str>,
     ) -> Result<Option<EventRecord>> {
-        let connect_addr = self.connect_addr.clone();
-        let tenant = self.tenant.clone();
+        let endpoint = self.endpoint();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
@@ -138,8 +184,7 @@ impl ServerClient {
         if tokio::runtime::Handle::try_current().is_ok() {
             return tokio::task::block_in_place(move || {
                 append_event_blocking(
-                    connect_addr,
-                    tenant.clone(),
+                    endpoint.clone(),
                     token,
                     aggregate_type,
                     aggregate_id,
@@ -152,8 +197,7 @@ impl ServerClient {
         }
 
         append_event_blocking(
-            connect_addr,
-            tenant,
+            endpoint,
             token,
             aggregate_type,
             aggregate_id,
@@ -174,8 +218,7 @@ impl ServerClient {
         metadata: Option<&Value>,
         note: Option<&str>,
     ) -> Result<Option<EventRecord>> {
-        let connect_addr = self.connect_addr.clone();
-        let tenant = self.tenant.clone();
+        let endpoint = self.endpoint();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
@@ -187,8 +230,7 @@ impl ServerClient {
         if tokio::runtime::Handle::try_current().is_ok() {
             return tokio::task::block_in_place(move || {
                 patch_event_blocking(
-                    connect_addr,
-                    tenant.clone(),
+                    endpoint.clone(),
                     token,
                     aggregate_type,
                     aggregate_id,
@@ -201,8 +243,7 @@ impl ServerClient {
         }
 
         patch_event_blocking(
-            connect_addr,
-            tenant,
+            endpoint,
             token,
             aggregate_type,
             aggregate_id,
@@ -220,8 +261,7 @@ impl ServerClient {
         aggregate_id: &str,
         comment: Option<&str>,
     ) -> Result<SnapshotRecord> {
-        let connect_addr = self.connect_addr.clone();
-        let tenant = self.tenant.clone();
+        let endpoint = self.endpoint();
         let token = token.to_string();
         let aggregate_type = aggregate_type.to_string();
         let aggregate_id = aggregate_id.to_string();
@@ -230,8 +270,7 @@ impl ServerClient {
         if tokio::runtime::Handle::try_current().is_ok() {
             return tokio::task::block_in_place(move || {
                 create_snapshot_blocking(
-                    connect_addr,
-                    tenant.clone(),
+                    endpoint.clone(),
                     token,
                     aggregate_type,
                     aggregate_id,
@@ -240,14 +279,7 @@ impl ServerClient {
             });
         }
 
-        create_snapshot_blocking(
-            connect_addr,
-            tenant,
-            token,
-            aggregate_type,
-            aggregate_id,
-            comment,
-        )
+        create_snapshot_blocking(endpoint, token, aggregate_type, aggregate_id, comment)
     }
 
     pub fn list_snapshots(
@@ -257,8 +289,7 @@ impl ServerClient {
         aggregate_id: Option<&str>,
         version: Option<u64>,
     ) -> Result<Vec<SnapshotRecord>> {
-        let connect_addr = self.connect_addr.clone();
-        let tenant = self.tenant.clone();
+        let endpoint = self.endpoint();
         let token = token.to_string();
         let aggregate_type = aggregate_type.map(|value| value.to_string());
         let aggregate_id = aggregate_id.map(|value| value.to_string());
@@ -266,8 +297,7 @@ impl ServerClient {
         if tokio::runtime::Handle::try_current().is_ok() {
             return tokio::task::block_in_place(move || {
                 list_snapshots_blocking(
-                    connect_addr,
-                    tenant.clone(),
+                    endpoint.clone(),
                     token,
                     aggregate_type.clone(),
                     aggregate_id.clone(),
@@ -276,14 +306,7 @@ impl ServerClient {
             });
         }
 
-        list_snapshots_blocking(
-            connect_addr,
-            tenant,
-            token,
-            aggregate_type,
-            aggregate_id,
-            version,
-        )
+        list_snapshots_blocking(endpoint, token, aggregate_type, aggregate_id, version)
     }
 
     pub fn get_snapshot(
@@ -291,16 +314,15 @@ impl ServerClient {
         token: &str,
         snapshot_id: SnowflakeId,
     ) -> Result<Option<SnapshotRecord>> {
-        let connect_addr = self.connect_addr.clone();
-        let tenant = self.tenant.clone();
+        let endpoint = self.endpoint();
         let token = token.to_string();
         if tokio::runtime::Handle::try_current().is_ok() {
             return tokio::task::block_in_place(move || {
-                get_snapshot_blocking(connect_addr, tenant.clone(), token, snapshot_id)
+                get_snapshot_blocking(endpoint.clone(), token, snapshot_id)
             });
         }
 
-        get_snapshot_blocking(connect_addr, tenant, token, snapshot_id)
+        get_snapshot_blocking(endpoint, token, snapshot_id)
     }
 
     pub fn get_aggregate(
@@ -310,10 +332,8 @@ impl ServerClient {
         aggregate_id: &str,
     ) -> Result<Option<AggregateState>> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -401,10 +421,8 @@ impl ServerClient {
         archived_only: bool,
     ) -> Result<(Vec<AggregateState>, Option<String>)> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -546,10 +564,8 @@ impl ServerClient {
         take: usize,
     ) -> Result<(Vec<EventRecord>, Option<String>)> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -620,10 +636,8 @@ impl ServerClient {
         archived: bool,
     ) -> Result<()> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -663,10 +677,8 @@ impl ServerClient {
 
     pub fn list_schemas(&self, token: &str) -> Result<BTreeMap<String, AggregateSchema>> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -717,10 +729,8 @@ impl ServerClient {
         let payload_json = serde_json::to_string(schemas)
             .context("failed to serialize schema snapshot for remote replace")?;
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -757,10 +767,8 @@ impl ServerClient {
 
     pub fn assign_tenant(&self, token: &str, tenant: &str, shard: &str) -> Result<bool> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -800,10 +808,8 @@ impl ServerClient {
 
     pub fn unassign_tenant(&self, token: &str, tenant: &str) -> Result<bool> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -843,10 +849,8 @@ impl ServerClient {
 
     pub fn set_tenant_quota(&self, token: &str, tenant: &str, max_megabytes: u64) -> Result<bool> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -887,10 +891,8 @@ impl ServerClient {
 
     pub fn clear_tenant_quota(&self, token: &str, tenant: &str) -> Result<bool> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -930,10 +932,8 @@ impl ServerClient {
 
     pub fn recalc_tenant_storage(&self, token: &str, tenant: &str) -> Result<u64> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -973,10 +973,8 @@ impl ServerClient {
 
     pub fn reload_tenant(&self, token: &str, tenant: &str) -> Result<bool> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -1025,10 +1023,8 @@ impl ServerClient {
         reload: bool,
     ) -> Result<TenantSchemaPublishResult> {
         let request_id = next_request_id();
-        send_control_request_blocking(
-            &self.connect_addr,
+        self.send_control_request(
             token,
-            self.tenant.as_deref(),
             request_id,
             |request| {
                 let payload_builder = request.reborrow().init_payload();
@@ -1096,8 +1092,7 @@ impl ServerClient {
 }
 
 fn create_aggregate_blocking(
-    connect_addr: String,
-    tenant: Option<String>,
+    endpoint: ControlEndpoint,
     token: String,
     aggregate_type: String,
     aggregate_id: String,
@@ -1123,9 +1118,8 @@ fn create_aggregate_blocking(
         None => (String::new(), false),
     };
     send_control_request_blocking(
-        &connect_addr,
+        &endpoint,
         &token,
-        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -1181,8 +1175,7 @@ fn create_aggregate_blocking(
 }
 
 fn append_event_blocking(
-    connect_addr: String,
-    tenant: Option<String>,
+    endpoint: ControlEndpoint,
     token: String,
     aggregate_type: String,
     aggregate_id: String,
@@ -1211,9 +1204,8 @@ fn append_event_blocking(
         None => (String::new(), false),
     };
     send_control_request_blocking(
-        &connect_addr,
+        &endpoint,
         &token,
-        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -1269,8 +1261,7 @@ fn append_event_blocking(
 }
 
 fn patch_event_blocking(
-    connect_addr: String,
-    tenant: Option<String>,
+    endpoint: ControlEndpoint,
     token: String,
     aggregate_type: String,
     aggregate_id: String,
@@ -1296,9 +1287,8 @@ fn patch_event_blocking(
         None => (String::new(), false),
     };
     send_control_request_blocking(
-        &connect_addr,
+        &endpoint,
         &token,
-        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -1354,8 +1344,7 @@ fn patch_event_blocking(
 }
 
 fn create_snapshot_blocking(
-    connect_addr: String,
-    tenant: Option<String>,
+    endpoint: ControlEndpoint,
     token: String,
     aggregate_type: String,
     aggregate_id: String,
@@ -1369,9 +1358,8 @@ fn create_snapshot_blocking(
     };
 
     send_control_request_blocking(
-        &connect_addr,
+        &endpoint,
         &token,
-        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -1419,8 +1407,7 @@ fn create_snapshot_blocking(
 }
 
 fn list_snapshots_blocking(
-    connect_addr: String,
-    tenant: Option<String>,
+    endpoint: ControlEndpoint,
     token: String,
     aggregate_type: Option<String>,
     aggregate_id: Option<String>,
@@ -1441,9 +1428,8 @@ fn list_snapshots_blocking(
     };
 
     send_control_request_blocking(
-        &connect_addr,
+        &endpoint,
         &token,
-        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -1493,17 +1479,15 @@ fn list_snapshots_blocking(
 }
 
 fn get_snapshot_blocking(
-    connect_addr: String,
-    tenant: Option<String>,
+    endpoint: ControlEndpoint,
     token: String,
     snapshot_id: SnowflakeId,
 ) -> Result<Option<SnapshotRecord>> {
     let request_id = next_request_id();
 
     send_control_request_blocking(
-        &connect_addr,
+        &endpoint,
         &token,
-        tenant.as_deref(),
         request_id,
         |request| {
             let payload_builder = request.reborrow().init_payload();
@@ -1552,9 +1536,8 @@ fn get_snapshot_blocking(
 }
 
 fn send_control_request_blocking<Build, Handle, T>(
-    connect_addr: &str,
+    endpoint: &ControlEndpoint,
     handshake_token: &str,
-    handshake_tenant: Option<&str>,
     request_id: u64,
     build: Build,
     handle: Handle,
@@ -1563,8 +1546,12 @@ where
     Build: FnOnce(&mut control_request::Builder<'_>) -> Result<()>,
     Handle: FnOnce(control_response::Reader<'_>) -> Result<T>,
 {
-    let mut stream = TcpStream::connect(connect_addr)
-        .with_context(|| format!("failed to connect to CLI proxy at {}", connect_addr))?;
+    let mut stream = TcpStream::connect(&endpoint.connect_addr).with_context(|| {
+        format!(
+            "failed to connect to CLI proxy at {}",
+            endpoint.connect_addr
+        )
+    })?;
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .context("failed to configure proxy write timeout")?;
@@ -1577,7 +1564,8 @@ where
         let mut hello = hello_message.init_root::<control_hello::Builder>();
         hello.set_protocol_version(CONTROL_PROTOCOL_VERSION);
         hello.set_token(handshake_token);
-        if let Some(tenant) = handshake_tenant {
+        hello.set_no_noise(endpoint.no_noise);
+        if let Some(tenant) = endpoint.tenant.as_deref() {
             hello.set_tenant_id(tenant);
         } else {
             hello.set_tenant_id("");
@@ -1592,13 +1580,24 @@ where
     let response = response_message
         .get_root::<control_hello_response::Reader>()
         .context("failed to decode control hello response")?;
+    let response_no_noise = response.get_no_noise();
     if !response.get_accepted() {
         let reason = read_text(response.get_message(), "control handshake message")?;
         bail!("control handshake rejected: {}", reason);
     }
 
-    let mut noise = perform_client_handshake_blocking(&mut stream, handshake_token.as_bytes())
-        .context("failed to establish encrypted control channel")?;
+    if endpoint.no_noise && !response_no_noise {
+        debug!("CLI proxy did not acknowledge --no-noise; continuing with Noise transport");
+    }
+
+    let mut transport = if response_no_noise {
+        FrameTransport::plain()
+    } else {
+        FrameTransport::from(
+            perform_client_handshake_blocking(&mut stream, handshake_token.as_bytes())
+                .context("failed to establish Noise control channel")?,
+        )
+    };
 
     let mut message = Builder::new_default();
     {
@@ -1607,10 +1606,10 @@ where
         build(&mut request)?;
     }
     let request_bytes = write_message_to_words(&message);
-    write_encrypted_frame_blocking(&mut stream, &mut noise, &request_bytes)
+    write_session_frame_blocking(&mut stream, &mut transport, &request_bytes)
         .context("failed to send control request")?;
 
-    let response_bytes = read_encrypted_frame_blocking(&mut stream, &mut noise)?
+    let response_bytes = read_session_frame_blocking(&mut stream, &mut transport)?
         .ok_or_else(|| anyhow!("CLI proxy closed control channel before response"))?;
     let mut cursor = std::io::Cursor::new(&response_bytes);
     let response_message = capnp::serialize::read_message(&mut cursor, ReaderOptions::new())

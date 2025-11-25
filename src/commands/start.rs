@@ -382,6 +382,7 @@ fn apply_start_overrides(config: &mut Config, args: &StartArgs) {
         socket: None,
         tenants: None,
         snowflake_worker_id: None,
+        no_noise: None,
     });
 }
 

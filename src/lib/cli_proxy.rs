@@ -15,7 +15,6 @@ use capnp::{message::ReaderOptions, struct_list};
 use capnp_futures::serialize::{read_message, try_read_message};
 use futures::AsyncWriteExt;
 use serde_json::{self, Value};
-use snow::TransportState;
 use tokio::{
     net::{TcpListener, TcpStream},
     process::Command,
@@ -36,8 +35,8 @@ use crate::{
     observability,
     plugin::{JobPriority, PluginManager, PublishTarget},
     replication_noise::{
-        MAX_NOISE_FRAME_PAYLOAD, perform_server_handshake, read_encrypted_frame,
-        write_encrypted_frame,
+        FrameTransport, MAX_NOISE_FRAME_PAYLOAD, perform_server_handshake, read_session_frame,
+        write_session_frame,
     },
     schema::AggregateSchema,
     schema_history::{PublishOptions, SchemaHistoryManager},
@@ -269,6 +268,7 @@ enum FirstMessage {
         protocol_version: u16,
         token_result: Result<String, String>,
         tenant_result: Result<Option<String>, String>,
+        no_noise: bool,
     },
 }
 
@@ -385,7 +385,7 @@ pub mod test_support {
             let message = read_message(&mut server_reader, ReaderOptions::new())
                 .await
                 .context("failed to read control hello")?;
-            let (protocol_version, token_result, tenant_result) = {
+            let (protocol_version, token_result, tenant_result, no_noise) = {
                 let hello = message
                     .get_root::<control_hello::Reader>()
                     .context("failed to decode control hello")?;
@@ -409,13 +409,19 @@ pub mod test_support {
                             .map(|value| value.trim().to_string())
                     })
                     .map(|value| if value.is_empty() { None } else { Some(value) });
-                (protocol_version, token_result, tenant_result)
+                (
+                    protocol_version,
+                    token_result,
+                    tenant_result,
+                    hello.get_no_noise(),
+                )
             };
             drop(message);
             handle_control_handshake(
                 protocol_version,
                 token_result,
                 tenant_result,
+                no_noise,
                 &mut server_reader,
                 &mut server_writer,
                 Arc::clone(&tokens),
@@ -531,11 +537,13 @@ async fn handle_connection(
             protocol_version,
             token_result,
             tenant_result,
+            no_noise,
         } => {
             handle_control_handshake(
                 protocol_version,
                 token_result,
                 tenant_result,
+                no_noise,
                 &mut reader,
                 &mut writer,
                 Arc::clone(&tokens),
@@ -609,6 +617,7 @@ async fn handle_control_handshake<R, W>(
     protocol_version: u16,
     token_result: Result<String, String>,
     tenant_result: Result<Option<String>, String>,
+    no_noise_requested: bool,
     reader: &mut R,
     writer: &mut W,
     tokens: Arc<TokenManager>,
@@ -709,12 +718,15 @@ where
         }
     }
 
+    let use_no_noise = no_noise_requested;
+
     let response_bytes = {
         let mut message = capnp::message::Builder::new_default();
         {
             let mut response = message.init_root::<control_hello_response::Builder>();
             response.set_accepted(accepted);
             response.set_message(&response_text);
+            response.set_no_noise(use_no_noise);
         }
         write_message_to_words(&message)
     };
@@ -757,18 +769,29 @@ where
         .to_string();
     let core = session_core.expect("core context must be present when handshake accepted");
     println!(
-        "control handshake accepted for token subject {} (tenant={})",
+        "control handshake accepted for token subject {} (tenant={}){}",
         claims.as_ref().map(|c| c.sub.as_str()).unwrap_or("unknown"),
-        tenant
+        tenant,
+        if use_no_noise {
+            " [no-noise plaintext]"
+        } else {
+            ""
+        }
     );
-    let noise = perform_server_handshake(reader, writer, token.as_bytes())
-        .await
-        .context("failed to establish encrypted control channel")?;
+    let mut transport = if use_no_noise {
+        FrameTransport::plain()
+    } else {
+        FrameTransport::from(
+            perform_server_handshake(reader, writer, token.as_bytes())
+                .await
+                .context("failed to establish encrypted control channel")?,
+        )
+    };
 
-    handle_control_session_encrypted(
+    handle_control_session(
         reader,
         writer,
-        noise,
+        &mut transport,
         core,
         shared_config,
         tenant,
@@ -810,16 +833,17 @@ fn classify_first_message(message: capnp::message::Reader<OwnedSegments>) -> Res
             protocol_version: hello.get_protocol_version(),
             token_result,
             tenant_result,
+            no_noise: hello.get_no_noise(),
         });
     }
 
     Err(anyhow!("unexpected first message"))
 }
 
-async fn handle_control_session_encrypted<R, W>(
+async fn handle_control_session<R, W>(
     reader: &mut R,
     writer: &mut W,
-    mut noise: TransportState,
+    transport: &mut FrameTransport,
     core: CoreContext,
     shared_config: Arc<RwLock<Config>>,
     tenant: String,
@@ -830,7 +854,7 @@ where
     W: futures::AsyncWrite + Unpin,
 {
     loop {
-        let request_bytes = match read_encrypted_frame(reader, &mut noise).await? {
+        let request_bytes = match read_session_frame(reader, transport).await? {
             Some(bytes) => bytes,
             None => break,
         };
@@ -895,7 +919,7 @@ where
                                         target: "cli_proxy",
                                         requested = aggregates.len(),
                                         included = encoded.included,
-                                        "truncated list_aggregates response to satisfy Noise frame limit"
+                                        "truncated list_aggregates response to satisfy control frame limit"
                                     );
                                 }
                                 let mut builder = payload.init_list_aggregates();
@@ -941,7 +965,7 @@ where
                                         aggregate_id = %aggregate_id,
                                         requested = events.len(),
                                         included = encoded.included,
-                                        "truncated list_events response to satisfy Noise frame limit"
+                                        "truncated list_events response to satisfy control frame limit"
                                     );
                                 }
                                 let mut builder = payload.init_list_events();
@@ -1077,7 +1101,7 @@ where
             write_message_to_words(&response_message)
         };
 
-        write_encrypted_frame(writer, &mut noise, &response_bytes)
+        write_session_frame(writer, transport, &response_bytes)
             .await
             .context("failed to send control response")?;
     }
