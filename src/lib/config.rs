@@ -33,6 +33,7 @@ const ENV_DATA_ENCRYPTION_KEY: &str = "EVENTDBX_DATA_ENCRYPTION_KEY";
 const ENV_AUTH_PRIVATE_KEY: &str = "EVENTDBX_AUTH_PRIVATE_KEY";
 const ENV_AUTH_PUBLIC_KEY: &str = "EVENTDBX_AUTH_PUBLIC_KEY";
 const ENV_AUTH_KEY_ID: &str = "EVENTDBX_AUTH_KEY_ID";
+const DEFAULT_NO_NOISE: bool = false;
 fn secret_from_env(vars: &[&str]) -> Option<String> {
     for key in vars {
         if let Ok(value) = env::var(key) {
@@ -202,6 +203,8 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default = "default_snowflake_worker_id")]
     pub snowflake_worker_id: u16,
+    #[serde(default = "default_no_noise")]
+    pub no_noise: bool,
 }
 
 impl Default for Config {
@@ -227,6 +230,7 @@ impl Default for Config {
             verbose_responses: default_verbose_responses(),
             auth: AuthConfig::default(),
             snowflake_worker_id: default_snowflake_worker_id(),
+            no_noise: default_no_noise(),
         }
     }
 }
@@ -246,6 +250,7 @@ pub struct ConfigUpdate {
     pub socket: Option<SocketConfigUpdate>,
     pub tenants: Option<TenantRoutingConfigUpdate>,
     pub snowflake_worker_id: Option<u16>,
+    pub no_noise: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -369,6 +374,9 @@ impl Config {
         }
         if let Some(worker_id) = update.snowflake_worker_id {
             self.snowflake_worker_id = worker_id;
+        }
+        if let Some(no_noise) = update.no_noise {
+            self.no_noise = no_noise;
         }
         if let Some(socket) = update.socket {
             if let Some(bind_addr) = socket.bind_addr {
@@ -795,6 +803,10 @@ fn default_plugin_payload_mode() -> PluginPayloadMode {
 
 fn default_snowflake_worker_id() -> u16 {
     0
+}
+
+fn default_no_noise() -> bool {
+    DEFAULT_NO_NOISE
 }
 
 fn default_socket_bind_addr() -> String {

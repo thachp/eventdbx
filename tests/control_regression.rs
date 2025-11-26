@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use capnp::{message::Builder, message::ReaderOptions, serialize::write_message_to_words};
 use capnp_futures::serialize::read_message;
 use eventdbx::replication_noise::{
-    perform_client_handshake, read_encrypted_frame, write_encrypted_frame,
+    FrameTransport, perform_client_handshake, read_session_frame, write_session_frame,
 };
 use eventdbx::{
     cli_proxy::test_support::spawn_control_session,
@@ -19,7 +19,6 @@ use eventdbx::{
 };
 use futures::AsyncWriteExt;
 use serde_json::{Value, json};
-use snow::TransportState;
 use tempfile::tempdir;
 use tokio_util::compat::Compat;
 
@@ -31,10 +30,11 @@ async fn open_control_session(
     shared_config: Arc<RwLock<Config>>,
     token: &str,
     tenant: &str,
+    no_noise: bool,
 ) -> Result<(
     Compat<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
     Compat<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
-    TransportState,
+    FrameTransport,
     tokio::task::JoinHandle<Result<()>>,
 )> {
     let (mut writer, mut reader, task) =
@@ -46,6 +46,7 @@ async fn open_control_session(
         hello.set_protocol_version(CONTROL_PROTOCOL_VERSION);
         hello.set_token(token);
         hello.set_tenant_id(tenant);
+        hello.set_no_noise(no_noise);
     }
     let hello_bytes = write_message_to_words(&hello_message);
     writer
@@ -72,11 +73,23 @@ async fn open_control_session(
         bail!("control handshake rejected: {}", reason);
     }
 
-    let noise = perform_client_handshake(&mut reader, &mut writer, token.as_bytes())
-        .await
-        .context("failed to establish encrypted control channel")?;
+    let transport = if hello_response.get_no_noise() {
+        FrameTransport::plain()
+    } else {
+        FrameTransport::from(
+            perform_client_handshake(&mut reader, &mut writer, token.as_bytes())
+                .await
+                .context("failed to establish encrypted control channel")?,
+        )
+    };
+    if no_noise {
+        assert!(
+            matches!(&transport, FrameTransport::Plain),
+            "server should honor no-noise request"
+        );
+    }
 
-    Ok((writer, reader, noise, task))
+    Ok((writer, reader, transport, task))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -131,6 +144,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
             "aggregate.append".into(),
             "aggregate.archive".into(),
             "aggregate.read".into(),
+            "tenant.manage".into(),
         ],
         resources: vec!["*".to_string()],
         tenants: Vec::new(),
@@ -144,12 +158,13 @@ async fn control_capnp_regression_flows() -> Result<()> {
         .clone()
         .expect("issued token missing value");
 
-    let (mut writer, mut reader, mut noise, server_task) = open_control_session(
+    let (mut writer, mut reader, mut transport, server_task) = open_control_session(
         Arc::clone(&core_provider),
         Arc::clone(&tokens),
         Arc::clone(&shared_config),
         &token_value,
         config.active_domain(),
+        false,
     )
     .await?;
 
@@ -158,7 +173,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
     let aggregates: Vec<Value> = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -201,7 +216,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
     let event_record: Value = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -291,7 +306,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
     let aggregates_after: Vec<Value> = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -336,7 +351,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
     let filtered_aggregates: Vec<Value> = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -382,7 +397,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
     let aggregate_detail = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -471,7 +486,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
     let events: Vec<Value> = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -513,7 +528,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
     let merkle = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -549,7 +564,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
     let missing = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -580,7 +595,7 @@ async fn control_capnp_regression_flows() -> Result<()> {
     let error_response = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -630,6 +645,59 @@ async fn control_capnp_regression_flows() -> Result<()> {
 
     let outcome = server_task.await.context("control handler task panicked")?;
     outcome.context("control handler returned error")?;
+
+    let (mut plain_writer, mut plain_reader, mut plain_transport, plain_task) =
+        open_control_session(
+            Arc::clone(&core_provider),
+            Arc::clone(&tokens),
+            Arc::clone(&shared_config),
+            &token_value,
+            config.active_domain(),
+            true,
+        )
+        .await?;
+    let plaintext_request_id = next_request_id + 1;
+    let reloaded = send_control_request(
+        &mut plain_writer,
+        &mut plain_reader,
+        &mut plain_transport,
+        plaintext_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut reload = payload.init_tenant_reload();
+            reload.set_token(&token_value);
+            reload.set_tenant_id(config.active_domain());
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::TenantReload(Ok(result)) => Ok(result.get_reloaded()),
+            control_response::payload::Error(Ok(error)) => {
+                let code = error
+                    .get_code()
+                    .context("missing error code")?
+                    .to_str()
+                    .context("error code utf-8")?;
+                let message = error
+                    .get_message()
+                    .context("missing error message")?
+                    .to_str()
+                    .context("error message utf-8")?;
+                Err(anyhow!("tenant_reload error {}: {}", code, message))
+            }
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert!(reloaded);
+    drop(plain_writer);
+    drop(plain_reader);
+    let plaintext_outcome = plain_task
+        .await
+        .context("plaintext control handler task panicked")?;
+    plaintext_outcome.context("plaintext control handler returned error")?;
 
     Ok(())
 }
@@ -699,12 +767,13 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         .clone()
         .expect("issued token missing value");
 
-    let (mut writer, mut reader, mut noise, server_task) = open_control_session(
+    let (mut writer, mut reader, mut transport, server_task) = open_control_session(
         Arc::clone(&core_provider),
         Arc::clone(&tokens),
         Arc::clone(&shared_config),
         &token_value,
         config.active_domain(),
+        false,
     )
     .await?;
 
@@ -713,7 +782,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     let missing_patch_error = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -767,7 +836,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     let append_record: Value = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -820,7 +889,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     let patch_record: Value = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -922,7 +991,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     let events: Vec<Value> = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -974,7 +1043,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     let aggregate_after_patch = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1034,7 +1103,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     let selection = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1086,7 +1155,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     let archived_state: Value = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1128,7 +1197,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     let active_after_archive: Vec<Value> = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1176,7 +1245,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     let archived_only_listing: Vec<Value> = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1222,7 +1291,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     let restored_state: Value = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1270,7 +1339,7 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
     let active_after_restore: Vec<Value> = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1387,12 +1456,13 @@ async fn control_tenant_admin_commands() -> Result<()> {
         .clone()
         .expect("issued token missing value");
 
-    let (mut writer, mut reader, mut noise, server_task) = open_control_session(
+    let (mut writer, mut reader, mut transport, server_task) = open_control_session(
         Arc::clone(&core_provider),
         Arc::clone(&tokens),
         Arc::clone(&shared_config),
         &token_value,
         config.active_domain(),
+        false,
     )
     .await?;
 
@@ -1401,7 +1471,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
     let assign_changed = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1429,7 +1499,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
     let duplicate_assign = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1454,7 +1524,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
     let unassign_changed = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1478,7 +1548,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
     let quota_set = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1503,7 +1573,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
     let quota_clear = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1527,7 +1597,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
     let storage_bytes = send_control_request(
         &mut writer,
         &mut reader,
-        &mut noise,
+        &mut transport,
         next_request_id,
         |request| {
             let payload = request.reborrow().init_payload();
@@ -1562,7 +1632,7 @@ async fn control_tenant_admin_commands() -> Result<()> {
 async fn send_control_request<W, R, Build, Handle, T>(
     writer: &mut W,
     reader: &mut R,
-    noise: &mut TransportState,
+    transport: &mut FrameTransport,
     request_id: u64,
     build: Build,
     handle: Handle,
@@ -1580,11 +1650,11 @@ where
         build(&mut request);
     }
     let bytes = write_message_to_words(&message);
-    write_encrypted_frame(writer, noise, &bytes)
+    write_session_frame(writer, transport, &bytes)
         .await
         .context("failed to send control request")?;
 
-    let response_bytes = read_encrypted_frame(reader, noise)
+    let response_bytes = read_session_frame(reader, transport)
         .await?
         .ok_or_else(|| anyhow!("control channel closed before response"))?;
     let mut cursor = std::io::Cursor::new(&response_bytes);
