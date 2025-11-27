@@ -718,7 +718,12 @@ where
         }
     }
 
-    let use_no_noise = no_noise_requested;
+    let use_no_noise = no_noise_requested && config_snapshot.no_noise;
+    if no_noise_requested && !config_snapshot.no_noise {
+        debug!(
+            "plaintext control channel requested but disabled by server config; continuing with Noise"
+        );
+    }
 
     let response_bytes = {
         let mut message = capnp::message::Builder::new_default();

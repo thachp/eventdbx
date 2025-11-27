@@ -36,7 +36,9 @@ struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
 
-    /// Disable Noise encryption for the control channel (Cap'n Proto framing only)
+    /// Disable Noise encryption for the control channel (Cap'n Proto framing only).
+    /// WARNING: Sends control protocol messages in plaintext; use only on trusted networks
+    /// (localhost or private links).
     #[arg(long, env = "EVENTDBX_NO_NOISE", global = true)]
     no_noise: bool,
 
