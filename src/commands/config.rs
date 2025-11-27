@@ -51,6 +51,9 @@ pub struct ConfigArgs {
     #[arg(long = "shard-map-path")]
     pub shard_map_path: Option<PathBuf>,
 
+    /// Disable Noise encryption for the control channel (Cap'n Proto framing only).
+    /// WARNING: Sends control protocol messages in plaintext; use only on trusted networks
+    /// such as localhost or private links.
     #[arg(long = "no-noise", action = clap::ArgAction::SetTrue)]
     pub no_noise: bool,
 

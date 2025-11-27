@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     io::Write,
     net::{IpAddr, SocketAddr, TcpStream},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -26,20 +26,16 @@ use tracing::debug;
 
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
 const DEFAULT_PAGE_SIZE: usize = 256;
-static NO_NOISE_OVERRIDE: AtomicBool = AtomicBool::new(false);
-static NO_NOISE_OVERRIDE_SET: AtomicBool = AtomicBool::new(false);
+static NO_NOISE_OVERRIDE: OnceLock<bool> = OnceLock::new();
 
+/// Set a process-wide override for disabling Noise. Intended to be called once
+/// at application startup (e.g., from CLI flag parsing).
 pub fn set_no_noise(no_noise: bool) {
-    NO_NOISE_OVERRIDE.store(no_noise, Ordering::Release);
-    NO_NOISE_OVERRIDE_SET.store(true, Ordering::Release);
+    let _ = NO_NOISE_OVERRIDE.set(no_noise);
 }
 
 fn resolve_no_noise(config_value: bool) -> bool {
-    if NO_NOISE_OVERRIDE_SET.load(Ordering::Acquire) {
-        NO_NOISE_OVERRIDE.load(Ordering::Acquire)
-    } else {
-        config_value
-    }
+    NO_NOISE_OVERRIDE.get().copied().unwrap_or(config_value)
 }
 
 #[derive(Clone)]
@@ -1587,7 +1583,10 @@ where
     }
 
     if endpoint.no_noise && !response_no_noise {
-        debug!("CLI proxy did not acknowledge --no-noise; continuing with Noise transport");
+        bail!(
+            "--no-noise requested but the server refused the plaintext control channel; enable \
+             plaintext in server config or omit the flag"
+        );
     }
 
     let mut transport = if response_no_noise {

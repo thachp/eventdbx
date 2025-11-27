@@ -21,6 +21,10 @@ impl FrameTransport {
         FrameTransport::Plain
     }
 
+    pub fn is_plain(&self) -> bool {
+        matches!(self, FrameTransport::Plain)
+    }
+
     pub fn is_noise(&self) -> bool {
         matches!(self, FrameTransport::Noise(_))
     }

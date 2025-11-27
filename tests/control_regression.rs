@@ -144,6 +144,8 @@ async fn control_capnp_regression_flows() -> Result<()> {
             "aggregate.append".into(),
             "aggregate.archive".into(),
             "aggregate.read".into(),
+            // Needed for the later plaintext tenant_reload section; existing encrypted
+            // flows do not rely on this capability.
             "tenant.manage".into(),
         ],
         resources: vec!["*".to_string()],

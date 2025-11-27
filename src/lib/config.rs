@@ -203,6 +203,9 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default = "default_snowflake_worker_id")]
     pub snowflake_worker_id: u16,
+    /// Disable Noise encryption for the control channel (Cap'n Proto framing only).
+    /// WARNING: Sends control protocol messages in plaintext; only safe on trusted networks
+    /// such as localhost or other secured private links.
     #[serde(default = "default_no_noise")]
     pub no_noise: bool,
 }

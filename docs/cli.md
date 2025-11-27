@@ -19,6 +19,7 @@ Key flags:
 - `--config <path>` – Override the configuration file (`~/.eventdbx/config.toml` by default).
 - `--data-dir <path>` – Override the data directory for commands that access RocksDB directly.
 - `--socket <addr>` – Talk to a remote daemon through its Cap'n Proto control socket (default `0.0.0.0:6363`).
+- `--no-noise` – Disable Noise encryption for the control channel (plaintext Cap'n Proto); only use this on trusted networks such as localhost or a secured private link because control traffic is otherwise unencrypted. The server must also allow plaintext control; if it refuses, the CLI fails fast instead of silently falling back to Noise.
 - `-v/--verbose` – Increase logging.
 
 ## Server lifecycle
