@@ -34,6 +34,7 @@ use crate::{
     filter::{self, FilterExpr},
     observability,
     plugin::{JobPriority, PluginManager, PublishTarget},
+    reference::ResolvedAggregate,
     replication_noise::{
         FrameTransport, MAX_NOISE_FRAME_PAYLOAD, perform_server_handshake, read_session_frame,
         write_session_frame,
@@ -64,10 +65,12 @@ enum ControlReply {
     ListAggregates {
         aggregates: Vec<AggregateState>,
         next_cursor: Option<String>,
+        resolved_json: Option<String>,
     },
     GetAggregate {
         found: bool,
         aggregate_json: Option<String>,
+        resolved_json: Option<String>,
     },
     ListEvents {
         aggregate_type: String,
@@ -137,11 +140,15 @@ enum ControlCommand {
         sort: Option<Vec<AggregateSort>>,
         include_archived: bool,
         archived_only: bool,
+        resolve: bool,
+        resolve_depth: Option<usize>,
     },
     GetAggregate {
         token: String,
         aggregate_type: String,
         aggregate_id: String,
+        resolve: bool,
+        resolve_depth: Option<usize>,
     },
     ListEvents {
         token: String,
@@ -910,6 +917,7 @@ where
                             ControlReply::ListAggregates {
                                 aggregates,
                                 next_cursor,
+                                resolved_json,
                             } => {
                                 let encoded = encode_json_list_response(
                                     request_id,
@@ -936,10 +944,18 @@ where
                                     builder.set_has_next_cursor(false);
                                     builder.set_next_cursor("");
                                 }
+                                if let Some(resolved) = resolved_json {
+                                    builder.set_has_resolved_json(true);
+                                    builder.set_resolved_json(&resolved);
+                                } else {
+                                    builder.set_has_resolved_json(false);
+                                    builder.set_resolved_json("");
+                                }
                             }
                             ControlReply::GetAggregate {
                                 found,
                                 aggregate_json,
+                                resolved_json,
                             } => {
                                 let mut builder = payload.init_get_aggregate();
                                 builder.set_found(found);
@@ -947,6 +963,13 @@ where
                                     builder.set_aggregate_json(&json);
                                 } else {
                                     builder.set_aggregate_json("");
+                                }
+                                if let Some(resolved) = resolved_json {
+                                    builder.set_has_resolved_json(true);
+                                    builder.set_resolved_json(&resolved);
+                                } else {
+                                    builder.set_has_resolved_json(false);
+                                    builder.set_resolved_json("");
                                 }
                             }
                             ControlReply::ListEvents {
@@ -1178,6 +1201,12 @@ fn parse_control_command(
             let token = read_control_text(req.get_token(), "token")?
                 .trim()
                 .to_string();
+            let resolve = req.get_resolve();
+            let resolve_depth = if req.get_has_resolve_depth() {
+                Some(req.get_resolve_depth() as usize)
+            } else {
+                None
+            };
 
             Ok(ControlCommand::ListAggregates {
                 token,
@@ -1187,6 +1216,8 @@ fn parse_control_command(
                 sort,
                 include_archived,
                 archived_only,
+                resolve,
+                resolve_depth,
             })
         }
         payload::GetAggregate(req) => {
@@ -1196,11 +1227,19 @@ fn parse_control_command(
             let token = read_control_text(req.get_token(), "token")?
                 .trim()
                 .to_string();
+            let resolve = req.get_resolve();
+            let resolve_depth = if req.get_has_resolve_depth() {
+                Some(req.get_resolve_depth() as usize)
+            } else {
+                None
+            };
 
             Ok(ControlCommand::GetAggregate {
                 token,
                 aggregate_type,
                 aggregate_id,
+                resolve,
+                resolve_depth,
             })
         }
         payload::ListEvents(req) => {
@@ -1691,6 +1730,8 @@ async fn execute_control_command(
             sort,
             include_archived,
             archived_only,
+            resolve,
+            resolve_depth,
         } => {
             let mut scope = if archived_only {
                 AggregateQueryScope::ArchivedOnly
@@ -1713,6 +1754,8 @@ async fn execute_control_command(
                 let sort = sort;
                 let token = token.clone();
                 let cursor = cursor.clone();
+                let resolve = resolve;
+                let resolve_depth = resolve_depth;
                 move || {
                     let sort_ref = sort.as_ref().map(|keys| keys.as_slice());
                     let timestamp_sort = sort_ref.and_then(store::timestamp_sort_hint);
@@ -1738,33 +1781,84 @@ async fn execute_control_command(
                         None => None,
                     };
                     let cursor_ref = cursor_parsed.as_ref();
-                    core.list_aggregates(&token, cursor_ref, take, filter, sort_ref, scope)
+                    let (aggregates, next_cursor) =
+                        core.list_aggregates(&token, cursor_ref, take, filter, sort_ref, scope)?;
+
+                    let resolved_json = if resolve {
+                        let depth = resolve_depth
+                            .unwrap_or(core.reference_default_depth())
+                            .min(core.reference_max_depth());
+                        let mut resolved = Vec::new();
+                        for aggregate in &aggregates {
+                            if let Some(item) = core.resolve_aggregate(
+                                &token,
+                                &aggregate.aggregate_type,
+                                &aggregate.aggregate_id,
+                                Some(depth),
+                            )? {
+                                resolved.push(item);
+                            }
+                        }
+                        Some(
+                            serde_json::to_string(&resolved)
+                                .map_err(|err| EventError::Serialization(err.to_string()))?,
+                        )
+                    } else {
+                        None
+                    };
+
+                    Ok((aggregates, next_cursor, resolved_json))
                 }
             })
             .await
             .map_err(|err| EventError::Storage(format!("list aggregates task failed: {err}")))?;
-            let (aggregates, next_cursor) = aggregates?;
+            let (aggregates, next_cursor, resolved_json) = aggregates?;
             Ok(ControlReply::ListAggregates {
                 aggregates,
                 next_cursor: next_cursor.map(|cursor| cursor.encode()),
+                resolved_json,
             })
         }
         ControlCommand::GetAggregate {
             token,
             aggregate_type,
             aggregate_id,
+            resolve,
+            resolve_depth,
         } => {
             let aggregate = spawn_blocking({
                 let core = core.clone();
                 let aggregate_type = aggregate_type.clone();
                 let aggregate_id = aggregate_id.clone();
                 let token = token.clone();
-                move || core.get_aggregate(&token, &aggregate_type, &aggregate_id)
+                move || {
+                    if resolve {
+                        core.resolve_aggregate(
+                            &token,
+                            &aggregate_type,
+                            &aggregate_id,
+                            resolve_depth,
+                        )
+                    } else {
+                        core.get_aggregate(&token, &aggregate_type, &aggregate_id)
+                            .map(|opt| {
+                                opt.map(|aggregate| ResolvedAggregate {
+                                    domain: core.tenant_id().to_string(),
+                                    aggregate,
+                                    references: Vec::new(),
+                                })
+                            })
+                    }
+                }
             })
             .await
             .map_err(|err| EventError::Storage(format!("get aggregate task failed: {err}")))??;
 
             let json = aggregate
+                .as_ref()
+                .map(|aggregate| serde_json::to_string(&aggregate.aggregate))
+                .transpose()?;
+            let resolved_json = aggregate
                 .as_ref()
                 .map(|aggregate| serde_json::to_string(aggregate))
                 .transpose()?;
@@ -1772,6 +1866,7 @@ async fn execute_control_command(
             Ok(ControlReply::GetAggregate {
                 found: aggregate.is_some(),
                 aggregate_json: json,
+                resolved_json,
             })
         }
         ControlCommand::ListEvents {

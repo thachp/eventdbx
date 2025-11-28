@@ -81,23 +81,33 @@ struct ListAggregatesRequest {
   includeArchived @8 :Bool;
   archivedOnly @9 :Bool;
   token @10 :Text;
+  resolve @11 :Bool;
+  resolveDepth @12 :UInt32;
+  hasResolveDepth @13 :Bool;
 }
 
 struct ListAggregatesResponse {
   aggregatesJson @0 :Text;
   nextCursor @1 :Text;
   hasNextCursor @2 :Bool;
+  resolvedJson @3 :Text;
+  hasResolvedJson @4 :Bool;
 }
 
 struct GetAggregateRequest {
   aggregateType @0 :Text;
   aggregateId @1 :Text;
   token @2 :Text;
+  resolve @3 :Bool;
+  resolveDepth @4 :UInt32;
+  hasResolveDepth @5 :Bool;
 }
 
 struct GetAggregateResponse {
   found @0 :Bool;
   aggregateJson @1 :Text;
+  resolvedJson @2 :Text;
+  hasResolvedJson @3 :Bool;
 }
 
 struct ListEventsRequest {

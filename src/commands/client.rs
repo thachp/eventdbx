@@ -16,6 +16,7 @@ use eventdbx::replication_noise::{
 use eventdbx::{
     config::Config,
     control_capnp::{control_hello, control_hello_response, control_request, control_response},
+    reference::ResolvedAggregate,
     schema::AggregateSchema,
     snowflake::SnowflakeId,
     store::{AggregateState, EventRecord, SnapshotRecord},
@@ -314,6 +315,17 @@ impl ServerClient {
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Option<AggregateState>> {
+        let resolved = self.get_aggregate_resolved(token, aggregate_type, aggregate_id, None)?;
+        Ok(resolved.map(|resolved| resolved.aggregate))
+    }
+
+    pub fn get_aggregate_resolved(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        resolve_depth: Option<usize>,
+    ) -> Result<Option<ResolvedAggregate>> {
         let request_id = next_request_id();
         self.send_control_request(
             token,
@@ -324,6 +336,13 @@ impl ServerClient {
                 get.set_token(token);
                 get.set_aggregate_type(aggregate_type);
                 get.set_aggregate_id(aggregate_id);
+                get.set_resolve(true);
+                if let Some(depth) = resolve_depth {
+                    get.set_has_resolve_depth(true);
+                    get.set_resolve_depth(depth as u32);
+                } else {
+                    get.set_has_resolve_depth(false);
+                }
                 Ok(())
             },
             |response| {
@@ -338,13 +357,30 @@ impl ServerClient {
                         if !result.get_found() {
                             return Ok(None);
                         }
+                        if result.get_has_resolved_json() {
+                            let json = read_text(result.get_resolved_json(), "resolved_json")?;
+                            if json.trim().is_empty() {
+                                return Ok(None);
+                            }
+                            let resolved: ResolvedAggregate = serde_json::from_str(&json)
+                                .context("failed to parse resolved aggregate payload")?;
+                            return Ok(Some(resolved));
+                        }
                         let json = read_text(result.get_aggregate_json(), "aggregate_json")?;
                         if json.trim().is_empty() {
                             Ok(None)
                         } else {
                             let state: AggregateState = serde_json::from_str(&json)
                                 .context("failed to parse get_aggregate response payload")?;
-                            Ok(Some(state))
+                            Ok(Some(ResolvedAggregate {
+                                domain: self
+                                    .endpoint()
+                                    .tenant
+                                    .clone()
+                                    .unwrap_or_else(|| "default".to_string()),
+                                aggregate: state,
+                                references: Vec::new(),
+                            }))
                         }
                     }
                     payload::Error(Ok(error)) => {
@@ -383,6 +419,38 @@ impl ServerClient {
                 sort,
                 include_archived,
                 archived_only,
+            )?;
+            results.extend(page);
+            cursor = next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(results)
+    }
+
+    #[allow(dead_code)]
+    pub fn list_aggregates_resolved(
+        &self,
+        token: &str,
+        filter: Option<&str>,
+        sort: Option<&str>,
+        include_archived: bool,
+        archived_only: bool,
+        resolve_depth: Option<usize>,
+    ) -> Result<Vec<ResolvedAggregate>> {
+        let mut cursor: Option<String> = None;
+        let mut results = Vec::new();
+        loop {
+            let (page, next_cursor) = self.list_aggregates_page_resolved(
+                token,
+                cursor.as_deref(),
+                DEFAULT_PAGE_SIZE,
+                filter,
+                sort,
+                include_archived,
+                archived_only,
+                resolve_depth,
             )?;
             results.extend(page);
             cursor = next_cursor;
@@ -459,6 +527,123 @@ impl ServerClient {
                             None
                         };
                         Ok((aggregates, next_cursor))
+                    }
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
+    #[allow(dead_code)]
+    fn list_aggregates_page_resolved(
+        &self,
+        token: &str,
+        cursor: Option<&str>,
+        take: usize,
+        filter: Option<&str>,
+        sort: Option<&str>,
+        include_archived: bool,
+        archived_only: bool,
+        resolve_depth: Option<usize>,
+    ) -> Result<(Vec<ResolvedAggregate>, Option<String>)> {
+        let request_id = next_request_id();
+        let tenant = self
+            .endpoint()
+            .tenant
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+        self.send_control_request(
+            token,
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut list = payload_builder.init_list_aggregates();
+                list.set_token(token);
+                if let Some(cursor) = cursor {
+                    list.set_has_cursor(true);
+                    list.set_cursor(cursor);
+                } else {
+                    list.set_has_cursor(false);
+                    list.set_cursor("");
+                }
+                list.set_has_take(true);
+                list.set_take(take as u64);
+                list.set_include_archived(include_archived);
+                list.set_archived_only(archived_only);
+                if let Some(filter) = filter {
+                    list.set_has_filter(true);
+                    list.set_filter(filter);
+                } else {
+                    list.set_has_filter(false);
+                }
+                if let Some(sort) = sort {
+                    list.set_has_sort(true);
+                    list.set_sort(sort);
+                } else {
+                    list.set_has_sort(false);
+                    list.set_sort("");
+                }
+                list.set_resolve(true);
+                if let Some(depth) = resolve_depth {
+                    list.set_has_resolve_depth(true);
+                    list.set_resolve_depth(depth as u32);
+                } else {
+                    list.set_has_resolve_depth(false);
+                }
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode list_aggregates response payload")?
+                {
+                    payload::ListAggregates(Ok(result)) => {
+                        let resolved = if result.get_has_resolved_json() {
+                            let json = read_text(result.get_resolved_json(), "resolved_json")?;
+                            if json.trim().is_empty() {
+                                Vec::new()
+                            } else {
+                                serde_json::from_str(&json)
+                                    .context("failed to parse resolved list_aggregates payload")?
+                            }
+                        } else {
+                            let json = read_text(result.get_aggregates_json(), "aggregates_json")?;
+                            let aggregates: Vec<AggregateState> = if json.trim().is_empty() {
+                                Vec::new()
+                            } else {
+                                serde_json::from_str(&json)
+                                    .context("failed to parse list_aggregates payload")?
+                            };
+                            aggregates
+                                .into_iter()
+                                .map(|aggregate| ResolvedAggregate {
+                                    domain: tenant.clone(),
+                                    references: Vec::new(),
+                                    aggregate,
+                                })
+                                .collect()
+                        };
+
+                        let next_cursor = if result.get_has_next_cursor() {
+                            Some(read_text(result.get_next_cursor(), "next_cursor")?)
+                        } else {
+                            None
+                        };
+                        Ok((resolved, next_cursor))
                     }
                     payload::Error(Ok(error)) => {
                         let code = read_text(error.get_code(), "code")?;
