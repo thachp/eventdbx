@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,8 +9,9 @@ use crate::{
     filter::FilterExpr,
     plugin::PublishTarget,
     reference::{
-        AggregateReference, ReferenceContext, ReferenceFetchOutcome, ReferenceIntegrity,
-        ReferenceResolutionStatus, Referrer, ResolvedAggregate, resolve_references,
+        AggregateReference, ReferenceCascade, ReferenceContext, ReferenceFetchOutcome,
+        ReferenceIntegrity, ReferenceResolutionStatus, Referrer, ResolvedAggregate,
+        resolve_references,
     },
     restrict::{self, RestrictMode},
     schema::SchemaManager,
@@ -28,7 +29,7 @@ use crate::{
     },
 };
 use parking_lot::Mutex;
-use serde_json::Value;
+use serde_json::{self, Value};
 /// Shared context exposing the core store, schema, and token managers so
 /// higher-level surfaces (REST, GraphQL, gRPC, plugins) can be layered on
 /// top of a consistent API.
@@ -161,6 +162,53 @@ impl CoreContext {
         self.store
             .referrers_for_any_tenant(&target)
             .map_err(Into::into)
+    }
+
+    fn nullify_referrers(
+        &self,
+        referrers: &[(String, String, String, String)],
+        target: &str,
+    ) -> Result<()> {
+        if referrers.is_empty() {
+            return Ok(());
+        }
+        let store = self.store();
+        let mut grouped: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+        for (_, agg_type, agg_id, path) in referrers {
+            let pointer = json_pointer_from_path(path);
+            grouped
+                .entry((agg_type.clone(), agg_id.clone()))
+                .or_default()
+                .insert(pointer);
+        }
+
+        for ((agg_type, agg_id), paths) in grouped {
+            let patch_ops: Vec<Value> = paths
+                .into_iter()
+                .map(|path| {
+                    serde_json::json!({
+                        "op": "replace",
+                        "path": path,
+                        "value": Value::Null
+                    })
+                })
+                .collect();
+            let patch = Value::Array(patch_ops);
+            let payload = store.prepare_payload_from_patch(&agg_type, &agg_id, &patch)?;
+            store.append(AppendEvent {
+                aggregate_type: agg_type.clone(),
+                aggregate_id: agg_id.clone(),
+                event_type: "_ref_nullify".into(),
+                payload,
+                metadata: None,
+                issued_by: None,
+                note: Some(format!("auto-nullify due to {}", target)),
+                tenant: self.tenant_id.clone(),
+                reference_targets: Vec::new(),
+            })?;
+            self.note_storage_mutation()?;
+        }
+        Ok(())
     }
 
     pub fn is_hidden_aggregate(&self, aggregate_type: &str) -> bool {
@@ -556,18 +604,35 @@ impl CoreContext {
         let store = self.store();
         if archived {
             let referrers = self.inbound_referrers_for(&aggregate_type, &aggregate_id)?;
-            if !referrers.is_empty() {
-                let formatted = referrers
-                    .iter()
-                    .take(5)
-                    .map(|(tenant, agg, id, path)| format!("{tenant}:{agg}:{id} ({path})"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+            let mut blockers = Vec::new();
+            let mut nullify = Vec::new();
+            for (tenant, agg, id, path) in referrers {
+                if tenant != self.tenant_id() {
+                    blockers.push(format!("{tenant}:{agg}:{id} ({path})"));
+                    continue;
+                }
+                let cascade = self
+                    .schemas
+                    .reference_rules_for_path(&agg, &path)
+                    .map(|rules| rules.cascade)
+                    .unwrap_or_default();
+                match cascade {
+                    ReferenceCascade::Nullify => nullify.push((tenant, agg, id, path)),
+                    _ => blockers.push(format!("{tenant}:{agg}:{id} ({path})")),
+                }
+            }
+
+            if !blockers.is_empty() {
                 return Err(EventError::SchemaViolation(format!(
                     "aggregate {}:{} cannot be archived; referenced by {}",
-                    aggregate_type, aggregate_id, formatted
+                    aggregate_type,
+                    aggregate_id,
+                    blockers.into_iter().take(5).collect::<Vec<_>>().join(", ")
                 )));
             }
+
+            let target = format!("{}#{}#{}", self.tenant_id(), aggregate_type, aggregate_id);
+            self.nullify_referrers(&nullify, &target)?;
         }
         let state = store.set_archive(&aggregate_type, &aggregate_id, archived, comment)?;
         Ok(self.sanitize_aggregate(state))
@@ -946,4 +1011,11 @@ pub(crate) fn normalize_optional_note(note: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn json_pointer_from_path(path: &str) -> String {
+    if path.is_empty() {
+        return "/".to_string();
+    }
+    format!("/{}", path.replace('.', "/"))
 }

@@ -2261,6 +2261,46 @@ fn aggregate_referrers_reports_sources() -> Result<()> {
 }
 
 #[test]
+fn aggregate_archive_nullifies_references() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "address", "--events", "address_created"])?;
+    cli.run(&["schema", "create", "farm", "--events", "farm_created"])?;
+    cli.run(&[
+        "schema",
+        "field",
+        "--type",
+        "reference",
+        "--reference-cascade",
+        "nullify",
+        "farm",
+        "address",
+    ])?;
+
+    cli.create_aggregate("address", "addr-1", "address_created")?;
+    cli.run(&[
+        "aggregate",
+        "create",
+        "farm",
+        "farm-1",
+        "--event",
+        "farm_created",
+        "--field",
+        "address=address#addr-1",
+    ])?;
+
+    cli.run(&["aggregate", "archive", "address", "addr-1"])?;
+    let farms = cli.run_json(&["aggregate", "list", "farm", "--json"])?;
+    let farm = farms
+        .as_array()
+        .and_then(|arr| arr.first())
+        .cloned()
+        .context("expected farm aggregate after archive")?;
+    assert_eq!(farm["state"]["address"], json!(""));
+
+    Ok(())
+}
+
+#[test]
 fn aggregate_commit_no_staged_events() -> Result<()> {
     let cli = CliTest::new()?;
     let output = cli.run(&["aggregate", "commit"])?;

@@ -1134,6 +1134,13 @@ impl SchemaManager {
         Ok(references)
     }
 
+    pub fn reference_rules_for_path(&self, aggregate: &str, path: &str) -> Option<ReferenceRules> {
+        let items = self.items.read();
+        let schema = items.get(aggregate)?;
+        let segments: Vec<&str> = path.split('.').collect();
+        reference_rules_for_segments(&schema.column_types, &segments)
+    }
+
     pub fn remove_event(&self, aggregate: &str, event: &str) -> Result<AggregateSchema> {
         let mut items = self.items.write();
         let result = {
@@ -1326,6 +1333,22 @@ fn collect_reference_object(
         }
     }
     Ok(())
+}
+
+fn reference_rules_for_segments(
+    definitions: &BTreeMap<String, ColumnSettings>,
+    segments: &[&str],
+) -> Option<ReferenceRules> {
+    let (first, rest) = segments.split_first()?;
+    let settings = definitions.get(*first)?;
+    if rest.is_empty() {
+        return settings.rules.reference.clone();
+    }
+
+    match settings.column_type {
+        ColumnType::Object => reference_rules_for_segments(&settings.rules.properties, rest),
+        _ => None,
+    }
 }
 
 fn normalize_reference_value<F>(

@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use csv::WriterBuilder;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Value};
+use serde_json::{Map as JsonMap, Value, json};
 use tempfile::tempdir;
 use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
@@ -22,8 +22,8 @@ use eventdbx::{
     merkle::compute_merkle_root,
     plugin::{JobPriority, PluginManager, PublishTarget},
     reference::{
-        AggregateReference, ReferenceContext, ReferenceFetchOutcome, ReferenceIntegrity,
-        ReferenceResolutionStatus, Referrer, resolve_references,
+        AggregateReference, ReferenceCascade, ReferenceContext, ReferenceFetchOutcome,
+        ReferenceIntegrity, ReferenceResolutionStatus, Referrer, resolve_references,
     },
     restrict,
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
@@ -756,6 +756,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 config.encryption_key()?,
                 config.snowflake_worker_id,
             )?;
+            let schemas = SchemaManager::load(config.schema_store_path())?;
             let target = format!(
                 "{}#{}#{}",
                 config.active_domain(),
@@ -763,19 +764,17 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 args.aggregate_id
             );
             let referrers = store.referrers_for_any_tenant(&target)?;
-            if !referrers.is_empty() {
+            let (nullify, blockers) =
+                partition_referrers(&schemas, config.active_domain(), &referrers);
+            if !blockers.is_empty() {
                 bail!(
                     "aggregate {}:{} cannot be removed; referenced by {}",
                     args.aggregate,
                     args.aggregate_id,
-                    referrers
-                        .iter()
-                        .map(|(tenant, agg, id, path)| format!("{tenant}:{agg}:{id} ({path})"))
-                        .take(5)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    blockers.into_iter().take(5).collect::<Vec<_>>().join(", ")
                 );
             }
+            nullify_referrers_offline(&store, &schemas, config.active_domain(), &target, &nullify)?;
             store.remove_aggregate(&args.aggregate, &args.aggregate_id)?;
             let _ = store.clear_reference_index(
                 config.active_domain(),
@@ -1054,6 +1053,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 config.encryption_key()?,
                 config.snowflake_worker_id,
             )?;
+            let schemas = SchemaManager::load(config.schema_store_path())?;
             let target = format!(
                 "{}#{}#{}",
                 config.active_domain(),
@@ -1061,19 +1061,17 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 args.aggregate_id
             );
             let referrers = store.referrers_for_any_tenant(&target)?;
-            if !referrers.is_empty() {
+            let (nullify, blockers) =
+                partition_referrers(&schemas, config.active_domain(), &referrers);
+            if !blockers.is_empty() {
                 bail!(
                     "aggregate {}:{} cannot be archived; referenced by {}",
                     args.aggregate,
                     args.aggregate_id,
-                    referrers
-                        .iter()
-                        .map(|(tenant, agg, id, path)| format!("{tenant}:{agg}:{id} ({path})"))
-                        .take(5)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    blockers.into_iter().take(5).collect::<Vec<_>>().join(", ")
                 );
             }
+            nullify_referrers_offline(&store, &schemas, config.active_domain(), &target, &nullify)?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
@@ -1276,6 +1274,102 @@ fn normalize_references_offline(
         .map(|outcome| (outcome.reference.to_canonical(), outcome.path.clone()))
         .collect();
     Ok((normalized_payload, targets))
+}
+
+fn partition_referrers(
+    schemas: &SchemaManager,
+    tenant: &str,
+    referrers: &[(String, String, String, String)],
+) -> (Vec<(String, String, String, String)>, Vec<String>) {
+    let mut nullify = Vec::new();
+    let mut blockers = Vec::new();
+    for (ref_tenant, agg, id, path) in referrers {
+        if ref_tenant != tenant {
+            blockers.push(format!("{ref_tenant}:{agg}:{id} ({path})"));
+            continue;
+        }
+        let cascade = schemas
+            .reference_rules_for_path(agg, path)
+            .map(|rules| rules.cascade)
+            .unwrap_or_default();
+        match cascade {
+            ReferenceCascade::Nullify => nullify.push((
+                ref_tenant.to_string(),
+                agg.to_string(),
+                id.to_string(),
+                path.to_string(),
+            )),
+            _ => blockers.push(format!("{ref_tenant}:{agg}:{id} ({path})")),
+        }
+    }
+    (nullify, blockers)
+}
+
+fn nullify_referrers_offline(
+    store: &EventStore,
+    schemas: &SchemaManager,
+    tenant: &str,
+    target: &str,
+    referrers: &[(String, String, String, String)],
+) -> Result<()> {
+    if referrers.is_empty() {
+        return Ok(());
+    }
+    let mut grouped: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for (ref_tenant, agg, id, path) in referrers {
+        if ref_tenant != tenant {
+            continue;
+        }
+        if schemas
+            .reference_rules_for_path(agg, path)
+            .map(|rules| rules.cascade)
+            .unwrap_or_default()
+            != ReferenceCascade::Nullify
+        {
+            continue;
+        }
+        grouped
+            .entry((agg.clone(), id.clone()))
+            .or_default()
+            .insert(json_pointer_from_path(path));
+    }
+
+    for ((aggregate, aggregate_id), paths) in grouped {
+        let patch_ops: Vec<Value> = paths
+            .into_iter()
+            .map(|path| {
+                json!({
+                    "op": "replace",
+                    "path": path,
+                    "value": Value::Null
+                })
+            })
+            .collect();
+        if patch_ops.is_empty() {
+            continue;
+        }
+        let patch = Value::Array(patch_ops);
+        let payload = store.prepare_payload_from_patch(&aggregate, &aggregate_id, &patch)?;
+        store.append(AppendEvent {
+            aggregate_type: aggregate.clone(),
+            aggregate_id: aggregate_id.clone(),
+            event_type: "_ref_nullify".into(),
+            payload,
+            metadata: None,
+            issued_by: None,
+            note: Some(format!("auto-nullify due to {target}")),
+            tenant: tenant.to_string(),
+            reference_targets: Vec::new(),
+        })?;
+    }
+    Ok(())
+}
+
+fn json_pointer_from_path(path: &str) -> String {
+    if path.is_empty() {
+        return "/".to_string();
+    }
+    format!("/{}", path.replace('.', "/"))
 }
 
 #[cfg(test)]
