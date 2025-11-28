@@ -8,6 +8,10 @@ use crate::{
     error::{EventError, Result},
     filter::FilterExpr,
     plugin::PublishTarget,
+    reference::{
+        AggregateReference, ReferenceContext, ReferenceFetchOutcome, ReferenceIntegrity,
+        ReferenceResolutionStatus, ResolvedAggregate, resolve_references,
+    },
     restrict::{self, RestrictMode},
     schema::SchemaManager,
     snowflake::SnowflakeId,
@@ -40,6 +44,8 @@ pub struct CoreContext {
     storage_quota_mb: Option<u64>,
     assignments: Arc<TenantAssignmentStore>,
     usage_cache: Arc<Mutex<StorageUsageCache>>,
+    reference_default_depth: usize,
+    reference_max_depth: usize,
 }
 
 const STORAGE_USAGE_REFRESH_EVENTS: u64 = 128;
@@ -87,6 +93,8 @@ impl CoreContext {
         storage_quota_mb: Option<u64>,
         initial_usage_bytes: Option<u64>,
         assignments: Arc<TenantAssignmentStore>,
+        reference_default_depth: usize,
+        reference_max_depth: usize,
     ) -> Self {
         Self {
             tokens,
@@ -99,6 +107,8 @@ impl CoreContext {
             storage_quota_mb,
             assignments,
             usage_cache: Arc::new(Mutex::new(StorageUsageCache::new(initial_usage_bytes))),
+            reference_default_depth,
+            reference_max_depth,
         }
     }
 
@@ -124,6 +134,14 @@ impl CoreContext {
 
     pub fn restrict(&self) -> RestrictMode {
         self.restrict
+    }
+
+    pub fn reference_default_depth(&self) -> usize {
+        self.reference_default_depth
+    }
+
+    pub fn reference_max_depth(&self) -> usize {
+        self.reference_max_depth
     }
 
     pub fn list_page_size(&self) -> usize {
@@ -260,6 +278,64 @@ impl CoreContext {
             Err(EventError::AggregateNotFound) => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    pub fn resolve_aggregate(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        depth: Option<usize>,
+    ) -> Result<Option<ResolvedAggregate>> {
+        let Some(root) = self.get_aggregate(token, aggregate_type, aggregate_id)? else {
+            return Ok(None);
+        };
+
+        let schemas = self.schemas();
+        let store = self.store();
+        let tokens = self.tokens();
+        let tenant = self.tenant_id().to_string();
+        let hops = depth
+            .unwrap_or(self.reference_default_depth)
+            .min(self.reference_max_depth);
+
+        let resolved = resolve_references(tenant.clone(), root, &schemas, hops, |reference| {
+            if !reference.domain.eq_ignore_ascii_case(&tenant) {
+                return Ok(ReferenceFetchOutcome {
+                    status: ReferenceResolutionStatus::Forbidden,
+                    aggregate: None,
+                });
+            }
+
+            let resource = format!(
+                "aggregate:{}:{}",
+                reference.aggregate_type, reference.aggregate_id
+            );
+            match tokens.authorize_action(token, "aggregate.read", Some(resource.as_str())) {
+                Ok(_) => {}
+                Err(EventError::Unauthorized) => {
+                    return Ok(ReferenceFetchOutcome {
+                        status: ReferenceResolutionStatus::Forbidden,
+                        aggregate: None,
+                    });
+                }
+                Err(err) => return Err(err),
+            }
+
+            match store.get_aggregate_state(&reference.aggregate_type, &reference.aggregate_id) {
+                Ok(aggregate) => Ok(ReferenceFetchOutcome {
+                    status: ReferenceResolutionStatus::Ok,
+                    aggregate: Some(self.sanitize_aggregate(aggregate)),
+                }),
+                Err(EventError::AggregateNotFound) => Ok(ReferenceFetchOutcome {
+                    status: ReferenceResolutionStatus::NotFound,
+                    aggregate: None,
+                }),
+                Err(err) => Err(err),
+            }
+        })?;
+
+        Ok(Some(resolved))
     }
 
     pub fn select_aggregate_fields(
@@ -583,7 +659,7 @@ impl CoreContext {
             self.tokens()
                 .authorize_action(&token, "aggregate.append", Some(resource.as_str()))?;
 
-        let effective_payload = match event_body {
+        let mut effective_payload = match event_body {
             EventBody::Payload(payload) => {
                 ensure_payload_size(&payload)?;
                 payload
@@ -619,6 +695,44 @@ impl CoreContext {
 
         if schema_present {
             schemas.validate_event(&aggregate_type, &event_type, &effective_payload)?;
+            let reference_context = ReferenceContext {
+                domain: self.tenant_id(),
+                aggregate_type: &aggregate_type,
+            };
+            let store = self.store();
+            let tokens = self.tokens();
+            let tenant = self.tenant_id().to_string();
+            let mut resolver = move |reference: &AggregateReference,
+                                     _integrity: ReferenceIntegrity|
+                  -> Result<ReferenceResolutionStatus> {
+                if !reference.domain.eq_ignore_ascii_case(tenant.as_str()) {
+                    return Ok(ReferenceResolutionStatus::Forbidden);
+                }
+                let resource = format!(
+                    "aggregate:{}:{}",
+                    reference.aggregate_type, reference.aggregate_id
+                );
+                match tokens.authorize_action(&token, "aggregate.read", Some(resource.as_str())) {
+                    Ok(_) => {}
+                    Err(EventError::Unauthorized) => {
+                        return Ok(ReferenceResolutionStatus::Forbidden);
+                    }
+                    Err(err) => return Err(err),
+                }
+                match store.aggregate_version(&reference.aggregate_type, &reference.aggregate_id) {
+                    Ok(Some(_)) => Ok(ReferenceResolutionStatus::Ok),
+                    Ok(None) => Ok(ReferenceResolutionStatus::NotFound),
+                    Err(err) => Err(err),
+                }
+            };
+            let (normalized_payload, _outcomes) = schemas.normalize_references(
+                &aggregate_type,
+                effective_payload,
+                reference_context,
+                &mut resolver,
+            )?;
+            effective_payload = normalized_payload;
+            ensure_payload_size(&effective_payload)?;
         }
 
         let issued_by: Option<ActorClaims> = claims.actor_claims();

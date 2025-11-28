@@ -2123,6 +2123,12 @@ fn aggregate_list_json_empty() -> Result<()> {
     Ok(())
 }
 
+cli_failure_test!(
+    aggregate_list_resolve_requires_json,
+    ["aggregate", "list", "--resolve"],
+    "--resolve requires --json output"
+);
+
 #[test]
 fn aggregate_list_accepts_positional_type() -> Result<()> {
     let cli = CliTest::new()?;
@@ -2161,6 +2167,56 @@ fn aggregate_list_accepts_positional_type() -> Result<()> {
         order_array
             .iter()
             .all(|entry| entry["aggregate_type"] == "order")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn aggregate_list_resolves_references() -> Result<()> {
+    let cli = CliTest::new()?;
+    // Schemas
+    cli.run(&["schema", "create", "address", "--events", "address_created"])?;
+    cli.run(&["schema", "create", "farm", "--events", "farm_created"])?;
+    cli.run(&["schema", "field", "--type", "reference", "farm", "address"])?;
+
+    // Target aggregate
+    cli.create_aggregate("address", "addr-1", "address_created")?;
+    // Aggregate with reference (same domain shorthand)
+    cli.run(&[
+        "aggregate",
+        "create",
+        "farm",
+        "farm-1",
+        "--event",
+        "farm_created",
+        "--field",
+        "address=address#addr-1",
+    ])?;
+
+    let output = cli.run_json(&["aggregate", "list", "farm", "--json", "--resolve"])?;
+    let array = output
+        .as_array()
+        .context("aggregate list did not return an array")?;
+    assert_eq!(array.len(), 1);
+    let resolved = &array[0];
+    assert_eq!(resolved["aggregate"]["aggregate_id"], json!("farm-1"));
+
+    let references = resolved["references"]
+        .as_array()
+        .context("resolved references missing")?;
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0]["status"], json!("ok"));
+    assert_eq!(
+        references[0]["reference"],
+        json!({"domain":"default","aggregate_type":"address","aggregate_id":"addr-1"})
+    );
+    assert_eq!(
+        references[0]["resolved"]
+            .get("aggregate")
+            .and_then(|agg| agg.get("aggregate_type"))
+            .cloned(),
+        Some(json!("address"))
     );
 
     Ok(())

@@ -2,7 +2,6 @@ use std::{
     collections::BTreeMap,
     io::Write,
     net::{IpAddr, SocketAddr, TcpStream},
-    sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,21 +21,9 @@ use eventdbx::{
     store::{AggregateState, EventRecord, SnapshotRecord},
 };
 use serde_json::{self, Value};
-use tracing::debug;
 
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
 const DEFAULT_PAGE_SIZE: usize = 256;
-static NO_NOISE_OVERRIDE: OnceLock<bool> = OnceLock::new();
-
-/// Set a process-wide override for disabling Noise. Intended to be called once
-/// at application startup (e.g., from CLI flag parsing).
-pub fn set_no_noise(no_noise: bool) {
-    let _ = NO_NOISE_OVERRIDE.set(no_noise);
-}
-
-fn resolve_no_noise(config_value: bool) -> bool {
-    NO_NOISE_OVERRIDE.get().copied().unwrap_or(config_value)
-}
 
 #[derive(Clone)]
 pub struct ServerClient {
@@ -62,7 +49,7 @@ pub struct TenantSchemaPublishResult {
 impl ServerClient {
     pub fn new(config: &Config) -> Result<Self> {
         let connect_addr = normalize_connect_addr(&config.socket.bind_addr);
-        let no_noise = resolve_no_noise(config.no_noise);
+        let no_noise = config.no_noise;
 
         Ok(Self {
             connect_addr,
@@ -80,7 +67,7 @@ impl ServerClient {
         Self {
             connect_addr: connect_addr.into(),
             tenant,
-            no_noise: resolve_no_noise(false),
+            no_noise: false,
         }
     }
 

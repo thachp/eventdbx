@@ -21,6 +21,7 @@ use eventdbx::{
     filter,
     merkle::compute_merkle_root,
     plugin::{JobPriority, PluginManager, PublishTarget},
+    reference::{ReferenceFetchOutcome, ReferenceResolutionStatus, resolve_references},
     restrict,
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
@@ -208,6 +209,14 @@ pub struct AggregateGetArgs {
     /// Include event history in the output
     #[arg(long, default_value_t = false)]
     pub include_events: bool,
+
+    /// Resolve reference fields and include resolved payloads
+    #[arg(long, default_value_t = false)]
+    pub resolve: bool,
+
+    /// Resolution depth (defaults to config reference_default_depth; capped at reference_max_depth)
+    #[arg(long = "resolve-depth")]
+    pub resolve_depth: Option<usize>,
 }
 
 #[derive(Args)]
@@ -301,6 +310,14 @@ pub struct AggregateListArgs {
     /// Show only archived aggregates
     #[arg(long, default_value_t = false, conflicts_with = "include_archived")]
     pub archived_only: bool,
+
+    /// Resolve reference fields for each aggregate (JSON output recommended)
+    #[arg(long, default_value_t = false)]
+    pub resolve: bool,
+
+    /// Resolution depth (defaults to config reference_default_depth; capped at reference_max_depth)
+    #[arg(long = "resolve-depth")]
+    pub resolve_depth: Option<usize>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -422,6 +439,69 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
 
             let store =
                 EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
+            if args.resolve && !args.json {
+                bail!("--resolve requires --json output for aggregate listings");
+            }
+            let tenant = config.active_domain().to_string();
+            let resolve_depth = args
+                .resolve_depth
+                .unwrap_or(config.reference_default_depth)
+                .min(config.reference_max_depth);
+            let schemas_path = config.schema_store_path();
+            let mut schemas_cache: Option<SchemaManager> = None;
+            let mut print_json = |aggregates: Vec<AggregateState>| -> Result<()> {
+                if !args.resolve {
+                    println!("{}", serde_json::to_string_pretty(&aggregates)?);
+                    return Ok(());
+                }
+
+                let schemas = if let Some(ref manager) = schemas_cache {
+                    manager
+                } else {
+                    schemas_cache = Some(SchemaManager::load(schemas_path.clone())?);
+                    schemas_cache.as_ref().expect("schema cache initialized")
+                };
+
+                let resolved: Vec<_> = aggregates
+                    .into_iter()
+                    .map(|aggregate| {
+                        let resolved = resolve_references(
+                            tenant.clone(),
+                            aggregate,
+                            schemas,
+                            resolve_depth,
+                            |reference| {
+                                if !reference.domain.eq_ignore_ascii_case(&tenant) {
+                                    return Ok(ReferenceFetchOutcome {
+                                        status: ReferenceResolutionStatus::Forbidden,
+                                        aggregate: None,
+                                    });
+                                }
+                                match store.get_aggregate_state(
+                                    &reference.aggregate_type,
+                                    &reference.aggregate_id,
+                                ) {
+                                    Ok(agg) => Ok(ReferenceFetchOutcome {
+                                        status: ReferenceResolutionStatus::Ok,
+                                        aggregate: Some(agg),
+                                    }),
+                                    Err(EventError::AggregateNotFound) => {
+                                        Ok(ReferenceFetchOutcome {
+                                            status: ReferenceResolutionStatus::NotFound,
+                                            aggregate: None,
+                                        })
+                                    }
+                                    Err(err) => Err(err),
+                                }
+                            },
+                        )?;
+                        serde_json::to_value(resolved).map_err(Into::into)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                println!("{}", serde_json::to_string_pretty(&resolved)?);
+                Ok(())
+            };
             let mut filter_expr = match args.filter.as_ref() {
                 Some(raw) => Some(
                     filter::parse_shorthand(raw)
@@ -528,7 +608,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                         },
                     );
                     if args.json {
-                        println!("{}", serde_json::to_string_pretty(&aggregates)?);
+                        print_json(aggregates)?;
                     } else {
                         let show_archived = matches!(
                             scope,
@@ -575,7 +655,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     },
                 );
                 if args.json {
-                    println!("{}", serde_json::to_string_pretty(&aggregates)?);
+                    print_json(aggregates)?;
                 } else {
                     let show_archived = matches!(
                         scope,
@@ -620,7 +700,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
             )?;
 
             if args.json {
-                println!("{}", serde_json::to_string_pretty(&aggregates)?);
+                print_json(aggregates)?;
             } else {
                 let show_archived = matches!(
                     scope,
@@ -706,6 +786,43 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     None => events,
                 };
                 output["events"] = serde_json::to_value(filtered)?;
+            }
+
+            if args.resolve {
+                let schemas = SchemaManager::load(config.schema_store_path())?;
+                let tenant = config.active_domain().to_string();
+                let depth = args
+                    .resolve_depth
+                    .unwrap_or(config.reference_default_depth)
+                    .min(config.reference_max_depth);
+                let resolved = resolve_references(
+                    tenant.clone(),
+                    state.clone(),
+                    &schemas,
+                    depth,
+                    |reference| {
+                        if !reference.domain.eq_ignore_ascii_case(&tenant) {
+                            return Ok(ReferenceFetchOutcome {
+                                status: ReferenceResolutionStatus::Forbidden,
+                                aggregate: None,
+                            });
+                        }
+                        match store
+                            .get_aggregate_state(&reference.aggregate_type, &reference.aggregate_id)
+                        {
+                            Ok(agg) => Ok(ReferenceFetchOutcome {
+                                status: ReferenceResolutionStatus::Ok,
+                                aggregate: Some(agg),
+                            }),
+                            Err(EventError::AggregateNotFound) => Ok(ReferenceFetchOutcome {
+                                status: ReferenceResolutionStatus::NotFound,
+                                aggregate: None,
+                            }),
+                            Err(err) => Err(err),
+                        }
+                    },
+                )?;
+                output["resolved"] = serde_json::to_value(resolved)?;
             }
 
             println!("{}", serde_json::to_string_pretty(&output)?);
