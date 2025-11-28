@@ -34,7 +34,9 @@ use crate::{
     filter::{self, FilterExpr},
     observability,
     plugin::{JobPriority, PluginManager, PublishTarget},
-    reference::ResolvedAggregate,
+    reference::{
+        ReferenceContext, ReferenceResolutionStatus, ResolvedAggregate, ResolvedReference,
+    },
     replication_noise::{
         FrameTransport, MAX_NOISE_FRAME_PAYLOAD, perform_server_handshake, read_session_frame,
         write_session_frame,
@@ -1721,6 +1723,145 @@ async fn execute_control_command(
     core_provider: Arc<dyn CoreProvider>,
 ) -> std::result::Result<ControlReply, EventError> {
     let _tenant_id = tenant_id;
+
+    fn resolve_cross_domain(
+        core_provider: Arc<dyn CoreProvider>,
+        token: &str,
+        domain: &str,
+        aggregate: AggregateState,
+        depth: usize,
+        stack: &mut Vec<(String, String, String)>,
+    ) -> Result<ResolvedAggregate, EventError> {
+        let core = core_provider.core_for(domain)?;
+        let schemas = core.schemas();
+        let context = ReferenceContext {
+            domain,
+            aggregate_type: &aggregate.aggregate_type,
+        };
+        let located =
+            schemas.collect_references(&aggregate.aggregate_type, &aggregate.state, context)?;
+
+        let mut resolved_refs = Vec::new();
+        stack.push((
+            domain.to_string(),
+            aggregate.aggregate_type.clone(),
+            aggregate.aggregate_id.clone(),
+        ));
+
+        for reference in located {
+            if depth == 0 {
+                resolved_refs.push(ResolvedReference {
+                    path: reference.path,
+                    reference: reference.reference,
+                    status: ReferenceResolutionStatus::DepthExceeded,
+                    resolved: None,
+                });
+                continue;
+            }
+
+            if stack.iter().any(|(d, t, id)| {
+                d.eq_ignore_ascii_case(&reference.reference.domain)
+                    && t == &reference.reference.aggregate_type
+                    && id == &reference.reference.aggregate_id
+            }) {
+                resolved_refs.push(ResolvedReference {
+                    path: reference.path,
+                    reference: reference.reference,
+                    status: ReferenceResolutionStatus::Cycle,
+                    resolved: None,
+                });
+                continue;
+            }
+
+            let target_domain = reference.reference.domain.clone();
+            let target_core = match core_provider.core_for(&target_domain) {
+                Ok(core) => core,
+                Err(_) => {
+                    resolved_refs.push(ResolvedReference {
+                        path: reference.path,
+                        reference: reference.reference,
+                        status: ReferenceResolutionStatus::Forbidden,
+                        resolved: None,
+                    });
+                    continue;
+                }
+            };
+
+            let resource = format!(
+                "aggregate:{}:{}",
+                reference.reference.aggregate_type, reference.reference.aggregate_id
+            );
+            if let Err(EventError::Unauthorized) = target_core.tokens().authorize_action(
+                token,
+                "aggregate.read",
+                Some(resource.as_str()),
+            ) {
+                resolved_refs.push(ResolvedReference {
+                    path: reference.path,
+                    reference: reference.reference,
+                    status: ReferenceResolutionStatus::Forbidden,
+                    resolved: None,
+                });
+                continue;
+            }
+
+            match target_core.get_aggregate(
+                token,
+                &reference.reference.aggregate_type,
+                &reference.reference.aggregate_id,
+            ) {
+                Ok(Some(child)) => {
+                    let next = resolve_cross_domain(
+                        Arc::clone(&core_provider),
+                        token,
+                        &target_domain,
+                        child,
+                        depth.saturating_sub(1),
+                        stack,
+                    )?;
+                    resolved_refs.push(ResolvedReference {
+                        path: reference.path,
+                        reference: reference.reference,
+                        status: ReferenceResolutionStatus::Ok,
+                        resolved: Some(Box::new(next)),
+                    });
+                }
+                Ok(None) => {
+                    resolved_refs.push(ResolvedReference {
+                        path: reference.path,
+                        reference: reference.reference,
+                        status: ReferenceResolutionStatus::NotFound,
+                        resolved: None,
+                    });
+                }
+                Err(EventError::AggregateNotFound) => {
+                    resolved_refs.push(ResolvedReference {
+                        path: reference.path,
+                        reference: reference.reference,
+                        status: ReferenceResolutionStatus::NotFound,
+                        resolved: None,
+                    });
+                }
+                Err(EventError::Unauthorized) => {
+                    resolved_refs.push(ResolvedReference {
+                        path: reference.path,
+                        reference: reference.reference,
+                        status: ReferenceResolutionStatus::Forbidden,
+                        resolved: None,
+                    });
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        stack.pop();
+        Ok(ResolvedAggregate {
+            domain: domain.to_string(),
+            aggregate,
+            references: resolved_refs,
+        })
+    }
+
     match command {
         ControlCommand::ListAggregates {
             token,
@@ -1733,6 +1874,7 @@ async fn execute_control_command(
             resolve,
             resolve_depth,
         } => {
+            let tenant_owned = tenant_id.to_string();
             let mut scope = if archived_only {
                 AggregateQueryScope::ArchivedOnly
             } else if include_archived {
@@ -1756,6 +1898,7 @@ async fn execute_control_command(
                 let cursor = cursor.clone();
                 let resolve = resolve;
                 let resolve_depth = resolve_depth;
+                let tenant_id = tenant_owned.clone();
                 move || {
                     let sort_ref = sort.as_ref().map(|keys| keys.as_slice());
                     let timestamp_sort = sort_ref.and_then(store::timestamp_sort_hint);
@@ -1790,14 +1933,16 @@ async fn execute_control_command(
                             .min(core.reference_max_depth());
                         let mut resolved = Vec::new();
                         for aggregate in &aggregates {
-                            if let Some(item) = core.resolve_aggregate(
+                            let mut stack = Vec::new();
+                            let resolved_item = resolve_cross_domain(
+                                Arc::clone(&core_provider),
                                 &token,
-                                &aggregate.aggregate_type,
-                                &aggregate.aggregate_id,
-                                Some(depth),
-                            )? {
-                                resolved.push(item);
-                            }
+                                &tenant_id,
+                                aggregate.clone(),
+                                depth,
+                                &mut stack,
+                            )?;
+                            resolved.push(resolved_item);
                         }
                         Some(
                             serde_json::to_string(&resolved)
@@ -1826,19 +1971,33 @@ async fn execute_control_command(
             resolve,
             resolve_depth,
         } => {
+            let tenant_owned = tenant_id.to_string();
             let aggregate = spawn_blocking({
                 let core = core.clone();
                 let aggregate_type = aggregate_type.clone();
                 let aggregate_id = aggregate_id.clone();
                 let token = token.clone();
+                let tenant_id = tenant_owned.clone();
                 move || {
                     if resolve {
-                        core.resolve_aggregate(
-                            &token,
-                            &aggregate_type,
-                            &aggregate_id,
-                            resolve_depth,
-                        )
+                        let aggregate =
+                            core.get_aggregate(&token, &aggregate_type, &aggregate_id)?;
+                        if let Some(aggregate) = aggregate {
+                            let mut stack = Vec::new();
+                            resolve_cross_domain(
+                                Arc::clone(&core_provider),
+                                &token,
+                                &tenant_id,
+                                aggregate,
+                                resolve_depth
+                                    .unwrap_or(core.reference_default_depth())
+                                    .min(core.reference_max_depth()),
+                                &mut stack,
+                            )
+                            .map(Some)
+                        } else {
+                            Ok(None)
+                        }
                     } else {
                         core.get_aggregate(&token, &aggregate_type, &aggregate_id)
                             .map(|opt| {

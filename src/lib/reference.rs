@@ -562,6 +562,80 @@ mod tests {
         assert_eq!(leaf_status, ReferenceResolutionStatus::DepthExceeded);
     }
 
+    #[test]
+    fn resolve_references_cross_domain_allows_when_fetcher_permits() {
+        let (manager, _guard) = prepare_schema_with_reference("farm", "address");
+
+        let farm = sample_state("farm", "1", &[("address", "geo#address#1")]);
+        let address = sample_state("address", "1", &[]);
+
+        let mut aggregates = std::collections::HashMap::new();
+        aggregates.insert("geo#address#1".to_string(), address.clone());
+
+        let resolved = resolve_references(
+            "default".into(),
+            farm,
+            &manager,
+            DEFAULT_RESOLUTION_DEPTH,
+            |reference| {
+                let key = reference.to_canonical();
+                let aggregate = aggregates.get(&key).cloned();
+                Ok(ReferenceFetchOutcome {
+                    status: if aggregate.is_some() {
+                        ReferenceResolutionStatus::Ok
+                    } else {
+                        ReferenceResolutionStatus::NotFound
+                    },
+                    aggregate,
+                })
+            },
+        )
+        .expect("resolution should succeed");
+
+        let first = resolved
+            .references
+            .first()
+            .expect("reference should be present");
+        assert_eq!(first.status, ReferenceResolutionStatus::Ok);
+        assert_eq!(first.reference.domain, "geo");
+        let child = first
+            .resolved
+            .as_ref()
+            .expect("resolved child should exist")
+            .aggregate
+            .clone();
+        assert_eq!(child.aggregate_type, "address");
+        assert_eq!(child.aggregate_id, "1");
+    }
+
+    #[test]
+    fn resolve_references_cross_domain_marks_forbidden_when_fetcher_blocks() {
+        let (manager, _guard) = prepare_schema_with_reference("farm", "address");
+
+        let farm = sample_state("farm", "1", &[("address", "geo#address#1")]);
+
+        let resolved = resolve_references(
+            "default".into(),
+            farm,
+            &manager,
+            DEFAULT_RESOLUTION_DEPTH,
+            |_reference| {
+                Ok(ReferenceFetchOutcome {
+                    status: ReferenceResolutionStatus::Forbidden,
+                    aggregate: None,
+                })
+            },
+        )
+        .expect("resolution should succeed");
+
+        let first = resolved
+            .references
+            .first()
+            .expect("reference should be present");
+        assert_eq!(first.status, ReferenceResolutionStatus::Forbidden);
+        assert!(first.resolved.is_none());
+    }
+
     fn prepare_schema_with_reference(
         aggregate: &str,
         field: &str,
