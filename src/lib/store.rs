@@ -48,6 +48,8 @@ const PREFIX_META_CREATED_INDEX: &str = "meta-created";
 const PREFIX_META_UPDATED_INDEX: &str = "meta-updated";
 const PREFIX_META_CREATED_INDEX_ARCHIVED: &str = "meta-created-arch";
 const PREFIX_META_UPDATED_INDEX_ARCHIVED: &str = "meta-updated-arch";
+const PREFIX_REF_SOURCE: &str = "refsrc";
+const PREFIX_REF_TARGET: &str = "reftgt";
 const LOCK_RETRY_ATTEMPTS: usize = 5;
 const LOCK_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
@@ -1348,6 +1350,19 @@ impl AggregateKey {
 struct PendingEvent {
     key: Vec<u8>,
     value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredReferencePath {
+    target: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredReferrer {
+    aggregate_type: String,
+    aggregate_id: String,
+    path: String,
 }
 
 pub struct EventStore {
@@ -3999,7 +4014,117 @@ impl EventStore {
         batch.delete(meta_key(aggregate_type, aggregate_id));
         batch.delete(state_key(aggregate_type, aggregate_id));
         self.sync_timestamp_indexes(&mut batch, AggregateIndex::Active, Some(&meta), None);
+        // best-effort cleanup of reference index entries (tenant/domain handled by caller)
         self.write_batch(batch)
+    }
+
+    pub fn update_reference_index(
+        &self,
+        tenant: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        references: &[(String, String)],
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        let _guard = self.write_lock.lock();
+
+        let source_key = refsrc_key(tenant, aggregate_type, aggregate_id);
+        let prev: Vec<StoredReferencePath> = self
+            .db
+            .get(source_key.clone())
+            .map_err(|err| EventError::Storage(err.to_string()))?
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()
+            .map_err(|err| EventError::Serialization(err.to_string()))?
+            .unwrap_or_default();
+
+        let mut batch = WriteBatch::default();
+
+        // Remove old target mappings
+        for entry in prev {
+            let target_key = reftgt_key(tenant, &entry.target);
+            let existing: Vec<StoredReferrer> = self
+                .db
+                .get(&target_key)
+                .map_err(|err| EventError::Storage(err.to_string()))?
+                .map(|bytes| serde_json::from_slice(&bytes))
+                .transpose()
+                .map_err(|err| EventError::Serialization(err.to_string()))?
+                .unwrap_or_default();
+            let filtered: Vec<StoredReferrer> = existing
+                .into_iter()
+                .filter(|r| !(r.aggregate_type == aggregate_type && r.aggregate_id == aggregate_id))
+                .collect();
+            if filtered.is_empty() {
+                batch.delete(target_key);
+            } else {
+                batch.put(target_key, serde_json::to_vec(&filtered)?);
+            }
+        }
+
+        // Add new mappings
+        let mut new_paths = Vec::new();
+        for (target, path) in references {
+            let path_entry = StoredReferencePath {
+                target: target.clone(),
+                path: path.clone(),
+            };
+            new_paths.push(path_entry.clone());
+
+            let target_key = reftgt_key(tenant, target);
+            let mut existing: Vec<StoredReferrer> = self
+                .db
+                .get(&target_key)
+                .map_err(|err| EventError::Storage(err.to_string()))?
+                .map(|bytes| serde_json::from_slice(&bytes))
+                .transpose()
+                .map_err(|err| EventError::Serialization(err.to_string()))?
+                .unwrap_or_default();
+            if !existing.iter().any(|r| {
+                r.aggregate_type == aggregate_type
+                    && r.aggregate_id == aggregate_id
+                    && r.path == *path
+            }) {
+                existing.push(StoredReferrer {
+                    aggregate_type: aggregate_type.to_string(),
+                    aggregate_id: aggregate_id.to_string(),
+                    path: path.clone(),
+                });
+                batch.put(target_key, serde_json::to_vec(&existing)?);
+            }
+        }
+
+        batch.put(source_key, serde_json::to_vec(&new_paths)?);
+        self.write_batch(batch)
+    }
+
+    pub fn clear_reference_index(
+        &self,
+        tenant: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<()> {
+        self.update_reference_index(tenant, aggregate_type, aggregate_id, &[])
+    }
+
+    pub fn referrers_for(
+        &self,
+        tenant: &str,
+        target: &str,
+    ) -> Result<Vec<(String, String, String)>> {
+        let target_key = reftgt_key(tenant, target);
+        let existing: Vec<StoredReferrer> = self
+            .db
+            .get(&target_key)
+            .map_err(|err| EventError::Storage(err.to_string()))?
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()
+            .map_err(|err| EventError::Serialization(err.to_string()))?
+            .unwrap_or_default();
+        Ok(existing
+            .into_iter()
+            .map(|r| (r.aggregate_type, r.aggregate_id, r.path))
+            .collect())
     }
 
     fn load_state_map_from(
@@ -4300,6 +4425,14 @@ fn key_with_segments(parts: &[&str]) -> Vec<u8> {
         key.extend_from_slice(part.as_bytes());
     }
     key
+}
+
+fn refsrc_key(tenant: &str, aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
+    key_with_segments(&[PREFIX_REF_SOURCE, tenant, aggregate_type, aggregate_id])
+}
+
+fn reftgt_key(tenant: &str, target: &str) -> Vec<u8> {
+    key_with_segments(&[PREFIX_REF_TARGET, tenant, target])
 }
 
 fn record_store_op(operation: &'static str, status: &'static str, duration: f64) {

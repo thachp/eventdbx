@@ -725,7 +725,7 @@ impl CoreContext {
                     Err(err) => Err(err),
                 }
             };
-            let (normalized_payload, _outcomes) = schemas.normalize_references(
+            let (normalized_payload, outcomes) = schemas.normalize_references(
                 &aggregate_type,
                 effective_payload,
                 reference_context,
@@ -733,6 +733,17 @@ impl CoreContext {
             )?;
             effective_payload = normalized_payload;
             ensure_payload_size(&effective_payload)?;
+            let reference_targets: Vec<(String, String)> = outcomes
+                .iter()
+                .map(|outcome| (outcome.reference.to_canonical(), outcome.path.clone()))
+                .collect();
+            // best-effort index update; failures propagate to keep invariants intact
+            self.store.update_reference_index(
+                &self.tenant_id,
+                &aggregate_type,
+                &aggregate_id,
+                &reference_targets,
+            )?;
         }
 
         let issued_by: Option<ActorClaims> = claims.actor_claims();

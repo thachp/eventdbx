@@ -734,7 +734,24 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 config.encryption_key()?,
                 config.snowflake_worker_id,
             )?;
+            let tenant = config.active_domain();
+            let target = format!("{}#{}#{}", tenant, args.aggregate, args.aggregate_id);
+            let referrers = store.referrers_for(tenant, &target)?;
+            if !referrers.is_empty() {
+                bail!(
+                    "aggregate {}:{} cannot be removed; referenced by {}",
+                    args.aggregate,
+                    args.aggregate_id,
+                    referrers
+                        .iter()
+                        .map(|(agg, id, path)| format!("{}:{} ({})", agg, id, path))
+                        .take(5)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             store.remove_aggregate(&args.aggregate, &args.aggregate_id)?;
+            let _ = store.clear_reference_index(tenant, &args.aggregate, &args.aggregate_id);
             let assignments = TenantAssignmentStore::open(config.tenant_meta_path())?;
             let usage = store.storage_usage_bytes()?;
             assignments.update_storage_usage_bytes(config.active_domain(), usage)?;
