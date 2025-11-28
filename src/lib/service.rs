@@ -659,6 +659,7 @@ impl CoreContext {
             self.tokens()
                 .authorize_action(&token, "aggregate.append", Some(resource.as_str()))?;
 
+        let mut reference_targets = Vec::new();
         let mut effective_payload = match event_body {
             EventBody::Payload(payload) => {
                 ensure_payload_size(&payload)?;
@@ -733,17 +734,10 @@ impl CoreContext {
             )?;
             effective_payload = normalized_payload;
             ensure_payload_size(&effective_payload)?;
-            let reference_targets: Vec<(String, String)> = outcomes
+            reference_targets = outcomes
                 .iter()
                 .map(|outcome| (outcome.reference.to_canonical(), outcome.path.clone()))
                 .collect();
-            // best-effort index update; failures propagate to keep invariants intact
-            self.store.update_reference_index(
-                &self.tenant_id,
-                &aggregate_type,
-                &aggregate_id,
-                &reference_targets,
-            )?;
         }
 
         let issued_by: Option<ActorClaims> = claims.actor_claims();
@@ -759,6 +753,8 @@ impl CoreContext {
             metadata,
             issued_by,
             note,
+            tenant: self.tenant_id.clone(),
+            reference_targets,
         })?;
         self.note_storage_mutation()?;
         Ok(record)

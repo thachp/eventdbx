@@ -92,6 +92,8 @@ impl<'a> Transaction<'a> {
                 )));
             }
         }
+        let tenant = input.tenant.clone();
+        let references = input.reference_targets.clone();
         let key = AggregateKey::new(input.aggregate_type.clone(), input.aggregate_id.clone());
         let event_id = self.store.next_event_id();
         let (meta, state) = self.ensure_cache(&key)?;
@@ -107,6 +109,13 @@ impl<'a> Transaction<'a> {
             value: event_value,
         });
         self.pending_records.push(record.clone());
+
+        self.pending_refs.push(PendingRefUpdate {
+            tenant,
+            aggregate_type: record.aggregate_type.clone(),
+            aggregate_id: record.aggregate_id.clone(),
+            references,
+        });
         Ok(record)
     }
 
@@ -150,6 +159,17 @@ impl<'a> Transaction<'a> {
                 &mut batch,
                 state_key(aggregate_type, aggregate_id),
                 state_bytes,
+            )?;
+        }
+
+        for pending in self.pending_refs {
+            update_reference_index_inner(
+                &self.store.db,
+                &mut batch,
+                &pending.tenant,
+                &pending.aggregate_type,
+                &pending.aggregate_id,
+                &pending.references,
             )?;
         }
 
@@ -204,6 +224,8 @@ fn apply_event(
         metadata,
         issued_by,
         note,
+        tenant: _,
+        reference_targets: _,
     } = input;
 
     debug_assert_eq!(&meta.aggregate_type, &aggregate_type);
@@ -371,6 +393,8 @@ pub struct AppendEvent {
     pub metadata: Option<Value>,
     pub issued_by: Option<ActorClaims>,
     pub note: Option<String>,
+    pub tenant: String,
+    pub reference_targets: Vec<(String, String)>, // (canonical_target, path)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1352,6 +1376,13 @@ struct PendingEvent {
     value: Vec<u8>,
 }
 
+struct PendingRefUpdate {
+    tenant: String,
+    aggregate_type: String,
+    aggregate_id: String,
+    references: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredReferencePath {
     target: String,
@@ -1378,6 +1409,7 @@ pub struct Transaction<'a> {
     _guard: MutexGuard<'a, ()>,
     pending_events: Vec<PendingEvent>,
     pending_records: Vec<EventRecord>,
+    pending_refs: Vec<PendingRefUpdate>,
     meta_cache: BTreeMap<AggregateKey, AggregateMeta>,
     state_cache: BTreeMap<AggregateKey, BTreeMap<String, String>>,
 }
@@ -1760,6 +1792,8 @@ impl EventStore {
         self.ensure_writable()?;
         let _guard = self.write_lock.lock();
 
+        let tenant = input.tenant.clone();
+        let references = input.reference_targets.clone();
         if let Some(note) = input.note.as_ref() {
             if note.chars().count() > MAX_EVENT_NOTE_LENGTH {
                 return Err(EventError::InvalidSchema(format!(
@@ -1815,6 +1849,14 @@ impl EventStore {
             &mut batch,
             state_key(&record.aggregate_type, &record.aggregate_id),
             encoded_state,
+        )?;
+        update_reference_index_inner(
+            &self.db,
+            &mut batch,
+            &tenant,
+            &record.aggregate_type,
+            &record.aggregate_id,
+            &references,
         )?;
         self.sync_timestamp_indexes(
             &mut batch,
@@ -1939,6 +1981,7 @@ impl EventStore {
             _guard: guard,
             pending_events: Vec::new(),
             pending_records: Vec::new(),
+            pending_refs: Vec::new(),
             meta_cache: BTreeMap::new(),
             state_cache: BTreeMap::new(),
         })
@@ -4435,6 +4478,77 @@ fn reftgt_key(tenant: &str, target: &str) -> Vec<u8> {
     key_with_segments(&[PREFIX_REF_TARGET, tenant, target])
 }
 
+fn update_reference_index_inner(
+    db: &DBWithThreadMode<MultiThreaded>,
+    batch: &mut WriteBatch,
+    tenant: &str,
+    aggregate_type: &str,
+    aggregate_id: &str,
+    references: &[(String, String)],
+) -> Result<()> {
+    let source_key = refsrc_key(tenant, aggregate_type, aggregate_id);
+    let prev: Vec<StoredReferencePath> = db
+        .get(source_key.clone())
+        .map_err(|err| EventError::Storage(err.to_string()))?
+        .map(|bytes| serde_json::from_slice(&bytes))
+        .transpose()
+        .map_err(|err| EventError::Serialization(err.to_string()))?
+        .unwrap_or_default();
+
+    // Remove old target mappings
+    for entry in prev {
+        let target_key = reftgt_key(tenant, &entry.target);
+        let existing: Vec<StoredReferrer> = db
+            .get(&target_key)
+            .map_err(|err| EventError::Storage(err.to_string()))?
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()
+            .map_err(|err| EventError::Serialization(err.to_string()))?
+            .unwrap_or_default();
+        let filtered: Vec<StoredReferrer> = existing
+            .into_iter()
+            .filter(|r| !(r.aggregate_type == aggregate_type && r.aggregate_id == aggregate_id))
+            .collect();
+        if filtered.is_empty() {
+            batch.delete(target_key);
+        } else {
+            batch.put(target_key, serde_json::to_vec(&filtered)?);
+        }
+    }
+
+    // Add new mappings
+    let mut new_paths = Vec::new();
+    for (target, path) in references {
+        let path_entry = StoredReferencePath {
+            target: target.clone(),
+            path: path.clone(),
+        };
+        new_paths.push(path_entry.clone());
+
+        let target_key = reftgt_key(tenant, target);
+        let mut existing: Vec<StoredReferrer> = db
+            .get(&target_key)
+            .map_err(|err| EventError::Storage(err.to_string()))?
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()
+            .map_err(|err| EventError::Serialization(err.to_string()))?
+            .unwrap_or_default();
+        if !existing.iter().any(|r| {
+            r.aggregate_type == aggregate_type && r.aggregate_id == aggregate_id && r.path == *path
+        }) {
+            existing.push(StoredReferrer {
+                aggregate_type: aggregate_type.to_string(),
+                aggregate_id: aggregate_id.to_string(),
+                path: path.clone(),
+            });
+            batch.put(target_key, serde_json::to_vec(&existing)?);
+        }
+    }
+
+    batch.put(source_key, serde_json::to_vec(&new_paths)?);
+    Ok(())
+}
+
 fn record_store_op(operation: &'static str, status: &'static str, duration: f64) {
     let labels = [("operation", operation), ("status", status)];
     counter!("eventdbx_store_operations_total", &labels).increment(1);
@@ -4521,6 +4635,8 @@ mod tests {
                     metadata: None,
                     issued_by: None,
                     note: None,
+                    tenant: "default".into(),
+                    reference_targets: Vec::new(),
                 })
                 .unwrap();
 
@@ -4553,6 +4669,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
         assert_eq!(first.version, 1);
@@ -4569,6 +4687,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
         assert_eq!(second.version, 2);
@@ -4797,6 +4917,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
         }
@@ -4822,6 +4944,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
 
@@ -4845,6 +4969,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap_err();
         assert!(matches!(err, crate::error::EventError::AggregateArchived));
@@ -4875,6 +5001,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: Some(note_text.clone()),
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
 
@@ -4897,6 +5025,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: Some(long_note),
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap_err();
 
@@ -4919,6 +5049,8 @@ mod tests {
                 metadata: Some(metadata.clone()),
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
 
@@ -4951,6 +5083,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
 
@@ -5097,6 +5231,8 @@ mod tests {
                     metadata: None,
                     issued_by: None,
                     note: None,
+                    tenant: "default".into(),
+                    reference_targets: Vec::new(),
                 })
                 .unwrap();
             store
@@ -5129,6 +5265,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
         store
@@ -5146,6 +5284,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
         store
@@ -5182,6 +5322,8 @@ mod tests {
                     metadata: None,
                     issued_by: None,
                     note: None,
+                    tenant: "default".into(),
+                    reference_targets: Vec::new(),
                 })
                 .unwrap();
             store

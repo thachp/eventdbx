@@ -1078,7 +1078,10 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     )?;
                 }
 
-                tx.append(staged_event.to_append_event())?;
+                let mut evt = staged_event.to_append_event();
+                evt.tenant = config.active_domain().to_string();
+                evt.reference_targets = Vec::new();
+                tx.append(evt)?;
             }
 
             let records = tx.commit()?;
@@ -1244,6 +1247,8 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
                 metadata: metadata.clone(),
                 issued_by: None,
                 note: note.clone(),
+                tenant: config.active_domain().to_string(),
+                reference_targets: Vec::new(),
             })?;
 
             maybe_auto_snapshot(&store, &schema_manager, &record);
@@ -1436,6 +1441,8 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                         metadata: metadata.clone(),
                         issued_by: None,
                         note: note.clone(),
+                        tenant: config.active_domain().to_string(),
+                        reference_targets: Vec::new(),
                     })?;
                 }
 
@@ -1509,6 +1516,8 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 metadata: metadata.clone(),
                 issued_by: None,
                 note: note.clone(),
+                tenant: config.active_domain().to_string(),
+                reference_targets: Vec::new(),
             })?;
             if let Some(assignments) = assignments.as_ref() {
                 let usage = store.storage_usage_bytes()?;
@@ -2275,6 +2284,8 @@ impl StagedEvent {
             metadata: self.metadata.clone(),
             issued_by: self.issued_by.clone().map(Into::into),
             note: self.note.clone(),
+            tenant: "default".to_string(),
+            reference_targets: Vec::new(),
         }
     }
 }
