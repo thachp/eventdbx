@@ -69,6 +69,9 @@ enum ControlReply {
         next_cursor: Option<String>,
         resolved_json: Option<String>,
     },
+    ListReferrers {
+        referrers_json: String,
+    },
     GetAggregate {
         found: bool,
         aggregate_json: Option<String>,
@@ -144,6 +147,11 @@ enum ControlCommand {
         archived_only: bool,
         resolve: bool,
         resolve_depth: Option<usize>,
+    },
+    ListReferrers {
+        token: String,
+        aggregate_type: String,
+        aggregate_id: String,
     },
     GetAggregate {
         token: String,
@@ -337,6 +345,7 @@ async fn refresh_tenant_context(core_provider: Arc<dyn CoreProvider>, tenant: &s
 fn control_command_name(command: &ControlCommand) -> &'static str {
     match command {
         ControlCommand::ListAggregates { .. } => "list_aggregates",
+        ControlCommand::ListReferrers { .. } => "list_referrers",
         ControlCommand::GetAggregate { .. } => "get_aggregate",
         ControlCommand::ListEvents { .. } => "list_events",
         ControlCommand::AppendEvent { .. } => "append_event",
@@ -954,6 +963,10 @@ where
                                     builder.set_resolved_json("");
                                 }
                             }
+                            ControlReply::ListReferrers { referrers_json } => {
+                                let mut builder = payload.init_list_referrers();
+                                builder.set_referrers_json(&referrers_json);
+                            }
                             ControlReply::GetAggregate {
                                 found,
                                 aggregate_json,
@@ -1220,6 +1233,17 @@ fn parse_control_command(
                 archived_only,
                 resolve,
                 resolve_depth,
+            })
+        }
+        payload::ListReferrers(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?;
+            let aggregate_type = read_control_text(req.get_aggregate_type(), "aggregate_type")?;
+            let aggregate_id = read_control_text(req.get_aggregate_id(), "aggregate_id")?;
+            Ok(ControlCommand::ListReferrers {
+                token,
+                aggregate_type,
+                aggregate_id,
             })
         }
         payload::GetAggregate(req) => {
@@ -1963,6 +1987,24 @@ async fn execute_control_command(
                 next_cursor: next_cursor.map(|cursor| cursor.encode()),
                 resolved_json,
             })
+        }
+        ControlCommand::ListReferrers {
+            token,
+            aggregate_type,
+            aggregate_id,
+        } => {
+            let referrers = spawn_blocking({
+                let core = core.clone();
+                let token = token.clone();
+                let aggregate_type = aggregate_type.clone();
+                let aggregate_id = aggregate_id.clone();
+                move || core.list_referrers(&token, &aggregate_type, &aggregate_id)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("list referrers task failed: {err}")))??;
+            let referrers_json = serde_json::to_string(&referrers)
+                .map_err(|err| EventError::Serialization(err.to_string()))?;
+            Ok(ControlReply::ListReferrers { referrers_json })
         }
         ControlCommand::GetAggregate {
             token,

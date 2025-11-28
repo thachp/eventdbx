@@ -158,6 +158,13 @@ pub struct ResolvedReference {
     pub resolved: Option<Box<ResolvedAggregate>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Referrer {
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedAggregate {
     pub domain: String,

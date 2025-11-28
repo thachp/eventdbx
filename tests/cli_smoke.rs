@@ -2223,6 +2223,44 @@ fn aggregate_list_resolves_references() -> Result<()> {
 }
 
 #[test]
+fn aggregate_referrers_reports_sources() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "address", "--events", "address_created"])?;
+    cli.run(&["schema", "create", "farm", "--events", "farm_created"])?;
+    cli.run(&["schema", "field", "--type", "reference", "farm", "address"])?;
+
+    cli.create_aggregate("address", "addr-1", "address_created")?;
+    cli.run(&[
+        "aggregate",
+        "create",
+        "farm",
+        "farm-1",
+        "--event",
+        "farm_created",
+        "--field",
+        "address=address#addr-1",
+    ])?;
+
+    let refs = cli.run_json(&["aggregate", "referrers", "address", "addr-1", "--json"])?;
+    let arr = refs
+        .as_array()
+        .context("referrers output was not an array")?;
+    assert_eq!(arr.len(), 1, "expected a single referrer: {}", refs);
+    assert_eq!(arr[0]["aggregate_type"], json!("farm"));
+    assert_eq!(arr[0]["aggregate_id"], json!("farm-1"));
+    assert!(
+        arr[0]["path"]
+            .as_str()
+            .map(|path| path.contains("address"))
+            .unwrap_or(false),
+        "expected path to mention address field: {}",
+        refs
+    );
+
+    Ok(())
+}
+
+#[test]
 fn aggregate_commit_no_staged_events() -> Result<()> {
     let cli = CliTest::new()?;
     let output = cli.run(&["aggregate", "commit"])?;

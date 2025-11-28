@@ -26,6 +26,7 @@ struct ControlRequest {
     createSnapshot @19 :CreateSnapshotRequest;
     listSnapshots @20 :ListSnapshotsRequest;
     getSnapshot @21 :GetSnapshotRequest;
+    listReferrers @22 :ListReferrersRequest;
   }
 }
 
@@ -53,6 +54,7 @@ struct ControlResponse {
     createSnapshot @19 :CreateSnapshotResponse;
     listSnapshots @20 :ListSnapshotsResponse;
     getSnapshot @21 :GetSnapshotResponse;
+    listReferrers @22 :ListReferrersResponse;
   }
 }
 
@@ -108,6 +110,16 @@ struct GetAggregateResponse {
   aggregateJson @1 :Text;
   resolvedJson @2 :Text;
   hasResolvedJson @3 :Bool;
+}
+
+struct ListReferrersRequest {
+  token @0 :Text;
+  aggregateType @1 :Text;
+  aggregateId @2 :Text;
+}
+
+struct ListReferrersResponse {
+  referrersJson @0 :Text;
 }
 
 struct ListEventsRequest {

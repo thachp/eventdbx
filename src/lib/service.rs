@@ -10,7 +10,7 @@ use crate::{
     plugin::PublishTarget,
     reference::{
         AggregateReference, ReferenceContext, ReferenceFetchOutcome, ReferenceIntegrity,
-        ReferenceResolutionStatus, ResolvedAggregate, resolve_references,
+        ReferenceResolutionStatus, Referrer, ResolvedAggregate, resolve_references,
     },
     restrict::{self, RestrictMode},
     schema::SchemaManager,
@@ -150,6 +150,17 @@ impl CoreContext {
 
     pub fn page_limit(&self) -> usize {
         self.page_limit
+    }
+
+    fn inbound_referrers_for(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let target = format!("{}#{}#{}", self.tenant_id(), aggregate_type, aggregate_id);
+        self.store
+            .referrers_for_any_tenant(&target)
+            .map_err(Into::into)
     }
 
     pub fn is_hidden_aggregate(&self, aggregate_type: &str) -> bool {
@@ -408,6 +419,53 @@ impl CoreContext {
         )
     }
 
+    pub fn list_referrers(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Vec<Referrer>> {
+        ensure_snake_case("aggregate_type", aggregate_type)?;
+        ensure_aggregate_id(aggregate_id)?;
+
+        if self.is_hidden_aggregate(aggregate_type) {
+            return Err(EventError::AggregateNotFound);
+        }
+
+        let resource = Self::aggregate_resource(aggregate_type, aggregate_id);
+        let claims: JwtClaims =
+            self.tokens()
+                .authorize_action(token, "aggregate.read", Some(resource.as_str()))?;
+
+        if self
+            .store
+            .aggregate_version(aggregate_type, aggregate_id)?
+            .is_none()
+        {
+            return Err(EventError::AggregateNotFound);
+        }
+
+        let target = format!("{}#{}#{}", self.tenant_id(), aggregate_type, aggregate_id);
+        let referrers = self.store.referrers_for(self.tenant_id(), &target)?;
+        Ok(referrers
+            .into_iter()
+            .filter_map(|(agg_type, agg_id, path)| {
+                if self.is_hidden_aggregate(&agg_type) {
+                    return None;
+                }
+                let resource = Self::aggregate_resource(&agg_type, &agg_id);
+                if !claims.allows_resource(Some(resource.as_str())) {
+                    return None;
+                }
+                Some(Referrer {
+                    aggregate_type: agg_type,
+                    aggregate_id: agg_id,
+                    path,
+                })
+            })
+            .collect())
+    }
+
     pub fn verify_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<String> {
         if self.is_hidden_aggregate(aggregate_type) {
             return Err(EventError::AggregateNotFound);
@@ -496,6 +554,21 @@ impl CoreContext {
         let comment = normalize_optional_note(note);
 
         let store = self.store();
+        if archived {
+            let referrers = self.inbound_referrers_for(&aggregate_type, &aggregate_id)?;
+            if !referrers.is_empty() {
+                let formatted = referrers
+                    .iter()
+                    .take(5)
+                    .map(|(tenant, agg, id, path)| format!("{tenant}:{agg}:{id} ({path})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(EventError::SchemaViolation(format!(
+                    "aggregate {}:{} cannot be archived; referenced by {}",
+                    aggregate_type, aggregate_id, formatted
+                )));
+            }
+        }
         let state = store.set_archive(&aggregate_type, &aggregate_id, archived, comment)?;
         Ok(self.sanitize_aggregate(state))
     }

@@ -16,7 +16,7 @@ use eventdbx::replication_noise::{
 use eventdbx::{
     config::Config,
     control_capnp::{control_hello, control_hello_response, control_request, control_response},
-    reference::ResolvedAggregate,
+    reference::{Referrer, ResolvedAggregate},
     schema::AggregateSchema,
     snowflake::SnowflakeId,
     store::{AggregateState, EventRecord, SnapshotRecord},
@@ -398,6 +398,31 @@ impl ServerClient {
                 }
             },
         )
+    }
+
+    pub fn list_referrers(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Vec<Referrer>> {
+        let endpoint = self.endpoint();
+        let token = token.to_string();
+        let aggregate_type = aggregate_type.to_string();
+        let aggregate_id = aggregate_id.to_string();
+
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return tokio::task::block_in_place(move || {
+                list_referrers_blocking(
+                    endpoint.clone(),
+                    token.clone(),
+                    aggregate_type.clone(),
+                    aggregate_id.clone(),
+                )
+            });
+        }
+
+        list_referrers_blocking(endpoint, token, aggregate_type, aggregate_id)
     }
 
     pub fn list_aggregates(
@@ -1257,6 +1282,64 @@ impl ServerClient {
             },
         )
     }
+}
+
+fn list_referrers_blocking(
+    endpoint: ControlEndpoint,
+    token: String,
+    aggregate_type: String,
+    aggregate_id: String,
+) -> Result<Vec<Referrer>> {
+    let request_id = next_request_id();
+    send_control_request_blocking(
+        &endpoint,
+        &token,
+        request_id,
+        |request| {
+            let payload_builder = request.reborrow().init_payload();
+            let mut req = payload_builder.init_list_referrers();
+            req.set_token(&token);
+            req.set_aggregate_type(&aggregate_type);
+            req.set_aggregate_id(&aggregate_id);
+            Ok(())
+        },
+        |response| {
+            use control_response::payload;
+
+            match response
+                .get_payload()
+                .which()
+                .context("failed to decode list_referrers response payload")?
+            {
+                payload::ListReferrers(Ok(list)) => {
+                    let json = read_text(list.get_referrers_json(), "referrers_json")?;
+                    if json.trim().is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        let refs: Vec<Referrer> = serde_json::from_str(&json)
+                            .context("failed to parse list_referrers payload")?;
+                        Ok(refs)
+                    }
+                }
+                payload::ListReferrers(Err(err)) => Err(anyhow!(
+                    "failed to decode list_referrers payload from CLI proxy: {}",
+                    err
+                )),
+                payload::Error(Ok(error)) => {
+                    let code = read_text(error.get_code(), "code")?;
+                    let message = read_text(error.get_message(), "message")?;
+                    Err(anyhow!("server returned {}: {}", code, message))
+                }
+                payload::Error(Err(err)) => Err(anyhow!(
+                    "failed to decode error payload from CLI proxy: {}",
+                    err
+                )),
+                _ => Err(anyhow!(
+                    "unexpected payload returned from CLI proxy response"
+                )),
+            }
+        },
+    )
 }
 
 fn create_aggregate_blocking(

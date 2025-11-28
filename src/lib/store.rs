@@ -4170,6 +4170,39 @@ impl EventStore {
             .collect())
     }
 
+    pub fn referrers_for_any_tenant(
+        &self,
+        target: &str,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let mut matches = Vec::new();
+        let prefix = PREFIX_REF_TARGET.as_bytes();
+        for entry in self.db.prefix_iterator(prefix) {
+            let (key, value) = entry.map_err(|err| EventError::Storage(err.to_string()))?;
+            let segments: Vec<&[u8]> = key.split(|byte| *byte == SEP).collect();
+            if segments.len() != 3 {
+                continue;
+            }
+            let key_target = match str::from_utf8(segments[2]) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if key_target != target {
+                continue;
+            }
+            let tenant = match str::from_utf8(segments[1]) {
+                Ok(value) => value.to_string(),
+                Err(_) => continue,
+            };
+            let referrers: Vec<StoredReferrer> = serde_json::from_slice(&value).map_err(|err| {
+                EventError::Serialization(format!("failed to decode referrer index: {err}"))
+            })?;
+            for r in referrers {
+                matches.push((tenant.clone(), r.aggregate_type, r.aggregate_id, r.path));
+            }
+        }
+        Ok(matches)
+    }
+
     fn load_state_map_from(
         &self,
         index: AggregateIndex,
@@ -5335,5 +5368,51 @@ mod tests {
             .list_snapshots(None, None, None)
             .expect("list all snapshots");
         assert_eq!(snapshots.len(), 2);
+    }
+
+    #[test]
+    fn referrers_for_any_tenant_returns_cross_tenant_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None, 0).unwrap();
+
+        // target aggregate in tenant beta
+        store
+            .append(AppendEvent {
+                aggregate_type: "address".into(),
+                aggregate_id: "addr-1".into(),
+                event_type: "created".into(),
+                payload: serde_json::json!({ "status": "active" }),
+                metadata: None,
+                issued_by: None,
+                note: None,
+                tenant: "beta".into(),
+                reference_targets: Vec::new(),
+            })
+            .unwrap();
+
+        // referrer stored under tenant alpha pointing at the beta address
+        store
+            .append(AppendEvent {
+                aggregate_type: "farm".into(),
+                aggregate_id: "farm-1".into(),
+                event_type: "created".into(),
+                payload: serde_json::json!({ "address": "beta#address#addr-1" }),
+                metadata: None,
+                issued_by: None,
+                note: None,
+                tenant: "alpha".into(),
+                reference_targets: vec![("beta#address#addr-1".into(), "/address".into())],
+            })
+            .unwrap();
+
+        let refs = store
+            .referrers_for_any_tenant("beta#address#addr-1")
+            .unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].0, "alpha");
+        assert_eq!(refs[0].1, "farm");
+        assert_eq!(refs[0].2, "farm-1");
+        assert_eq!(refs[0].3, "/address");
     }
 }

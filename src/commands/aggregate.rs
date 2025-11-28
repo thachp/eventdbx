@@ -21,7 +21,10 @@ use eventdbx::{
     filter,
     merkle::compute_merkle_root,
     plugin::{JobPriority, PluginManager, PublishTarget},
-    reference::{ReferenceFetchOutcome, ReferenceResolutionStatus, resolve_references},
+    reference::{
+        AggregateReference, ReferenceContext, ReferenceFetchOutcome, ReferenceIntegrity,
+        ReferenceResolutionStatus, Referrer, resolve_references,
+    },
     restrict,
     schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
@@ -71,6 +74,8 @@ pub enum AggregateCommands {
     Restore(AggregateArchiveArgs),
     /// Remove an aggregate that has no events
     Remove(AggregateRemoveArgs),
+    /// List aggregates that reference a target aggregate
+    Referrers(AggregateReferrersArgs),
     /// Commit events previously staged with `aggregate apply --stage`
     Commit,
     /// Export aggregate state to CSV or JSON
@@ -271,6 +276,23 @@ pub struct AggregateRemoveArgs {
 
     /// Aggregate identifier
     pub aggregate_id: String,
+}
+
+#[derive(Args)]
+pub struct AggregateReferrersArgs {
+    /// Aggregate type to inspect for inbound references
+    pub aggregate: String,
+
+    /// Aggregate identifier to inspect for inbound references
+    pub aggregate_id: String,
+
+    /// Authorization token used when proxying through a running server
+    #[arg(long, value_name = "TOKEN")]
+    pub token: Option<String>,
+
+    /// Emit results as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -734,9 +756,13 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 config.encryption_key()?,
                 config.snowflake_worker_id,
             )?;
-            let tenant = config.active_domain();
-            let target = format!("{}#{}#{}", tenant, args.aggregate, args.aggregate_id);
-            let referrers = store.referrers_for(tenant, &target)?;
+            let target = format!(
+                "{}#{}#{}",
+                config.active_domain(),
+                args.aggregate,
+                args.aggregate_id
+            );
+            let referrers = store.referrers_for_any_tenant(&target)?;
             if !referrers.is_empty() {
                 bail!(
                     "aggregate {}:{} cannot be removed; referenced by {}",
@@ -744,14 +770,18 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     args.aggregate_id,
                     referrers
                         .iter()
-                        .map(|(agg, id, path)| format!("{}:{} ({})", agg, id, path))
+                        .map(|(tenant, agg, id, path)| format!("{tenant}:{agg}:{id} ({path})"))
                         .take(5)
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
             }
             store.remove_aggregate(&args.aggregate, &args.aggregate_id)?;
-            let _ = store.clear_reference_index(tenant, &args.aggregate, &args.aggregate_id);
+            let _ = store.clear_reference_index(
+                config.active_domain(),
+                &args.aggregate,
+                &args.aggregate_id,
+            );
             let assignments = TenantAssignmentStore::open(config.tenant_meta_path())?;
             let usage = store.storage_usage_bytes()?;
             assignments.update_storage_usage_bytes(config.active_domain(), usage)?;
@@ -759,6 +789,49 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 "aggregate_type={} aggregate_id={} removed",
                 args.aggregate, args.aggregate_id
             );
+        }
+        AggregateCommands::Referrers(args) => {
+            let AggregateReferrersArgs {
+                aggregate,
+                aggregate_id,
+                token,
+                json,
+            } = args;
+            let tenant = config.active_domain().to_string();
+            let target = format!("{}#{}#{}", tenant, aggregate, aggregate_id);
+            let refs = match EventStore::open_read_only(
+                config.event_store_path(),
+                config.encryption_key()?,
+            ) {
+                Ok(store) => store
+                    .referrers_for_any_tenant(&target)?
+                    .into_iter()
+                    .map(|(_, aggregate_type, aggregate_id, path)| Referrer {
+                        aggregate_type,
+                        aggregate_id,
+                        path,
+                    })
+                    .collect(),
+                Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
+                    let token = ensure_proxy_token(&config, token)?;
+                    let client = ServerClient::new(&config)?;
+                    client.list_referrers(&token, &aggregate, &aggregate_id)?
+                }
+                Err(err) => return Err(err.into()),
+            };
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&refs)?);
+            } else if refs.is_empty() {
+                println!("no referrers found");
+            } else {
+                for reference in refs {
+                    println!(
+                        "aggregate_type={} aggregate_id={} path={}",
+                        reference.aggregate_type, reference.aggregate_id, reference.path
+                    );
+                }
+            }
         }
         AggregateCommands::Get(args) => {
             let store =
@@ -981,6 +1054,26 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 config.encryption_key()?,
                 config.snowflake_worker_id,
             )?;
+            let target = format!(
+                "{}#{}#{}",
+                config.active_domain(),
+                args.aggregate,
+                args.aggregate_id
+            );
+            let referrers = store.referrers_for_any_tenant(&target)?;
+            if !referrers.is_empty() {
+                bail!(
+                    "aggregate {}:{} cannot be archived; referenced by {}",
+                    args.aggregate,
+                    args.aggregate_id,
+                    referrers
+                        .iter()
+                        .map(|(tenant, agg, id, path)| format!("{tenant}:{agg}:{id} ({path})"))
+                        .take(5)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
@@ -1143,6 +1236,48 @@ fn maybe_auto_snapshot(store: &EventStore, schemas: &SchemaManager, record: &Eve
     }
 }
 
+fn normalize_references_offline(
+    schemas: &SchemaManager,
+    store: &EventStore,
+    tenant: &str,
+    aggregate: &str,
+    payload: Value,
+) -> Result<(Value, Vec<(String, String)>)> {
+    match schemas.get(aggregate) {
+        Ok(_) => {}
+        Err(EventError::SchemaNotFound) => return Ok((payload, Vec::new())),
+        Err(err) => return Err(err.into()),
+    };
+
+    let context = ReferenceContext {
+        domain: tenant,
+        aggregate_type: aggregate,
+    };
+    let mut resolver = |reference: &AggregateReference,
+                        integrity: ReferenceIntegrity|
+     -> eventdbx::error::Result<ReferenceResolutionStatus> {
+        if !reference.domain.eq_ignore_ascii_case(tenant) {
+            return Ok(ReferenceResolutionStatus::Forbidden);
+        }
+        match store.aggregate_version(&reference.aggregate_type, &reference.aggregate_id) {
+            Ok(Some(_)) => Ok(ReferenceResolutionStatus::Ok),
+            Ok(None) => match integrity {
+                ReferenceIntegrity::Weak => Ok(ReferenceResolutionStatus::NotFound),
+                ReferenceIntegrity::Strong => Ok(ReferenceResolutionStatus::NotFound),
+            },
+            Err(err) => Err(err.into()),
+        }
+    };
+
+    let (normalized_payload, outcomes) =
+        schemas.normalize_references(aggregate, payload, context, &mut resolver)?;
+    let targets = outcomes
+        .iter()
+        .map(|outcome| (outcome.reference.to_canonical(), outcome.path.clone()))
+        .collect();
+    Ok((normalized_payload, targets))
+}
+
 #[cfg(test)]
 fn ensure_schema_for_mode(
     mode: RestrictMode,
@@ -1239,16 +1374,24 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
             }
 
             let plugins = PluginManager::from_config(&config)?;
+            let (normalized_payload, reference_targets) = normalize_references_offline(
+                &schema_manager,
+                &store,
+                config.active_domain(),
+                &aggregate,
+                payload.clone(),
+            )?;
+            ensure_payload_size(&normalized_payload)?;
             let record = store.append(AppendEvent {
                 aggregate_type: aggregate.clone(),
                 aggregate_id: aggregate_id.clone(),
                 event_type: event.clone(),
-                payload: payload.clone(),
+                payload: normalized_payload.clone(),
                 metadata: metadata.clone(),
                 issued_by: None,
                 note: note.clone(),
                 tenant: config.active_domain().to_string(),
-                reference_targets: Vec::new(),
+                reference_targets,
             })?;
 
             maybe_auto_snapshot(&store, &schema_manager, &record);
@@ -1431,18 +1574,26 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                     bail!("aggregate {}::{} does not exist", aggregate, aggregate_id);
                 }
                 ensure_first_event_rule(is_new, &event)?;
+                let (normalized_payload, reference_targets) = normalize_references_offline(
+                    &schema_manager,
+                    &store,
+                    config.active_domain(),
+                    &aggregate,
+                    effective_payload.clone(),
+                )?;
+                ensure_payload_size(&normalized_payload)?;
                 {
                     let mut tx = store.transaction()?;
                     tx.append(AppendEvent {
                         aggregate_type: aggregate.clone(),
                         aggregate_id: aggregate_id.clone(),
                         event_type: event.clone(),
-                        payload: effective_payload.clone(),
+                        payload: normalized_payload.clone(),
                         metadata: metadata.clone(),
                         issued_by: None,
                         note: note.clone(),
                         tenant: config.active_domain().to_string(),
-                        reference_targets: Vec::new(),
+                        reference_targets: reference_targets.clone(),
                     })?;
                 }
 
@@ -1450,7 +1601,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                     aggregate: aggregate.clone(),
                     aggregate_id: aggregate_id.clone(),
                     event: event.clone(),
-                    payload: effective_payload,
+                    payload: normalized_payload,
                     metadata: metadata.clone(),
                     issued_by: None,
                     note: note.clone(),
@@ -1508,16 +1659,24 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 bail!("aggregate {}::{} does not exist", aggregate, aggregate_id);
             }
             ensure_first_event_rule(is_new, &event)?;
+            let (normalized_payload, reference_targets) = normalize_references_offline(
+                &schema_manager,
+                &store,
+                config.active_domain(),
+                &aggregate,
+                effective_payload.clone(),
+            )?;
+            ensure_payload_size(&normalized_payload)?;
             let record = store.append(AppendEvent {
                 aggregate_type: aggregate.clone(),
                 aggregate_id: aggregate_id.clone(),
                 event_type: event.clone(),
-                payload: effective_payload.clone(),
+                payload: normalized_payload.clone(),
                 metadata: metadata.clone(),
                 issued_by: None,
                 note: note.clone(),
                 tenant: config.active_domain().to_string(),
-                reference_targets: Vec::new(),
+                reference_targets,
             })?;
             if let Some(assignments) = assignments.as_ref() {
                 let usage = store.storage_usage_bytes()?;
