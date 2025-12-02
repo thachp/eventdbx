@@ -25,7 +25,7 @@ use crate::{
     token::{JwtClaims, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
-        ensure_payload_size, ensure_snake_case,
+        ensure_payload_size, ensure_snake_case, normalize_event_type,
     },
 };
 use parking_lot::Mutex;
@@ -542,7 +542,7 @@ impl CoreContext {
         } = input;
 
         ensure_snake_case("aggregate_type", &aggregate_type)?;
-        ensure_snake_case("event_type", &event_type)?;
+        let event_type = normalize_event_type(&event_type)?;
         ensure_aggregate_id(&aggregate_id)?;
         if let Some(ref metadata) = metadata {
             ensure_metadata_extensions(metadata)?;
@@ -779,7 +779,7 @@ impl CoreContext {
         };
 
         ensure_snake_case("aggregate_type", &aggregate_type)?;
-        ensure_snake_case("event_type", &event_type)?;
+        let event_type = normalize_event_type(&event_type)?;
         ensure_aggregate_id(&aggregate_id)?;
         if let Some(ref metadata) = metadata {
             ensure_metadata_extensions(metadata)?;

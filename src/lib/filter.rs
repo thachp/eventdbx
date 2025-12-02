@@ -62,9 +62,9 @@ impl FilterExpr {
     /// beyond the metadata stored alongside the aggregate (type/id/version/timestamps/etc).
     pub fn requires_aggregate_state(&self) -> bool {
         match self {
-            FilterExpr::And(children) | FilterExpr::Or(children) => {
-                children.iter().any(|child| child.requires_aggregate_state())
-            }
+            FilterExpr::And(children) | FilterExpr::Or(children) => children
+                .iter()
+                .any(|child| child.requires_aggregate_state()),
             FilterExpr::Not(expr) => expr.requires_aggregate_state(),
             FilterExpr::Comparison { field, .. } => !is_aggregate_meta_field(field),
         }

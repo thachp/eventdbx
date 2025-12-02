@@ -46,7 +46,7 @@ curl -X POST \
 
 Event writes enforce a few key rules:
 
-- `aggregate_type` and `event_type` must be lowercase `snake_case`.
+- `aggregate_type` must be lowercase `snake_case`; `event_type` accepts lowercase `snake_case` or dot-delimited segments (normalized to `snake_case`).
 - Declare a schema for the aggregate before the first write when running with validation enabled.
 - `aggregate_id` accepts letters, numbers, underscores, and hyphens (max 128 characters) with no surrounding whitespace.
 - Payload JSON is limited to 256 KiB, and optional `metadata` objects (keys prefixed with `@`) are capped at 64 KiB so plugins can react without overwhelming the bus.

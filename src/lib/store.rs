@@ -2842,13 +2842,7 @@ impl EventStore {
         F: FnMut(AggregateState) -> Option<AggregateState>,
     {
         self.aggregates_paginated_with_transform_internal(
-            skip,
-            take,
-            sort,
-            scope,
-            cursor,
-            true,
-            transform,
+            skip, take, sort, scope, cursor, true, transform,
         )
     }
 
@@ -2865,13 +2859,7 @@ impl EventStore {
         F: FnMut(AggregateState) -> Option<AggregateState>,
     {
         self.aggregates_paginated_with_transform_internal(
-            skip,
-            take,
-            sort,
-            scope,
-            cursor,
-            false,
-            transform,
+            skip, take, sort, scope, cursor, false, transform,
         )
     }
 
@@ -2989,16 +2977,15 @@ impl EventStore {
                 include_state,
                 transform,
             ),
-            AggregateQueryScope::IncludeArchived => self
-                .collect_timestamp_indexes_merged(
-                    kind,
-                    skip,
-                    take,
-                    descending,
-                    cursor,
-                    include_state,
-                    transform,
-                ),
+            AggregateQueryScope::IncludeArchived => self.collect_timestamp_indexes_merged(
+                kind,
+                skip,
+                take,
+                descending,
+                cursor,
+                include_state,
+                transform,
+            ),
         }
     }
 
@@ -3252,7 +3239,8 @@ impl EventStore {
             updated_at,
             ..
         } = meta;
-        let state = self.maybe_load_state_map(include_state, index, &aggregate_type, &aggregate_id)?;
+        let state =
+            self.maybe_load_state_map(include_state, index, &aggregate_type, &aggregate_id)?;
         Ok(Some(AggregateState {
             aggregate_type,
             aggregate_id,
@@ -3328,7 +3316,12 @@ impl EventStore {
                 }
                 continue;
             }
-            let state = match self.maybe_load_state_map(include_state, index, &aggregate_type, &aggregate_id) {
+            let state = match self.maybe_load_state_map(
+                include_state,
+                index,
+                &aggregate_type,
+                &aggregate_id,
+            ) {
                 Ok(state) => state,
                 Err(_) => {
                     status = "err";
@@ -3448,15 +3441,13 @@ impl EventStore {
         }
 
         match scope {
-            AggregateQueryScope::ActiveOnly => {
-                self.collect_index_page(
-                    AggregateIndex::Active,
-                    cursor,
-                    take,
-                    include_state,
-                    &mut transform,
-                )
-            }
+            AggregateQueryScope::ActiveOnly => self.collect_index_page(
+                AggregateIndex::Active,
+                cursor,
+                take,
+                include_state,
+                &mut transform,
+            ),
             AggregateQueryScope::ArchivedOnly => {
                 if let Some(cursor) = cursor {
                     if cursor.index() != CursorIndex::Archived {
@@ -3597,7 +3588,12 @@ impl EventStore {
                 updated_at,
                 ..
             } = meta;
-            let state = match self.maybe_load_state_map(include_state, index, &aggregate_type, &aggregate_id) {
+            let state = match self.maybe_load_state_map(
+                include_state,
+                index,
+                &aggregate_type,
+                &aggregate_id,
+            ) {
                 Ok(state) => state,
                 Err(_) => {
                     status = "err";
@@ -3668,8 +3664,12 @@ impl EventStore {
                     created_at,
                     updated_at,
                 } = summary;
-                let state =
-                    self.maybe_load_state_map(include_state, index, &aggregate_type, &aggregate_id)?;
+                let state = self.maybe_load_state_map(
+                    include_state,
+                    index,
+                    &aggregate_type,
+                    &aggregate_id,
+                )?;
                 Ok(AggregateState {
                     aggregate_type,
                     aggregate_id,

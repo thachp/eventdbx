@@ -35,7 +35,7 @@ use eventdbx::{
     token::{IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
-        ensure_payload_size, ensure_snake_case,
+        ensure_payload_size, ensure_snake_case, normalize_event_type,
     },
 };
 
@@ -1193,7 +1193,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
 
             for staged_event in &staged_events {
                 ensure_snake_case("aggregate_type", &staged_event.aggregate)?;
-                ensure_snake_case("event_type", &staged_event.event)?;
+                let event = normalize_event_type(&staged_event.event)?;
                 ensure_aggregate_id(&staged_event.aggregate_id)?;
                 ensure_payload_size(&staged_event.payload)?;
                 if let Some(ref metadata) = staged_event.metadata {
@@ -1206,7 +1206,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     Some(version) if version > 0 => false,
                     Some(_) | None => true,
                 };
-                ensure_first_event_rule(is_new, &staged_event.event)?;
+                ensure_first_event_rule(is_new, &event)?;
 
                 let schema_present = match schema_manager.get(&staged_event.aggregate) {
                     Ok(_) => true,
@@ -1223,12 +1223,13 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 if schema_present {
                     schema_manager.validate_event(
                         &staged_event.aggregate,
-                        &staged_event.event,
+                        &event,
                         &staged_event.payload,
                     )?;
                 }
 
                 let mut evt = staged_event.to_append_event();
+                evt.event_type = event;
                 evt.tenant = config.active_domain().to_string();
                 evt.reference_targets = Vec::new();
                 tx.append(evt)?;
@@ -1482,7 +1483,7 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
     }
 
     ensure_snake_case("aggregate_type", &aggregate)?;
-    ensure_snake_case("event_type", &event)?;
+    let event = normalize_event_type(&event)?;
     ensure_aggregate_id(&aggregate_id)?;
     ensure_payload_size(&payload)?;
 
@@ -1668,7 +1669,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
     }
 
     ensure_snake_case("aggregate_type", &aggregate)?;
-    ensure_snake_case("event_type", &event)?;
+    let event = normalize_event_type(&event)?;
     ensure_aggregate_id(&aggregate_id)?;
 
     let restrict_mode = config.restrict;

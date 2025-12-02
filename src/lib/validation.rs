@@ -13,6 +13,9 @@ pub const MAX_EVENT_METADATA_BYTES: usize = 64 * 1024;
 
 static SNAKE_CASE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z][a-z0-9_]*$").expect("valid snake_case regex"));
+static EVENT_TYPE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$").expect("valid event_type regex")
+});
 static AGGREGATE_ID_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,127})?$").expect("valid aggregate_id regex")
 });
@@ -26,6 +29,16 @@ pub fn ensure_snake_case(label: &str, value: &str) -> Result<()> {
         Err(EventError::InvalidSchema(format!(
             "{label} must be lowercase snake_case"
         )))
+    }
+}
+
+pub fn normalize_event_type(value: &str) -> Result<String> {
+    if EVENT_TYPE_RE.is_match(value) {
+        Ok(value.replace('.', "_"))
+    } else {
+        Err(EventError::InvalidSchema(
+            "event_type must be lowercase snake_case; dots may be used as separators".into(),
+        ))
     }
 }
 
@@ -129,6 +142,24 @@ mod tests {
     fn snake_case_validation_rejects_invalid_names() {
         let err = ensure_snake_case("event_type", "OrderCreated").unwrap_err();
         assert!(matches!(err, EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn event_type_normalization_accepts_dots() {
+        let normalized = normalize_event_type("person.created").expect("dot segments normalize");
+        assert_eq!(normalized, "person_created");
+    }
+
+    #[test]
+    fn event_type_normalization_rejects_uppercase() {
+        let err = normalize_event_type("Person.Created").unwrap_err();
+        assert!(matches!(err, EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn event_type_normalization_passes_through_snake_case() {
+        let normalized = normalize_event_type("order_created").expect("snake_case passes through");
+        assert_eq!(normalized, "order_created");
     }
 
     #[test]
