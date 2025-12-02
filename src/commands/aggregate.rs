@@ -567,6 +567,13 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 }
             }
 
+            let needs_state = args.json
+                || args.resolve
+                || filter_expr
+                    .as_ref()
+                    .map(|expr| expr.requires_aggregate_state())
+                    .unwrap_or(false);
+
             let sort_directives = if let Some(spec) = args.sort.as_deref() {
                 Some(
                     AggregateSort::parse_directives(spec)
@@ -614,21 +621,39 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     if let Some(cursor) = cursor_token.as_ref() {
                         store::ensure_timestamp_cursor(cursor, kind, descending, scope)?;
                     }
-                    let aggregates = store.aggregates_paginated_with_transform(
-                        0,
-                        Some(take),
-                        Some(keys),
-                        scope,
-                        cursor_token.as_ref(),
-                        |aggregate| {
-                            if let Some(expr) = filter_expr.as_ref() {
-                                if !expr.matches_aggregate(&aggregate) {
-                                    return None;
+                    let aggregates = if needs_state {
+                        store.aggregates_paginated_with_transform(
+                            0,
+                            Some(take),
+                            Some(keys),
+                            scope,
+                            cursor_token.as_ref(),
+                            |aggregate| {
+                                if let Some(expr) = filter_expr.as_ref() {
+                                    if !expr.matches_aggregate(&aggregate) {
+                                        return None;
+                                    }
                                 }
-                            }
-                            Some(aggregate)
-                        },
-                    );
+                                Some(aggregate)
+                            },
+                        )
+                    } else {
+                        store.aggregates_paginated_without_state(
+                            0,
+                            Some(take),
+                            Some(keys),
+                            scope,
+                            cursor_token.as_ref(),
+                            |aggregate| {
+                                if let Some(expr) = filter_expr.as_ref() {
+                                    if !expr.matches_aggregate(&aggregate) {
+                                        return None;
+                                    }
+                                }
+                                Some(aggregate)
+                            },
+                        )
+                    };
                     if args.json {
                         print_json(aggregates)?;
                     } else {
@@ -661,21 +686,39 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     return Ok(());
                 }
 
-                let aggregates = store.aggregates_paginated_with_transform(
-                    0,
-                    Some(take),
-                    Some(keys),
-                    scope,
-                    None,
-                    |aggregate| {
-                        if let Some(expr) = filter_expr.as_ref() {
-                            if !expr.matches_aggregate(&aggregate) {
-                                return None;
+                let aggregates = if needs_state {
+                    store.aggregates_paginated_with_transform(
+                        0,
+                        Some(take),
+                        Some(keys),
+                        scope,
+                        None,
+                        |aggregate| {
+                            if let Some(expr) = filter_expr.as_ref() {
+                                if !expr.matches_aggregate(&aggregate) {
+                                    return None;
+                                }
                             }
-                        }
-                        Some(aggregate)
-                    },
-                );
+                            Some(aggregate)
+                        },
+                    )
+                } else {
+                    store.aggregates_paginated_without_state(
+                        0,
+                        Some(take),
+                        Some(keys),
+                        scope,
+                        None,
+                        |aggregate| {
+                            if let Some(expr) = filter_expr.as_ref() {
+                                if !expr.matches_aggregate(&aggregate) {
+                                    return None;
+                                }
+                            }
+                            Some(aggregate)
+                        },
+                    )
+                };
                 if args.json {
                     print_json(aggregates)?;
                 } else {
@@ -707,19 +750,35 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 return Ok(());
             }
 
-            let (aggregates, _next_cursor) = store.aggregates_page_with_transform(
-                cursor_token.as_ref(),
-                take,
-                scope,
-                |aggregate| {
-                    if let Some(expr) = filter_expr.as_ref() {
-                        if !expr.matches_aggregate(&aggregate) {
-                            return None;
+            let (aggregates, _next_cursor) = if needs_state {
+                store.aggregates_page_with_transform(
+                    cursor_token.as_ref(),
+                    take,
+                    scope,
+                    |aggregate| {
+                        if let Some(expr) = filter_expr.as_ref() {
+                            if !expr.matches_aggregate(&aggregate) {
+                                return None;
+                            }
                         }
-                    }
-                    Some(aggregate)
-                },
-            )?;
+                        Some(aggregate)
+                    },
+                )?
+            } else {
+                store.aggregates_page_without_state(
+                    cursor_token.as_ref(),
+                    take,
+                    scope,
+                    |aggregate| {
+                        if let Some(expr) = filter_expr.as_ref() {
+                            if !expr.matches_aggregate(&aggregate) {
+                                return None;
+                            }
+                        }
+                        Some(aggregate)
+                    },
+                )?
+            };
 
             if args.json {
                 print_json(aggregates)?;

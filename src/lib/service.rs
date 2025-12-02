@@ -158,9 +158,17 @@ impl CoreContext {
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Vec<(String, String, String, String)>> {
+        // Reference targets are domain-scoped during normalization, so we only need
+        // to inspect the current tenant instead of scanning every tenant's index.
         let target = format!("{}#{}#{}", self.tenant_id(), aggregate_type, aggregate_id);
+        let tenant = self.tenant_id().to_string();
         self.store
-            .referrers_for_any_tenant(&target)
+            .referrers_for(&tenant, &target)
+            .map(|refs| {
+                refs.into_iter()
+                    .map(|(agg_type, agg_id, path)| (tenant.clone(), agg_type, agg_id, path))
+                    .collect()
+            })
             .map_err(Into::into)
     }
 

@@ -2818,12 +2818,13 @@ impl EventStore {
     }
 
     pub fn aggregates_paginated(&self, skip: usize, take: Option<usize>) -> Vec<AggregateState> {
-        self.aggregates_paginated_with_transform(
+        self.aggregates_paginated_with_transform_internal(
             skip,
             take,
             None,
             AggregateQueryScope::ActiveOnly,
             None,
+            true,
             |aggregate| Some(aggregate),
         )
     }
@@ -2835,6 +2836,53 @@ impl EventStore {
         sort: Option<&[AggregateSort]>,
         scope: AggregateQueryScope,
         cursor: Option<&AggregateCursor>,
+        transform: F,
+    ) -> Vec<AggregateState>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
+        self.aggregates_paginated_with_transform_internal(
+            skip,
+            take,
+            sort,
+            scope,
+            cursor,
+            true,
+            transform,
+        )
+    }
+
+    pub fn aggregates_paginated_without_state<F>(
+        &self,
+        skip: usize,
+        take: Option<usize>,
+        sort: Option<&[AggregateSort]>,
+        scope: AggregateQueryScope,
+        cursor: Option<&AggregateCursor>,
+        transform: F,
+    ) -> Vec<AggregateState>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
+        self.aggregates_paginated_with_transform_internal(
+            skip,
+            take,
+            sort,
+            scope,
+            cursor,
+            false,
+            transform,
+        )
+    }
+
+    fn aggregates_paginated_with_transform_internal<F>(
+        &self,
+        skip: usize,
+        take: Option<usize>,
+        sort: Option<&[AggregateSort]>,
+        scope: AggregateQueryScope,
+        cursor: Option<&AggregateCursor>,
+        include_state: bool,
         mut transform: F,
     ) -> Vec<AggregateState>
     where
@@ -2849,6 +2897,7 @@ impl EventStore {
                     take,
                     descending,
                     cursor,
+                    include_state,
                     &mut transform,
                 );
             }
@@ -2859,6 +2908,7 @@ impl EventStore {
                 skip,
                 take,
                 sort,
+                include_state,
                 &mut transform,
             ),
             AggregateQueryScope::ArchivedOnly => self.collect_index_paginated(
@@ -2866,6 +2916,7 @@ impl EventStore {
                 skip,
                 take,
                 sort,
+                include_state,
                 &mut transform,
             ),
             AggregateQueryScope::IncludeArchived => {
@@ -2874,6 +2925,7 @@ impl EventStore {
                     0,
                     None,
                     None,
+                    include_state,
                     &mut transform,
                 );
                 let mut archived_items = self.collect_index_paginated(
@@ -2881,6 +2933,7 @@ impl EventStore {
                     0,
                     None,
                     None,
+                    include_state,
                     &mut transform,
                 );
                 items.append(&mut archived_items);
@@ -2909,6 +2962,7 @@ impl EventStore {
         take: Option<usize>,
         descending: bool,
         cursor: Option<&AggregateCursor>,
+        include_state: bool,
         transform: &mut F,
     ) -> Vec<AggregateState>
     where
@@ -2922,6 +2976,7 @@ impl EventStore {
                 take,
                 descending,
                 cursor,
+                include_state,
                 transform,
             ),
             AggregateQueryScope::ArchivedOnly => self.collect_timestamp_index_paginated(
@@ -2931,10 +2986,19 @@ impl EventStore {
                 take,
                 descending,
                 cursor,
+                include_state,
                 transform,
             ),
             AggregateQueryScope::IncludeArchived => self
-                .collect_timestamp_indexes_merged(kind, skip, take, descending, cursor, transform),
+                .collect_timestamp_indexes_merged(
+                    kind,
+                    skip,
+                    take,
+                    descending,
+                    cursor,
+                    include_state,
+                    transform,
+                ),
         }
     }
 
@@ -2946,6 +3010,7 @@ impl EventStore {
         take: Option<usize>,
         descending: bool,
         cursor: Option<&AggregateCursor>,
+        include_state: bool,
         transform: &mut F,
     ) -> Vec<AggregateState>
     where
@@ -2975,6 +3040,7 @@ impl EventStore {
                 index,
                 &entry.aggregate_type,
                 &entry.aggregate_id,
+                include_state,
             ) {
                 Ok(Some(aggregate)) => aggregate,
                 Ok(None) => continue,
@@ -3034,6 +3100,7 @@ impl EventStore {
         take: Option<usize>,
         descending: bool,
         cursor: Option<&AggregateCursor>,
+        include_state: bool,
         transform: &mut F,
     ) -> Vec<AggregateState>
     where
@@ -3084,6 +3151,7 @@ impl EventStore {
                 source_index,
                 &entry.aggregate_type,
                 &entry.aggregate_id,
+                include_state,
             ) {
                 Ok(Some(aggregate)) => aggregate,
                 Ok(None) => {
@@ -3168,6 +3236,7 @@ impl EventStore {
         index: AggregateIndex,
         aggregate_type: &str,
         aggregate_id: &str,
+        include_state: bool,
     ) -> Result<Option<AggregateState>> {
         let meta = match self.load_meta_from(index, aggregate_type, aggregate_id)? {
             Some(meta) => meta,
@@ -3183,7 +3252,7 @@ impl EventStore {
             updated_at,
             ..
         } = meta;
-        let state = self.load_state_map_from(index, &aggregate_type, &aggregate_id)?;
+        let state = self.maybe_load_state_map(include_state, index, &aggregate_type, &aggregate_id)?;
         Ok(Some(AggregateState {
             aggregate_type,
             aggregate_id,
@@ -3202,6 +3271,7 @@ impl EventStore {
         skip: usize,
         take: Option<usize>,
         sort: Option<&[AggregateSort]>,
+        include_state: bool,
         transform: &mut F,
     ) -> Vec<AggregateState>
     where
@@ -3258,7 +3328,7 @@ impl EventStore {
                 }
                 continue;
             }
-            let state = match self.load_state_map_from(index, &aggregate_type, &aggregate_id) {
+            let state = match self.maybe_load_state_map(include_state, index, &aggregate_type, &aggregate_id) {
                 Ok(state) => state,
                 Err(_) => {
                     status = "err";
@@ -3302,7 +3372,8 @@ impl EventStore {
 
         if should_sort {
             let summaries = pending.unwrap_or_default();
-            let (mut aggregates, had_errors) = self.load_states_parallel(index, summaries);
+            let (mut aggregates, had_errors) =
+                self.load_states_parallel(index, summaries, include_state);
             if had_errors {
                 status = "err";
             }
@@ -3340,6 +3411,33 @@ impl EventStore {
         cursor: Option<&AggregateCursor>,
         take: usize,
         scope: AggregateQueryScope,
+        transform: F,
+    ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
+        self.aggregates_page_with_transform_internal(cursor, take, scope, true, transform)
+    }
+
+    pub fn aggregates_page_without_state<F>(
+        &self,
+        cursor: Option<&AggregateCursor>,
+        take: usize,
+        scope: AggregateQueryScope,
+        transform: F,
+    ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
+        self.aggregates_page_with_transform_internal(cursor, take, scope, false, transform)
+    }
+
+    fn aggregates_page_with_transform_internal<F>(
+        &self,
+        cursor: Option<&AggregateCursor>,
+        take: usize,
+        scope: AggregateQueryScope,
+        include_state: bool,
         mut transform: F,
     ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)>
     where
@@ -3351,7 +3449,13 @@ impl EventStore {
 
         match scope {
             AggregateQueryScope::ActiveOnly => {
-                self.collect_index_page(AggregateIndex::Active, cursor, take, &mut transform)
+                self.collect_index_page(
+                    AggregateIndex::Active,
+                    cursor,
+                    take,
+                    include_state,
+                    &mut transform,
+                )
             }
             AggregateQueryScope::ArchivedOnly => {
                 if let Some(cursor) = cursor {
@@ -3361,7 +3465,13 @@ impl EventStore {
                         ));
                     }
                 }
-                self.collect_index_page(AggregateIndex::Archived, cursor, take, &mut transform)
+                self.collect_index_page(
+                    AggregateIndex::Archived,
+                    cursor,
+                    take,
+                    include_state,
+                    &mut transform,
+                )
             }
             AggregateQueryScope::IncludeArchived => {
                 let mut remaining = take;
@@ -3373,6 +3483,7 @@ impl EventStore {
                             AggregateIndex::Archived,
                             Some(cursor),
                             remaining,
+                            include_state,
                             &mut transform,
                         )?;
                         items.append(&mut archived);
@@ -3384,6 +3495,7 @@ impl EventStore {
                     AggregateIndex::Active,
                     cursor,
                     remaining,
+                    include_state,
                     &mut transform,
                 )?;
                 remaining = remaining.saturating_sub(active_items.len());
@@ -3398,6 +3510,7 @@ impl EventStore {
                     AggregateIndex::Archived,
                     None,
                     remaining,
+                    include_state,
                     &mut transform,
                 )?;
                 items.append(&mut archived_items);
@@ -3420,6 +3533,7 @@ impl EventStore {
         index: AggregateIndex,
         cursor: Option<&AggregateCursor>,
         take: usize,
+        include_state: bool,
         transform: &mut F,
     ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)>
     where
@@ -3483,7 +3597,7 @@ impl EventStore {
                 updated_at,
                 ..
             } = meta;
-            let state = match self.load_state_map_from(index, &aggregate_type, &aggregate_id) {
+            let state = match self.maybe_load_state_map(include_state, index, &aggregate_type, &aggregate_id) {
                 Ok(state) => state,
                 Err(_) => {
                     status = "err";
@@ -3538,6 +3652,7 @@ impl EventStore {
         &self,
         index: AggregateIndex,
         summaries: Vec<AggregateSummary>,
+        include_state: bool,
     ) -> (Vec<AggregateState>, bool) {
         use rayon::prelude::*;
 
@@ -3553,7 +3668,8 @@ impl EventStore {
                     created_at,
                     updated_at,
                 } = summary;
-                let state = self.load_state_map_from(index, &aggregate_type, &aggregate_id)?;
+                let state =
+                    self.maybe_load_state_map(include_state, index, &aggregate_type, &aggregate_id)?;
                 Ok(AggregateState {
                     aggregate_type,
                     aggregate_id,
@@ -4229,6 +4345,20 @@ impl EventStore {
             duration,
         );
         result
+    }
+
+    fn maybe_load_state_map(
+        &self,
+        include_state: bool,
+        index: AggregateIndex,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<BTreeMap<String, String>> {
+        if include_state {
+            self.load_state_map_from(index, aggregate_type, aggregate_id)
+        } else {
+            Ok(BTreeMap::new())
+        }
     }
 
     fn load_state_map(
