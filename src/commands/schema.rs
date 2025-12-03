@@ -879,20 +879,19 @@ fn schema_field(config_path: Option<PathBuf>, args: SchemaFieldArgs) -> Result<(
         actions.push("rules=reference".to_string());
     }
 
+    let rules_from_json = args.rules.is_some();
+    let rules_are_reference = update.column_rules.as_ref().map_or(false, |(_, rules)| {
+        matches!(rules, Some(r) if r.format == Some(FieldFormat::Reference))
+    });
     if reference_flags_present
         && !reference_alias
         && args.format != Some(FieldFormatArg::Reference)
-        && update.column_rules.as_ref().map_or(
-            true,
-            |(_, rules)| matches!(rules, Some(r) if r.format == Some(FieldFormat::Reference)),
-        )
+        && !rules_are_reference
+        && !rules_from_json
     {
-        // if rules were directly set via JSON, allow; otherwise enforce format
-        if update.column_rules.is_none() {
-            return Err(anyhow!(
-                "reference flags require a reference field; set --type reference or --format reference"
-            ));
-        }
+        return Err(anyhow!(
+            "reference flags require a reference field; set --type reference or --format reference"
+        ));
     }
 
     if args.lock {
