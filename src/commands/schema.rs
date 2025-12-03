@@ -829,7 +829,7 @@ fn schema_field(config_path: Option<PathBuf>, args: SchemaFieldArgs) -> Result<(
         actions.push("type=cleared".to_string());
     }
 
-    let mut reference_flags_present = args.reference_integrity.is_some()
+    let reference_flags_present = args.reference_integrity.is_some()
         || args.reference_tenant.is_some()
         || args.reference_aggregate.is_some()
         || args.reference_cascade.is_some();
@@ -859,10 +859,7 @@ fn schema_field(config_path: Option<PathBuf>, args: SchemaFieldArgs) -> Result<(
             || args.format == Some(FieldFormatArg::Reference)
             || rules.format == Some(FieldFormat::Reference);
         args.apply_rule_overrides(&mut rules, is_reference_field)?;
-        reference_flags_present |= args.reference_integrity.is_some()
-            || args.reference_tenant.is_some()
-            || args.reference_aggregate.is_some()
-            || args.reference_cascade.is_some();
+        // flag presence is already captured; no need to recompute here
         update.column_rules = Some((field.to_string(), Some(rules)));
         actions.push("rules=updated".to_string());
     }
