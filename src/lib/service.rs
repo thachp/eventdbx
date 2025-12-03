@@ -232,11 +232,6 @@ impl CoreContext {
         aggregate
     }
 
-    #[allow(dead_code)]
-    fn storage_usage_bytes(&self) -> Result<u64> {
-        self.maybe_refresh_usage(false)
-    }
-
     fn enforce_storage_quota(&self) -> Result<()> {
         if let Some(limit_mb) = self.storage_quota_mb {
             let usage = self.maybe_refresh_usage(false)?;

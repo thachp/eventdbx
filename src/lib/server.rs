@@ -1,14 +1,12 @@
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, OnceLock, RwLock},
+    sync::{Arc, RwLock},
 };
 
-use axum::{
-    Json, Router, http::HeaderMap, middleware::from_fn, response::IntoResponse, routing::get,
-};
-use serde::{Serialize, de::DeserializeOwned};
-use tokio::{net::TcpListener, sync::RwLock as AsyncRwLock};
+use axum::{Json, Router, middleware::from_fn, response::IntoResponse, routing::get};
+use serde::Serialize;
+use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -20,67 +18,6 @@ use super::{
     tenant::{CoreProvider, TenantRegistry},
     token::TokenManager,
 };
-
-static CLI_PROXY_ADDR: OnceLock<Arc<AsyncRwLock<String>>> = OnceLock::new();
-
-#[allow(dead_code)]
-pub(crate) async fn run_cli_command(args: Vec<String>) -> Result<cli_proxy::CliCommandResult> {
-    let addr_lock = CLI_PROXY_ADDR
-        .get()
-        .ok_or_else(|| EventError::Config("CLI proxy address not configured".to_string()))?;
-    let bind_addr = {
-        let guard = addr_lock.read().await;
-        guard.clone()
-    };
-    let connect_addr = normalize_cli_connect_addr(&bind_addr);
-
-    let result = cli_proxy::invoke(&args, &connect_addr)
-        .await
-        .map_err(|err| EventError::Storage(err.to_string()))?;
-    if result.exit_code != 0 {
-        let message = if !result.stderr.trim().is_empty() {
-            result.stderr.trim().to_string()
-        } else if !result.stdout.trim().is_empty() {
-            result.stdout.trim().to_string()
-        } else {
-            format!("exit code {}", result.exit_code)
-        };
-        let lowered = message.to_lowercase();
-        if lowered.contains("aggregate not found") {
-            return Err(EventError::AggregateNotFound);
-        }
-        if lowered.contains("schema not found") {
-            return Err(EventError::SchemaNotFound);
-        }
-        return Err(EventError::Storage(format!(
-            "CLI command {:?} failed: {message}",
-            args
-        )));
-    }
-    Ok(result)
-}
-
-#[allow(dead_code)]
-fn normalize_cli_connect_addr(bind_addr: &str) -> String {
-    if let Ok(addr) = bind_addr.parse::<SocketAddr>() {
-        match addr.ip() {
-            IpAddr::V4(ip) if ip.is_unspecified() => format!("127.0.0.1:{}", addr.port()),
-            IpAddr::V6(ip) if ip.is_unspecified() => format!("[::1]:{}", addr.port()),
-            _ => addr.to_string(),
-        }
-    } else {
-        bind_addr.to_string()
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) async fn run_cli_json<T>(args: Vec<String>) -> Result<T>
-where
-    T: DeserializeOwned,
-{
-    let result = run_cli_command(args).await?;
-    serde_json::from_str(&result.stdout).map_err(|err| EventError::Serialization(err.to_string()))
-}
 
 pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     observability::init()
@@ -113,13 +50,6 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         })?;
 
     let cli_bind_addr = config_snapshot.socket.bind_addr.clone();
-    let addr_store =
-        Arc::clone(CLI_PROXY_ADDR.get_or_init(|| Arc::new(AsyncRwLock::new(String::new()))));
-    {
-        let mut guard = addr_store.write().await;
-        *guard = cli_bind_addr.clone();
-    }
-
     let cli_proxy_handle = cli_proxy::start(
         &cli_bind_addr,
         Arc::clone(&config_path),
@@ -164,17 +94,6 @@ async fn health() -> impl IntoResponse {
 #[derive(Serialize)]
 struct HealthResponse<'a> {
     status: &'a str,
-}
-
-#[allow(dead_code)]
-pub(crate) fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
-    let value = headers.get("authorization")?;
-    let value = value.to_str().ok()?;
-    if let Some(token) = value.strip_prefix("Bearer ") {
-        Some(token.trim().to_string())
-    } else {
-        None
-    }
 }
 
 async fn shutdown_signal() {

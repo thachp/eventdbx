@@ -59,11 +59,6 @@ impl ServerClient {
         })
     }
 
-    #[allow(dead_code)]
-    pub fn with_addr<S: Into<String>>(connect_addr: S) -> Self {
-        Self::with_addr_and_tenant(connect_addr, None)
-    }
-
     pub fn with_addr_and_tenant<S: Into<String>>(connect_addr: S, tenant: Option<String>) -> Self {
         Self {
             connect_addr: connect_addr.into(),
@@ -454,38 +449,6 @@ impl ServerClient {
         Ok(results)
     }
 
-    #[allow(dead_code)]
-    pub fn list_aggregates_resolved(
-        &self,
-        token: &str,
-        filter: Option<&str>,
-        sort: Option<&str>,
-        include_archived: bool,
-        archived_only: bool,
-        resolve_depth: Option<usize>,
-    ) -> Result<Vec<ResolvedAggregate>> {
-        let mut cursor: Option<String> = None;
-        let mut results = Vec::new();
-        loop {
-            let (page, next_cursor) = self.list_aggregates_page_resolved(
-                token,
-                cursor.as_deref(),
-                DEFAULT_PAGE_SIZE,
-                filter,
-                sort,
-                include_archived,
-                archived_only,
-                resolve_depth,
-            )?;
-            results.extend(page);
-            cursor = next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        Ok(results)
-    }
-
     fn list_aggregates_page(
         &self,
         token: &str,
@@ -568,149 +531,6 @@ impl ServerClient {
                 }
             },
         )
-    }
-
-    #[allow(dead_code)]
-    fn list_aggregates_page_resolved(
-        &self,
-        token: &str,
-        cursor: Option<&str>,
-        take: usize,
-        filter: Option<&str>,
-        sort: Option<&str>,
-        include_archived: bool,
-        archived_only: bool,
-        resolve_depth: Option<usize>,
-    ) -> Result<(Vec<ResolvedAggregate>, Option<String>)> {
-        let request_id = next_request_id();
-        let tenant = self
-            .endpoint()
-            .tenant
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
-        self.send_control_request(
-            token,
-            request_id,
-            |request| {
-                let payload_builder = request.reborrow().init_payload();
-                let mut list = payload_builder.init_list_aggregates();
-                list.set_token(token);
-                if let Some(cursor) = cursor {
-                    list.set_has_cursor(true);
-                    list.set_cursor(cursor);
-                } else {
-                    list.set_has_cursor(false);
-                    list.set_cursor("");
-                }
-                list.set_has_take(true);
-                list.set_take(take as u64);
-                list.set_include_archived(include_archived);
-                list.set_archived_only(archived_only);
-                if let Some(filter) = filter {
-                    list.set_has_filter(true);
-                    list.set_filter(filter);
-                } else {
-                    list.set_has_filter(false);
-                }
-                if let Some(sort) = sort {
-                    list.set_has_sort(true);
-                    list.set_sort(sort);
-                } else {
-                    list.set_has_sort(false);
-                    list.set_sort("");
-                }
-                list.set_resolve(true);
-                if let Some(depth) = resolve_depth {
-                    list.set_has_resolve_depth(true);
-                    list.set_resolve_depth(depth as u32);
-                } else {
-                    list.set_has_resolve_depth(false);
-                }
-                Ok(())
-            },
-            |response| {
-                use control_response::payload;
-
-                match response
-                    .get_payload()
-                    .which()
-                    .context("failed to decode list_aggregates response payload")?
-                {
-                    payload::ListAggregates(Ok(result)) => {
-                        let resolved = if result.get_has_resolved_json() {
-                            let json = read_text(result.get_resolved_json(), "resolved_json")?;
-                            if json.trim().is_empty() {
-                                Vec::new()
-                            } else {
-                                serde_json::from_str(&json)
-                                    .context("failed to parse resolved list_aggregates payload")?
-                            }
-                        } else {
-                            let json = read_text(result.get_aggregates_json(), "aggregates_json")?;
-                            let aggregates: Vec<AggregateState> = if json.trim().is_empty() {
-                                Vec::new()
-                            } else {
-                                serde_json::from_str(&json)
-                                    .context("failed to parse list_aggregates payload")?
-                            };
-                            aggregates
-                                .into_iter()
-                                .map(|aggregate| ResolvedAggregate {
-                                    domain: tenant.clone(),
-                                    references: Vec::new(),
-                                    aggregate,
-                                })
-                                .collect()
-                        };
-
-                        let next_cursor = if result.get_has_next_cursor() {
-                            Some(read_text(result.get_next_cursor(), "next_cursor")?)
-                        } else {
-                            None
-                        };
-                        Ok((resolved, next_cursor))
-                    }
-                    payload::Error(Ok(error)) => {
-                        let code = read_text(error.get_code(), "code")?;
-                        let message = read_text(error.get_message(), "message")?;
-                        Err(anyhow!("server returned {}: {}", code, message))
-                    }
-                    payload::Error(Err(err)) => Err(anyhow!(
-                        "failed to decode error payload from CLI proxy: {}",
-                        err
-                    )),
-                    _ => Err(anyhow!(
-                        "unexpected payload returned from CLI proxy response"
-                    )),
-                }
-            },
-        )
-    }
-
-    #[allow(dead_code)]
-    pub fn list_events(
-        &self,
-        token: &str,
-        aggregate_type: &str,
-        aggregate_id: &str,
-    ) -> Result<Vec<EventRecord>> {
-        let mut cursor: Option<String> = None;
-        let mut results = Vec::new();
-        loop {
-            let (page, next_cursor) = self.list_events_page(
-                token,
-                aggregate_type,
-                aggregate_id,
-                cursor.as_deref(),
-                DEFAULT_PAGE_SIZE,
-            )?;
-            results.extend(page);
-            cursor = next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        Ok(results)
     }
 
     pub fn list_events_since(
