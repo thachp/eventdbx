@@ -128,6 +128,15 @@ pub fn ensure_metadata_extensions(metadata: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Convert a dot-separated reference path into a JSON Pointer string.
+pub fn json_pointer_from_path(path: &str) -> String {
+    if path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", path.replace('.', "/"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

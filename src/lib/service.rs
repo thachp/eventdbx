@@ -25,7 +25,7 @@ use crate::{
     token::{JwtClaims, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
-        ensure_payload_size, ensure_snake_case, normalize_event_type,
+        ensure_payload_size, ensure_snake_case, json_pointer_from_path, normalize_event_type,
     },
 };
 use parking_lot::Mutex;
@@ -1019,11 +1019,4 @@ pub(crate) fn normalize_optional_note(note: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
-}
-
-fn json_pointer_from_path(path: &str) -> String {
-    if path.is_empty() {
-        return "/".to_string();
-    }
-    format!("/{}", path.replace('.', "/"))
 }

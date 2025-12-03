@@ -36,6 +36,7 @@ use eventdbx::{
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
         ensure_payload_size, ensure_snake_case, normalize_event_type,
+        json_pointer_from_path,
     },
 };
 
@@ -1423,13 +1424,6 @@ fn nullify_referrers_offline(
         })?;
     }
     Ok(())
-}
-
-fn json_pointer_from_path(path: &str) -> String {
-    if path.is_empty() {
-        return "/".to_string();
-    }
-    format!("/{}", path.replace('.', "/"))
 }
 
 #[cfg(test)]
