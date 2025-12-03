@@ -877,9 +877,10 @@ fn schema_field(config_path: Option<PathBuf>, args: SchemaFieldArgs) -> Result<(
     }
 
     let rules_from_json = args.rules.is_some();
-    let rules_are_reference = update.column_rules.as_ref().map_or(false, |(_, rules)| {
-        matches!(rules, Some(r) if r.format == Some(FieldFormat::Reference))
-    });
+    let rules_are_reference = update.column_rules.as_ref().map_or(
+        false,
+        |(_, rules)| matches!(rules, Some(r) if r.format == Some(FieldFormat::Reference)),
+    );
     if reference_flags_present
         && !reference_alias
         && args.format != Some(FieldFormatArg::Reference)

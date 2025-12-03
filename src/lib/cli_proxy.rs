@@ -356,7 +356,8 @@ fn resolve_cross_domain(
         domain,
         aggregate_type: &aggregate.aggregate_type,
     };
-    let located = schemas.collect_references(&aggregate.aggregate_type, &aggregate.state, context)?;
+    let located =
+        schemas.collect_references(&aggregate.aggregate_type, &aggregate.state, context)?;
 
     let mut resolved_refs = Vec::new();
     stack.push((
@@ -409,7 +410,9 @@ fn resolve_cross_domain(
             reference.reference.aggregate_type, reference.reference.aggregate_id
         );
         if let Err(EventError::Unauthorized) =
-            target_core.tokens().authorize_action(token, "aggregate.read", Some(resource.as_str()))
+            target_core
+                .tokens()
+                .authorize_action(token, "aggregate.read", Some(resource.as_str()))
         {
             resolved_refs.push(ResolvedReference {
                 path: reference.path,
