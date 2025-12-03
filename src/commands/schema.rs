@@ -32,7 +32,7 @@ pub enum SchemaCommands {
     Annotate(SchemaAnnotateArgs),
     /// List available schemas
     List(SchemaListArgs),
-    /// Hide a field from aggregate detail responses
+    /// Hide or unhide a field from aggregate detail responses
     Hide(SchemaHideArgs),
     /// Modify column types and validation rules for a field
     Field(SchemaFieldArgs),
@@ -131,9 +131,9 @@ pub struct SchemaHideArgs {
     #[arg(long)]
     pub field: String,
 
-    /// Show the field again (removes it from the hidden list)
-    #[arg(long, default_value_t = false)]
-    pub show: bool,
+    /// Unhide the field again (removes it from the hidden list)
+    #[arg(long, alias = "show", default_value_t = false)]
+    pub unhide: bool,
 }
 
 #[derive(Args)]
@@ -764,11 +764,11 @@ fn hide_field(config_path: Option<PathBuf>, args: SchemaHideArgs) -> Result<()> 
     }
 
     let mut update = SchemaUpdate::default();
-    update.hidden_field = Some((field.to_string(), !args.show));
+    update.hidden_field = Some((field.to_string(), !args.unhide));
     manager.update(aggregate, update)?;
 
-    if args.show {
-        println!("aggregate={} field={} shown", aggregate, field);
+    if args.unhide {
+        println!("aggregate={} field={} unhidden", aggregate, field);
     } else {
         println!("aggregate={} field={} hidden", aggregate, field);
     }

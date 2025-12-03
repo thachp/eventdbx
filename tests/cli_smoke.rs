@@ -749,6 +749,55 @@ fn schema_hide_field() -> Result<()> {
 }
 
 #[test]
+fn schema_unhide_field() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run_json(&[
+        "schema",
+        "create",
+        "orders",
+        "--events",
+        "order_created",
+        "--json",
+    ])?;
+
+    cli.run(&[
+        "schema",
+        "hide",
+        "--aggregate",
+        "orders",
+        "--field",
+        "internal_notes",
+    ])?;
+
+    let unhide_out = cli.run(&[
+        "schema",
+        "hide",
+        "--aggregate",
+        "orders",
+        "--field",
+        "internal_notes",
+        "--unhide",
+    ])?;
+    assert!(
+        unhide_out.contains("aggregate=orders field=internal_notes unhidden"),
+        "unexpected schema unhide output:\n{}",
+        unhide_out
+    );
+
+    let schema_after_unhide = cli.run_json(&["schema", "orders"])?;
+    let hidden = schema_after_unhide["hidden_fields"]
+        .as_array()
+        .context("hidden_fields not present in schema json")?;
+    assert!(
+        !hidden.iter().any(|value| value == "internal_notes"),
+        "expected hidden_fields to exclude internal_notes after unhide: {}",
+        schema_after_unhide
+    );
+
+    Ok(())
+}
+
+#[test]
 fn schema_field_sets_type_and_rules() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run(&[
