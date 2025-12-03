@@ -227,8 +227,7 @@ fn apply_event(
         metadata,
         issued_by,
         note,
-        tenant: _,
-        reference_targets: _,
+        ..
     } = input;
 
     debug_assert_eq!(&meta.aggregate_type, &aggregate_type);
