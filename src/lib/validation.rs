@@ -143,12 +143,14 @@ pub fn ensure_metadata_extensions(metadata: &Value) -> Result<()> {
 }
 
 /// Convert a dot-separated reference path into a JSON Pointer string.
-pub fn json_pointer_from_path(path: &str) -> String {
+/// An empty path is rejected to avoid unintentionally targeting the root.
+pub fn json_pointer_from_path(path: &str) -> Result<String> {
     if path.is_empty() {
-        "/".to_string()
-    } else {
-        format!("/{}", path.replace('.', "/"))
+        return Err(EventError::SchemaViolation(
+            "reference path cannot be empty".into(),
+        ));
     }
+    Ok(format!("/{}", path.replace('.', "/")))
 }
 
 #[cfg(test)]
@@ -190,6 +192,12 @@ mod tests {
     fn event_type_normalization_rejects_hyphenated_segments() {
         let err = normalize_event_type("patient-Created").unwrap_err();
         assert!(matches!(err, EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn json_pointer_from_path_rejects_empty() {
+        let err = json_pointer_from_path("").unwrap_err();
+        assert!(matches!(err, EventError::SchemaViolation(_)));
     }
 
     #[test]

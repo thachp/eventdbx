@@ -1695,7 +1695,7 @@ fn nullify_referrers_offline(
         grouped
             .entry((agg.clone(), id.clone()))
             .or_default()
-            .insert(json_pointer_from_path(path));
+            .insert(json_pointer_from_path(path)?);
     }
 
     for ((aggregate, aggregate_id), paths) in grouped {

@@ -183,7 +183,7 @@ impl CoreContext {
         let store = self.store();
         let mut grouped: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
         for (_, agg_type, agg_id, path) in referrers {
-            let pointer = json_pointer_from_path(path);
+            let pointer = json_pointer_from_path(path)?;
             grouped
                 .entry((agg_type.clone(), agg_id.clone()))
                 .or_default()
