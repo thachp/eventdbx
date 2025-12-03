@@ -1359,17 +1359,15 @@ fn normalize_references_offline(
         aggregate_type: aggregate,
     };
     let mut resolver = |reference: &AggregateReference,
-                        integrity: ReferenceIntegrity|
+                        _integrity: ReferenceIntegrity|
      -> eventdbx::error::Result<ReferenceResolutionStatus> {
         if !reference.domain.eq_ignore_ascii_case(tenant) {
             return Ok(ReferenceResolutionStatus::Forbidden);
         }
         match store.aggregate_version(&reference.aggregate_type, &reference.aggregate_id) {
             Ok(Some(_)) => Ok(ReferenceResolutionStatus::Ok),
-            Ok(None) => match integrity {
-                ReferenceIntegrity::Weak => Ok(ReferenceResolutionStatus::NotFound),
-                ReferenceIntegrity::Strong => Ok(ReferenceResolutionStatus::NotFound),
-            },
+            // The schema layer will turn NotFound into a validation error for strong integrity.
+            Ok(None) => Ok(ReferenceResolutionStatus::NotFound),
             Err(err) => Err(err.into()),
         }
     };
