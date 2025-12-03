@@ -783,6 +783,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     cursor_token.as_ref(),
                     take,
                     scope,
+                    true,
                     |aggregate| {
                         if let Some(expr) = filter_expr.as_ref() {
                             if !expr.matches_aggregate(&aggregate) {
@@ -1038,10 +1039,12 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 None => None,
             };
 
+            let normalized = normalize_event_type(&event)?;
             let command = AppendCommand {
                 aggregate,
                 aggregate_id,
-                event,
+                event: normalized.normalized,
+                event_raw: normalized.original,
                 stage,
                 token,
                 payload: payload_value,
@@ -1076,10 +1079,12 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 None => None,
             };
 
+            let normalized = normalize_event_type(&event)?;
             let command = AppendCommand {
                 aggregate,
                 aggregate_id,
-                event,
+                event: normalized.normalized,
+                event_raw: normalized.original,
                 stage,
                 token,
                 payload: None,
@@ -1224,7 +1229,17 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
 
             for staged_event in &staged_events {
                 ensure_snake_case("aggregate_type", &staged_event.aggregate)?;
-                let event = normalize_event_type(&staged_event.event)?;
+                let normalized = normalize_event_type(
+                    staged_event
+                        .event_raw
+                        .as_deref()
+                        .unwrap_or(&staged_event.event),
+                )?;
+                let event = normalized.normalized;
+                let event_raw = staged_event
+                    .event_raw
+                    .clone()
+                    .or(normalized.original.clone());
                 ensure_aggregate_id(&staged_event.aggregate_id)?;
                 ensure_payload_size(&staged_event.payload)?;
                 if let Some(ref metadata) = staged_event.metadata {
@@ -1261,6 +1276,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
 
                 let mut evt = staged_event.to_append_event();
                 evt.event_type = event;
+                evt.event_type_raw = event_raw.clone();
                 evt.tenant = config.active_domain().to_string();
                 evt.reference_targets = Vec::new();
                 tx.append(evt)?;
@@ -1396,6 +1412,8 @@ fn migrate_reference_fields(config: &Config, args: AggregateMigrateRefsArgs) -> 
     };
 
     let event = normalize_event_type(&args.event)?;
+    let event_type = event.normalized.clone();
+    let event_type_raw = event.original.clone();
     let aggregate_id_filter = args.aggregate_id.as_deref().and_then(|value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -1566,7 +1584,7 @@ fn migrate_reference_fields(config: &Config, args: AggregateMigrateRefsArgs) -> 
             continue;
         }
 
-        if let Err(err) = schemas.validate_event(aggregate, &event, &normalized_payload) {
+        if let Err(err) = schemas.validate_event(aggregate, &event_type, &normalized_payload) {
             failures += 1;
             eprintln!(
                 "aggregate_type={} aggregate_id={} failed schema validation: {}",
@@ -1578,7 +1596,8 @@ fn migrate_reference_fields(config: &Config, args: AggregateMigrateRefsArgs) -> 
         match store.append(AppendEvent {
             aggregate_type: aggregate.to_string(),
             aggregate_id: aggregate_id.clone(),
-            event_type: event.clone(),
+            event_type: event_type.clone(),
+            event_type_raw: event_type_raw.clone(),
             payload: normalized_payload,
             metadata: None,
             issued_by: None,
@@ -1699,6 +1718,7 @@ fn nullify_referrers_offline(
             aggregate_type: aggregate.clone(),
             aggregate_id: aggregate_id.clone(),
             event_type: "_ref_nullify".into(),
+            event_type_raw: Some("_ref_nullify".into()),
             payload,
             metadata: None,
             issued_by: None,
@@ -1761,7 +1781,9 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
     }
 
     ensure_snake_case("aggregate_type", &aggregate)?;
-    let event = normalize_event_type(&event)?;
+    let normalized_event = normalize_event_type(&event)?;
+    let event = normalized_event.normalized;
+    let event_raw = normalized_event.original;
     ensure_aggregate_id(&aggregate_id)?;
     ensure_payload_size(&payload)?;
 
@@ -1818,6 +1840,7 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
                 aggregate_type: aggregate.clone(),
                 aggregate_id: aggregate_id.clone(),
                 event_type: event.clone(),
+                event_type_raw: event_raw.clone(),
                 payload: normalized_payload.clone(),
                 metadata: metadata.clone(),
                 issued_by: None,
@@ -1912,6 +1935,7 @@ struct AppendCommand {
     aggregate: String,
     aggregate_id: String,
     event: String,
+    event_raw: Option<String>,
     stage: bool,
     token: Option<String>,
     payload: Option<Value>,
@@ -1926,6 +1950,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
         aggregate,
         aggregate_id,
         event,
+        event_raw,
         stage,
         token,
         payload,
@@ -1947,7 +1972,9 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
     }
 
     ensure_snake_case("aggregate_type", &aggregate)?;
-    let event = normalize_event_type(&event)?;
+    let normalized_event = normalize_event_type(event_raw.as_deref().unwrap_or(&event))?;
+    let event_raw = event_raw.or(normalized_event.original.clone());
+    let event = normalized_event.normalized;
     ensure_aggregate_id(&aggregate_id)?;
 
     let restrict_mode = config.restrict;
@@ -2020,6 +2047,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                         aggregate_type: aggregate.clone(),
                         aggregate_id: aggregate_id.clone(),
                         event_type: event.clone(),
+                        event_type_raw: event_raw.clone(),
                         payload: normalized_payload.clone(),
                         metadata: metadata.clone(),
                         issued_by: None,
@@ -2033,6 +2061,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                     aggregate: aggregate.clone(),
                     aggregate_id: aggregate_id.clone(),
                     event: event.clone(),
+                    event_raw: event_raw.clone(),
                     payload: normalized_payload,
                     metadata: metadata.clone(),
                     issued_by: None,
@@ -2103,6 +2132,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 aggregate_type: aggregate.clone(),
                 aggregate_id: aggregate_id.clone(),
                 event_type: event.clone(),
+                event_type_raw: event_raw.clone(),
                 payload: normalized_payload.clone(),
                 metadata: metadata.clone(),
                 issued_by: None,
@@ -2849,6 +2879,8 @@ struct StagedEvent {
     aggregate: String,
     aggregate_id: String,
     event: String,
+    #[serde(default)]
+    event_raw: Option<String>,
     #[serde(default = "default_event_payload")]
     payload: Value,
     #[serde(default)]
@@ -2871,6 +2903,7 @@ impl StagedEvent {
             aggregate_type: self.aggregate.clone(),
             aggregate_id: self.aggregate_id.clone(),
             event_type: self.event.clone(),
+            event_type_raw: self.event_raw.clone(),
             payload: self.payload.clone(),
             metadata: self.metadata.clone(),
             issued_by: self.issued_by.clone().map(Into::into),
@@ -3007,6 +3040,7 @@ mod tests {
                     aggregate_type: "farm".into(),
                     aggregate_id: "1".into(),
                     event_type: "created".into(),
+                    event_type_raw: None,
                     payload: json!({ "address": "#123" }),
                     metadata: None,
                     issued_by: None,

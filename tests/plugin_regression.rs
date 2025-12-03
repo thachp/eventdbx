@@ -67,6 +67,7 @@ async fn http_plugin_posts_event_payload() -> Result<()> {
         aggregate_type: "order".into(),
         aggregate_id: "order-123".into(),
         event_type: "OrderCreated".into(),
+        event_type_raw: Some("OrderCreated".into()),
         payload: json!({ "status": "created" }),
         extensions: None,
         metadata: EventMetadata {

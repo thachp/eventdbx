@@ -58,6 +58,8 @@ pub struct EventRecord {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_type_raw: Option<String>,
     pub payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extensions: Option<Value>,
@@ -220,6 +222,7 @@ fn apply_event(
         aggregate_type,
         aggregate_id,
         event_type,
+        event_type_raw,
         payload,
         metadata,
         issued_by,
@@ -255,6 +258,7 @@ fn apply_event(
         aggregate_type,
         aggregate_id,
         event_type,
+        event_type_raw,
         payload,
         extensions: metadata,
         metadata: EventMetadata {
@@ -389,6 +393,7 @@ pub struct AppendEvent {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub event_type: String,
+    pub event_type_raw: Option<String>,
     pub payload: Value,
     pub metadata: Option<Value>,
     pub issued_by: Option<ActorClaims>,
@@ -3404,12 +3409,13 @@ impl EventStore {
         cursor: Option<&AggregateCursor>,
         take: usize,
         scope: AggregateQueryScope,
+        include_state: bool,
         transform: F,
     ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)>
     where
         F: FnMut(AggregateState) -> Option<AggregateState>,
     {
-        self.aggregates_page_with_transform_internal(cursor, take, scope, true, transform)
+        self.aggregates_page_with_transform_internal(cursor, take, scope, include_state, transform)
     }
 
     pub fn aggregates_page_without_state<F>(
@@ -3516,7 +3522,7 @@ impl EventStore {
         take: usize,
         scope: AggregateQueryScope,
     ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)> {
-        self.aggregates_page_with_transform(cursor, take, scope, |aggregate| Some(aggregate))
+        self.aggregates_page_with_transform(cursor, take, scope, true, |aggregate| Some(aggregate))
     }
 
     fn collect_index_page<F>(
@@ -4794,6 +4800,7 @@ mod tests {
                     aggregate_type: "patient".into(),
                     aggregate_id: "patient-1".into(),
                     event_type: "patient-created".into(),
+                    event_type_raw: None,
                     payload: payload.clone(),
                     metadata: None,
                     issued_by: None,
@@ -4828,6 +4835,7 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-42".into(),
                 event_type: "order-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "processing" }),
                 metadata: None,
                 issued_by: None,
@@ -4843,6 +4851,7 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-42".into(),
                 event_type: "order-updated".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({
                     "status": "shipped",
                     "tracking": "abc123"
@@ -5048,6 +5057,7 @@ mod tests {
                 aggregate_type: aggregate_type.into(),
                 aggregate_id: aggregate_id.to_string(),
                 event_type: event_type.into(),
+                event_type_raw: None,
                 payload: payload.clone(),
                 extensions: None,
                 metadata: EventMetadata {
@@ -5076,6 +5086,7 @@ mod tests {
                 aggregate_type: "invoice".into(),
                 aggregate_id: "inv-1".into(),
                 event_type: "invoice-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "total": "100.00" }),
                 metadata: None,
                 issued_by: None,
@@ -5103,6 +5114,7 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-1".into(),
                 event_type: "order-created".into(),
+                event_type_raw: None,
                 payload,
                 metadata: None,
                 issued_by: None,
@@ -5128,6 +5140,7 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-1".into(),
                 event_type: "order-updated".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({}),
                 metadata: None,
                 issued_by: None,
@@ -5160,6 +5173,7 @@ mod tests {
                 aggregate_type: "account".into(),
                 aggregate_id: "acct-1".into(),
                 event_type: "account-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "active" }),
                 metadata: None,
                 issued_by: None,
@@ -5184,6 +5198,7 @@ mod tests {
                 aggregate_type: "account".into(),
                 aggregate_id: "acct-2".into(),
                 event_type: "account-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "pending" }),
                 metadata: None,
                 issued_by: None,
@@ -5208,6 +5223,7 @@ mod tests {
                 aggregate_type: "account".into(),
                 aggregate_id: "acct-3".into(),
                 event_type: "account-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "active" }),
                 metadata: Some(metadata.clone()),
                 issued_by: None,
@@ -5237,6 +5253,7 @@ mod tests {
                 aggregate_type: "patient".into(),
                 aggregate_id: "p-1".into(),
                 event_type: "patient-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({
                     "status": "active",
                     "contact": {
@@ -5390,6 +5407,7 @@ mod tests {
                     aggregate_type: "account".into(),
                     aggregate_id: "acct-42".into(),
                     event_type: "created".into(),
+                    event_type_raw: None,
                     payload: serde_json::json!({ "status": "active" }),
                     metadata: None,
                     issued_by: None,
@@ -5424,6 +5442,7 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-9".into(),
                 event_type: "created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "new" }),
                 metadata: None,
                 issued_by: None,
@@ -5443,6 +5462,7 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-9".into(),
                 event_type: "updated".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "shipped" }),
                 metadata: None,
                 issued_by: None,
@@ -5481,6 +5501,7 @@ mod tests {
                     aggregate_type: "person".into(),
                     aggregate_id: agg_id.to_string(),
                     event_type: "created".into(),
+                    event_type_raw: None,
                     payload: serde_json::json!({ "name": agg_id }),
                     metadata: None,
                     issued_by: None,
@@ -5512,6 +5533,7 @@ mod tests {
                 aggregate_type: "address".into(),
                 aggregate_id: "addr-1".into(),
                 event_type: "created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "active" }),
                 metadata: None,
                 issued_by: None,
@@ -5527,6 +5549,7 @@ mod tests {
                 aggregate_type: "farm".into(),
                 aggregate_id: "farm-1".into(),
                 event_type: "created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "address": "beta#address#addr-1" }),
                 metadata: None,
                 issued_by: None,

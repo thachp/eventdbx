@@ -2101,11 +2101,13 @@ async fn execute_control_command(
             note,
             publish,
         } => {
+            let event_type_raw = Some(event_type.clone());
             let input = AppendEventInput {
                 token,
                 aggregate_type,
                 aggregate_id,
                 event_type,
+                event_type_raw,
                 payload,
                 patch: None,
                 metadata,
@@ -2132,11 +2134,13 @@ async fn execute_control_command(
             note,
             publish,
         } => {
+            let event_type_raw = Some(event_type.clone());
             let input = AppendEventInput {
                 token,
                 aggregate_type,
                 aggregate_id,
                 event_type,
+                event_type_raw,
                 payload: None,
                 patch: Some(patch),
                 metadata,
@@ -2223,11 +2227,13 @@ async fn execute_control_command(
                 let note = note.clone();
                 let publish = publish.clone();
                 move || {
+                    let event_type_raw = Some(event_type.clone());
                     core.create_aggregate(CreateAggregateInput {
                         token,
                         aggregate_type,
                         aggregate_id,
                         event_type,
+                        event_type_raw,
                         payload,
                         metadata,
                         note,

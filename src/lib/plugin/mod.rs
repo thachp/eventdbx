@@ -517,6 +517,7 @@ mod tests {
             aggregate_type: "order".into(),
             aggregate_id: "order-1".into(),
             event_type: "created".into(),
+            event_type_raw: Some("created".into()),
             payload: json!({"status": "created"}),
             extensions: None,
             metadata: EventMetadata {

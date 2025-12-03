@@ -1182,6 +1182,7 @@ fn run_plugin_test(
         aggregate_type: "patient".to_string(),
         aggregate_id: "p-001".to_string(),
         event_type: "patient-updated".to_string(),
+        event_type_raw: Some("patient-updated".to_string()),
         payload: json!({
             "status": "inactive",
             "comment": "Archived via API"

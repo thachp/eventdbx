@@ -207,6 +207,7 @@ impl CoreContext {
                 aggregate_type: agg_type.clone(),
                 aggregate_id: agg_id.clone(),
                 event_type: "_ref_nullify".into(),
+                event_type_raw: Some("_ref_nullify".into()),
                 payload,
                 metadata: None,
                 issued_by: None,
@@ -323,8 +324,13 @@ impl CoreContext {
             return Ok((aggregates, None));
         }
 
-        self.store
-            .aggregates_page_with_transform(cursor, effective_take, scope, &mut transform)
+        self.store.aggregates_page_with_transform(
+            cursor,
+            effective_take,
+            scope,
+            true,
+            &mut transform,
+        )
     }
 
     pub fn get_aggregate(
@@ -535,6 +541,7 @@ impl CoreContext {
             aggregate_type,
             aggregate_id,
             event_type,
+            event_type_raw,
             payload,
             metadata,
             note,
@@ -542,7 +549,10 @@ impl CoreContext {
         } = input;
 
         ensure_snake_case("aggregate_type", &aggregate_type)?;
-        let event_type = normalize_event_type(&event_type)?;
+        let normalized_event =
+            normalize_event_type(event_type_raw.as_deref().unwrap_or(&event_type))?;
+        let event_type_raw = event_type_raw.or(normalized_event.original.clone());
+        let event_type = normalized_event.normalized;
         ensure_aggregate_id(&aggregate_id)?;
         if let Some(ref metadata) = metadata {
             ensure_metadata_extensions(metadata)?;
@@ -574,6 +584,7 @@ impl CoreContext {
             aggregate_type: aggregate_type.clone(),
             aggregate_id: aggregate_id.clone(),
             event_type,
+            event_type_raw,
             payload: Some(payload),
             patch: None,
             metadata,
@@ -751,6 +762,7 @@ impl CoreContext {
             aggregate_type,
             aggregate_id,
             event_type,
+            event_type_raw,
             payload,
             patch,
             metadata,
@@ -779,7 +791,10 @@ impl CoreContext {
         };
 
         ensure_snake_case("aggregate_type", &aggregate_type)?;
-        let event_type = normalize_event_type(&event_type)?;
+        let normalized_event =
+            normalize_event_type(event_type_raw.as_deref().unwrap_or(&event_type))?;
+        let event_type_raw = event_type_raw.or(normalized_event.original.clone());
+        let event_type = normalized_event.normalized;
         ensure_aggregate_id(&aggregate_id)?;
         if let Some(ref metadata) = metadata {
             ensure_metadata_extensions(metadata)?;
@@ -895,6 +910,7 @@ impl CoreContext {
             aggregate_type,
             aggregate_id,
             event_type,
+            event_type_raw,
             payload: effective_payload,
             metadata,
             issued_by,
@@ -982,6 +998,7 @@ pub struct AppendEventInput {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub event_type: String,
+    pub event_type_raw: Option<String>,
     pub payload: Option<Value>,
     pub patch: Option<Value>,
     pub metadata: Option<Value>,
@@ -995,6 +1012,7 @@ pub struct CreateAggregateInput {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub event_type: String,
+    pub event_type_raw: Option<String>,
     pub payload: Value,
     pub metadata: Option<Value>,
     pub note: Option<String>,
