@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering as StdOrdering,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, hash_map::Entry},
     convert::TryInto,
     fmt, fs, io,
     path::{Path, PathBuf},
@@ -4663,24 +4663,39 @@ fn update_reference_index_inner(
         .map_err(|err| EventError::Serialization(err.to_string()))?
         .unwrap_or_default();
 
+    fn load_target_referrers<'a>(
+        db: &DBWithThreadMode<MultiThreaded>,
+        tenant: &str,
+        target: &str,
+        cache: &'a mut HashMap<String, Vec<StoredReferrer>>,
+    ) -> Result<&'a mut Vec<StoredReferrer>> {
+        match cache.entry(target.to_string()) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let target_key = reftgt_key(tenant, target);
+                let existing: Vec<StoredReferrer> = db
+                    .get(&target_key)
+                    .map_err(|err| EventError::Storage(err.to_string()))?
+                    .map(|bytes| serde_json::from_slice(&bytes))
+                    .transpose()
+                    .map_err(|err| EventError::Serialization(err.to_string()))?
+                    .unwrap_or_default();
+                Ok(entry.insert(existing))
+            }
+        }
+    }
+
+    let mut target_referrers: HashMap<String, Vec<StoredReferrer>> = HashMap::new();
+    let mut updated_targets = BTreeSet::new();
+
     // Remove old target mappings
     for entry in prev {
-        let target_key = reftgt_key(tenant, &entry.target);
-        let existing: Vec<StoredReferrer> = db
-            .get(&target_key)
-            .map_err(|err| EventError::Storage(err.to_string()))?
-            .map(|bytes| serde_json::from_slice(&bytes))
-            .transpose()
-            .map_err(|err| EventError::Serialization(err.to_string()))?
-            .unwrap_or_default();
-        let filtered: Vec<StoredReferrer> = existing
-            .into_iter()
-            .filter(|r| !(r.aggregate_type == aggregate_type && r.aggregate_id == aggregate_id))
-            .collect();
-        if filtered.is_empty() {
-            batch.delete(target_key);
-        } else {
-            batch.put(target_key, serde_json::to_vec(&filtered)?);
+        let referrers = load_target_referrers(db, tenant, &entry.target, &mut target_referrers)?;
+        let len_before = referrers.len();
+        referrers
+            .retain(|r| !(r.aggregate_type == aggregate_type && r.aggregate_id == aggregate_id));
+        if referrers.len() != len_before {
+            updated_targets.insert(entry.target.clone());
         }
     }
 
@@ -4691,25 +4706,29 @@ fn update_reference_index_inner(
             target: target.clone(),
             path: path.clone(),
         };
-        new_paths.push(path_entry.clone());
+        new_paths.push(path_entry);
 
-        let target_key = reftgt_key(tenant, target);
-        let mut existing: Vec<StoredReferrer> = db
-            .get(&target_key)
-            .map_err(|err| EventError::Storage(err.to_string()))?
-            .map(|bytes| serde_json::from_slice(&bytes))
-            .transpose()
-            .map_err(|err| EventError::Serialization(err.to_string()))?
-            .unwrap_or_default();
-        if !existing.iter().any(|r| {
+        let referrers = load_target_referrers(db, tenant, target, &mut target_referrers)?;
+        if !referrers.iter().any(|r| {
             r.aggregate_type == aggregate_type && r.aggregate_id == aggregate_id && r.path == *path
         }) {
-            existing.push(StoredReferrer {
+            referrers.push(StoredReferrer {
                 aggregate_type: aggregate_type.to_string(),
                 aggregate_id: aggregate_id.to_string(),
                 path: path.clone(),
             });
-            batch.put(target_key, serde_json::to_vec(&existing)?);
+            updated_targets.insert(target.clone());
+        }
+    }
+
+    for target in updated_targets {
+        let target_key = reftgt_key(tenant, &target);
+        if let Some(referrers) = target_referrers.get(&target) {
+            if referrers.is_empty() {
+                batch.delete(target_key);
+            } else {
+                batch.put(target_key, serde_json::to_vec(referrers)?);
+            }
         }
     }
 
