@@ -342,6 +342,133 @@ async fn refresh_tenant_context(core_provider: Arc<dyn CoreProvider>, tenant: &s
     }
 }
 
+fn resolve_cross_domain(
+    core_provider: Arc<dyn CoreProvider>,
+    token: &str,
+    domain: &str,
+    aggregate: AggregateState,
+    depth: usize,
+    stack: &mut Vec<(String, String, String)>,
+) -> Result<ResolvedAggregate, EventError> {
+    let core = core_provider.core_for(domain)?;
+    let schemas = core.schemas();
+    let context = ReferenceContext {
+        domain,
+        aggregate_type: &aggregate.aggregate_type,
+    };
+    let located = schemas.collect_references(&aggregate.aggregate_type, &aggregate.state, context)?;
+
+    let mut resolved_refs = Vec::new();
+    stack.push((
+        domain.to_string(),
+        aggregate.aggregate_type.clone(),
+        aggregate.aggregate_id.clone(),
+    ));
+
+    for reference in located {
+        if depth == 0 {
+            resolved_refs.push(ResolvedReference {
+                path: reference.path,
+                reference: reference.reference,
+                status: ReferenceResolutionStatus::DepthExceeded,
+                resolved: None,
+            });
+            continue;
+        }
+
+        if stack.iter().any(|(d, t, id)| {
+            d.eq_ignore_ascii_case(&reference.reference.domain)
+                && t == &reference.reference.aggregate_type
+                && id == &reference.reference.aggregate_id
+        }) {
+            resolved_refs.push(ResolvedReference {
+                path: reference.path,
+                reference: reference.reference,
+                status: ReferenceResolutionStatus::Cycle,
+                resolved: None,
+            });
+            continue;
+        }
+
+        let target_domain = reference.reference.domain.clone();
+        let target_core = match core_provider.core_for(&target_domain) {
+            Ok(core) => core,
+            Err(_) => {
+                resolved_refs.push(ResolvedReference {
+                    path: reference.path,
+                    reference: reference.reference,
+                    status: ReferenceResolutionStatus::Forbidden,
+                    resolved: None,
+                });
+                continue;
+            }
+        };
+
+        let resource = format!(
+            "aggregate:{}:{}",
+            reference.reference.aggregate_type, reference.reference.aggregate_id
+        );
+        if let Err(EventError::Unauthorized) =
+            target_core.tokens().authorize_action(token, "aggregate.read", Some(resource.as_str()))
+        {
+            resolved_refs.push(ResolvedReference {
+                path: reference.path,
+                reference: reference.reference,
+                status: ReferenceResolutionStatus::Forbidden,
+                resolved: None,
+            });
+            continue;
+        }
+
+        match target_core.get_aggregate(
+            token,
+            &reference.reference.aggregate_type,
+            &reference.reference.aggregate_id,
+        ) {
+            Ok(Some(child)) => {
+                let next = resolve_cross_domain(
+                    Arc::clone(&core_provider),
+                    token,
+                    &target_domain,
+                    child,
+                    depth.saturating_sub(1),
+                    stack,
+                )?;
+                resolved_refs.push(ResolvedReference {
+                    path: reference.path,
+                    reference: reference.reference,
+                    status: ReferenceResolutionStatus::Ok,
+                    resolved: Some(Box::new(next)),
+                });
+            }
+            Ok(None) | Err(EventError::AggregateNotFound) => {
+                resolved_refs.push(ResolvedReference {
+                    path: reference.path,
+                    reference: reference.reference,
+                    status: ReferenceResolutionStatus::NotFound,
+                    resolved: None,
+                });
+            }
+            Err(EventError::Unauthorized) => {
+                resolved_refs.push(ResolvedReference {
+                    path: reference.path,
+                    reference: reference.reference,
+                    status: ReferenceResolutionStatus::Forbidden,
+                    resolved: None,
+                });
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    stack.pop();
+    Ok(ResolvedAggregate {
+        domain: domain.to_string(),
+        aggregate,
+        references: resolved_refs,
+    })
+}
+
 fn control_command_name(command: &ControlCommand) -> &'static str {
     match command {
         ControlCommand::ListAggregates { .. } => "list_aggregates",
@@ -1747,144 +1874,6 @@ async fn execute_control_command(
     core_provider: Arc<dyn CoreProvider>,
 ) -> std::result::Result<ControlReply, EventError> {
     let _tenant_id = tenant_id;
-
-    fn resolve_cross_domain(
-        core_provider: Arc<dyn CoreProvider>,
-        token: &str,
-        domain: &str,
-        aggregate: AggregateState,
-        depth: usize,
-        stack: &mut Vec<(String, String, String)>,
-    ) -> Result<ResolvedAggregate, EventError> {
-        let core = core_provider.core_for(domain)?;
-        let schemas = core.schemas();
-        let context = ReferenceContext {
-            domain,
-            aggregate_type: &aggregate.aggregate_type,
-        };
-        let located =
-            schemas.collect_references(&aggregate.aggregate_type, &aggregate.state, context)?;
-
-        let mut resolved_refs = Vec::new();
-        stack.push((
-            domain.to_string(),
-            aggregate.aggregate_type.clone(),
-            aggregate.aggregate_id.clone(),
-        ));
-
-        for reference in located {
-            if depth == 0 {
-                resolved_refs.push(ResolvedReference {
-                    path: reference.path,
-                    reference: reference.reference,
-                    status: ReferenceResolutionStatus::DepthExceeded,
-                    resolved: None,
-                });
-                continue;
-            }
-
-            if stack.iter().any(|(d, t, id)| {
-                d.eq_ignore_ascii_case(&reference.reference.domain)
-                    && t == &reference.reference.aggregate_type
-                    && id == &reference.reference.aggregate_id
-            }) {
-                resolved_refs.push(ResolvedReference {
-                    path: reference.path,
-                    reference: reference.reference,
-                    status: ReferenceResolutionStatus::Cycle,
-                    resolved: None,
-                });
-                continue;
-            }
-
-            let target_domain = reference.reference.domain.clone();
-            let target_core = match core_provider.core_for(&target_domain) {
-                Ok(core) => core,
-                Err(_) => {
-                    resolved_refs.push(ResolvedReference {
-                        path: reference.path,
-                        reference: reference.reference,
-                        status: ReferenceResolutionStatus::Forbidden,
-                        resolved: None,
-                    });
-                    continue;
-                }
-            };
-
-            let resource = format!(
-                "aggregate:{}:{}",
-                reference.reference.aggregate_type, reference.reference.aggregate_id
-            );
-            if let Err(EventError::Unauthorized) = target_core.tokens().authorize_action(
-                token,
-                "aggregate.read",
-                Some(resource.as_str()),
-            ) {
-                resolved_refs.push(ResolvedReference {
-                    path: reference.path,
-                    reference: reference.reference,
-                    status: ReferenceResolutionStatus::Forbidden,
-                    resolved: None,
-                });
-                continue;
-            }
-
-            match target_core.get_aggregate(
-                token,
-                &reference.reference.aggregate_type,
-                &reference.reference.aggregate_id,
-            ) {
-                Ok(Some(child)) => {
-                    let next = resolve_cross_domain(
-                        Arc::clone(&core_provider),
-                        token,
-                        &target_domain,
-                        child,
-                        depth.saturating_sub(1),
-                        stack,
-                    )?;
-                    resolved_refs.push(ResolvedReference {
-                        path: reference.path,
-                        reference: reference.reference,
-                        status: ReferenceResolutionStatus::Ok,
-                        resolved: Some(Box::new(next)),
-                    });
-                }
-                Ok(None) => {
-                    resolved_refs.push(ResolvedReference {
-                        path: reference.path,
-                        reference: reference.reference,
-                        status: ReferenceResolutionStatus::NotFound,
-                        resolved: None,
-                    });
-                }
-                Err(EventError::AggregateNotFound) => {
-                    resolved_refs.push(ResolvedReference {
-                        path: reference.path,
-                        reference: reference.reference,
-                        status: ReferenceResolutionStatus::NotFound,
-                        resolved: None,
-                    });
-                }
-                Err(EventError::Unauthorized) => {
-                    resolved_refs.push(ResolvedReference {
-                        path: reference.path,
-                        reference: reference.reference,
-                        status: ReferenceResolutionStatus::Forbidden,
-                        resolved: None,
-                    });
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        stack.pop();
-        Ok(ResolvedAggregate {
-            domain: domain.to_string(),
-            aggregate,
-            references: resolved_refs,
-        })
-    }
 
     match command {
         ControlCommand::ListAggregates {
