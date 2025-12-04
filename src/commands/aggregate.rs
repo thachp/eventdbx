@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use csv::WriterBuilder;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Value};
+use serde_json::{Map as JsonMap, Value, json};
 use tempfile::tempdir;
 use zip::{CompressionMethod, ZipWriter, write::FileOptions};
 
@@ -21,8 +21,12 @@ use eventdbx::{
     filter,
     merkle::compute_merkle_root,
     plugin::{JobPriority, PluginManager, PublishTarget},
+    reference::{
+        AggregateReference, ReferenceCascade, ReferenceContext, ReferenceFetchOutcome,
+        ReferenceIntegrity, ReferenceResolutionStatus, Referrer, resolve_references,
+    },
     restrict,
-    schema::{MAX_EVENT_NOTE_LENGTH, SchemaManager},
+    schema::{FieldFormat, MAX_EVENT_NOTE_LENGTH, SchemaManager},
     store::{
         self, ActorClaims, AggregateCursor, AggregateQueryScope, AggregateSort, AggregateState,
         AppendEvent, EventRecord, EventStore, payload_to_map, select_state_field,
@@ -31,7 +35,7 @@ use eventdbx::{
     token::{IssueTokenInput, JwtLimits, ROOT_ACTION, ROOT_RESOURCE, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
-        ensure_payload_size, ensure_snake_case,
+        ensure_payload_size, ensure_snake_case, json_pointer_from_path, normalize_event_type,
     },
 };
 
@@ -70,6 +74,10 @@ pub enum AggregateCommands {
     Restore(AggregateArchiveArgs),
     /// Remove an aggregate that has no events
     Remove(AggregateRemoveArgs),
+    /// List aggregates that reference a target aggregate
+    Referrers(AggregateReferrersArgs),
+    /// Rewrite reference fields after switching to reference format
+    Migrate(AggregateMigrateRefsArgs),
     /// Commit events previously staged with `aggregate apply --stage`
     Commit,
     /// Export aggregate state to CSV or JSON
@@ -208,6 +216,14 @@ pub struct AggregateGetArgs {
     /// Include event history in the output
     #[arg(long, default_value_t = false)]
     pub include_events: bool,
+
+    /// Resolve reference fields and include resolved payloads
+    #[arg(long, default_value_t = false)]
+    pub resolve: bool,
+
+    /// Resolution depth (defaults to config reference_default_depth; capped at reference_max_depth)
+    #[arg(long = "resolve-depth")]
+    pub resolve_depth: Option<usize>,
 }
 
 #[derive(Args)]
@@ -265,6 +281,49 @@ pub struct AggregateRemoveArgs {
 }
 
 #[derive(Args)]
+pub struct AggregateReferrersArgs {
+    /// Aggregate type to inspect for inbound references
+    pub aggregate: String,
+
+    /// Aggregate identifier to inspect for inbound references
+    pub aggregate_id: String,
+
+    /// Authorization token used when proxying through a running server
+    #[arg(long, value_name = "TOKEN")]
+    pub token: Option<String>,
+
+    /// Emit results as JSON
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct AggregateMigrateRefsArgs {
+    /// Aggregate type to scan
+    pub aggregate: String,
+
+    /// Event type to emit when writing the canonical reference
+    #[arg(long, value_name = "EVENT")]
+    pub event: String,
+
+    /// Reference field to normalize (may be repeated)
+    #[arg(long = "field", value_name = "FIELD", required = true)]
+    pub fields: Vec<String>,
+
+    /// Limit migration to a single aggregate id
+    #[arg(long, value_name = "ID")]
+    pub aggregate_id: Option<String>,
+
+    /// Preview changes without writing events
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
+
+    /// Optional note to attach to emitted events
+    #[arg(long, value_name = "NOTE")]
+    pub note: Option<String>,
+}
+
+#[derive(Args)]
 pub struct AggregateListArgs {
     /// Limit results to a single aggregate type
     #[arg(value_name = "AGGREGATE")]
@@ -301,6 +360,14 @@ pub struct AggregateListArgs {
     /// Show only archived aggregates
     #[arg(long, default_value_t = false, conflicts_with = "include_archived")]
     pub archived_only: bool,
+
+    /// Resolve reference fields for each aggregate (JSON output recommended)
+    #[arg(long, default_value_t = false)]
+    pub resolve: bool,
+
+    /// Resolution depth (defaults to config reference_default_depth; capped at reference_max_depth)
+    #[arg(long = "resolve-depth")]
+    pub resolve_depth: Option<usize>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -422,6 +489,69 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
 
             let store =
                 EventStore::open_read_only(config.event_store_path(), config.encryption_key()?)?;
+            if args.resolve && !args.json {
+                bail!("--resolve requires --json output for aggregate listings");
+            }
+            let tenant = config.active_domain().to_string();
+            let resolve_depth = args
+                .resolve_depth
+                .unwrap_or(config.reference_default_depth)
+                .min(config.reference_max_depth);
+            let schemas_path = config.schema_store_path();
+            let mut schemas_cache: Option<SchemaManager> = None;
+            let mut print_json = |aggregates: Vec<AggregateState>| -> Result<()> {
+                if !args.resolve {
+                    println!("{}", serde_json::to_string_pretty(&aggregates)?);
+                    return Ok(());
+                }
+
+                let schemas = if let Some(ref manager) = schemas_cache {
+                    manager
+                } else {
+                    schemas_cache = Some(SchemaManager::load(schemas_path.clone())?);
+                    schemas_cache.as_ref().expect("schema cache initialized")
+                };
+
+                let resolved: Vec<_> = aggregates
+                    .into_iter()
+                    .map(|aggregate| {
+                        let resolved = resolve_references(
+                            tenant.clone(),
+                            aggregate,
+                            schemas,
+                            resolve_depth,
+                            |reference| {
+                                if !reference.domain.eq_ignore_ascii_case(&tenant) {
+                                    return Ok(ReferenceFetchOutcome {
+                                        status: ReferenceResolutionStatus::Forbidden,
+                                        aggregate: None,
+                                    });
+                                }
+                                match store.get_aggregate_state(
+                                    &reference.aggregate_type,
+                                    &reference.aggregate_id,
+                                ) {
+                                    Ok(agg) => Ok(ReferenceFetchOutcome {
+                                        status: ReferenceResolutionStatus::Ok,
+                                        aggregate: Some(agg),
+                                    }),
+                                    Err(EventError::AggregateNotFound) => {
+                                        Ok(ReferenceFetchOutcome {
+                                            status: ReferenceResolutionStatus::NotFound,
+                                            aggregate: None,
+                                        })
+                                    }
+                                    Err(err) => Err(err),
+                                }
+                            },
+                        )?;
+                        serde_json::to_value(resolved).map_err(Into::into)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                println!("{}", serde_json::to_string_pretty(&resolved)?);
+                Ok(())
+            };
             let mut filter_expr = match args.filter.as_ref() {
                 Some(raw) => Some(
                     filter::parse_shorthand(raw)
@@ -464,6 +594,13 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     }
                 }
             }
+
+            let needs_state = args.json
+                || args.resolve
+                || filter_expr
+                    .as_ref()
+                    .map(|expr| expr.requires_aggregate_state())
+                    .unwrap_or(false);
 
             let sort_directives = if let Some(spec) = args.sort.as_deref() {
                 Some(
@@ -512,23 +649,41 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     if let Some(cursor) = cursor_token.as_ref() {
                         store::ensure_timestamp_cursor(cursor, kind, descending, scope)?;
                     }
-                    let aggregates = store.aggregates_paginated_with_transform(
-                        0,
-                        Some(take),
-                        Some(keys),
-                        scope,
-                        cursor_token.as_ref(),
-                        |aggregate| {
-                            if let Some(expr) = filter_expr.as_ref() {
-                                if !expr.matches_aggregate(&aggregate) {
-                                    return None;
+                    let aggregates = if needs_state {
+                        store.aggregates_paginated_with_transform(
+                            0,
+                            Some(take),
+                            Some(keys),
+                            scope,
+                            cursor_token.as_ref(),
+                            |aggregate| {
+                                if let Some(expr) = filter_expr.as_ref() {
+                                    if !expr.matches_aggregate(&aggregate) {
+                                        return None;
+                                    }
                                 }
-                            }
-                            Some(aggregate)
-                        },
-                    );
+                                Some(aggregate)
+                            },
+                        )
+                    } else {
+                        store.aggregates_paginated_without_state(
+                            0,
+                            Some(take),
+                            Some(keys),
+                            scope,
+                            cursor_token.as_ref(),
+                            |aggregate| {
+                                if let Some(expr) = filter_expr.as_ref() {
+                                    if !expr.matches_aggregate(&aggregate) {
+                                        return None;
+                                    }
+                                }
+                                Some(aggregate)
+                            },
+                        )
+                    };
                     if args.json {
-                        println!("{}", serde_json::to_string_pretty(&aggregates)?);
+                        print_json(aggregates)?;
                     } else {
                         let show_archived = matches!(
                             scope,
@@ -559,23 +714,41 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     return Ok(());
                 }
 
-                let aggregates = store.aggregates_paginated_with_transform(
-                    0,
-                    Some(take),
-                    Some(keys),
-                    scope,
-                    None,
-                    |aggregate| {
-                        if let Some(expr) = filter_expr.as_ref() {
-                            if !expr.matches_aggregate(&aggregate) {
-                                return None;
+                let aggregates = if needs_state {
+                    store.aggregates_paginated_with_transform(
+                        0,
+                        Some(take),
+                        Some(keys),
+                        scope,
+                        None,
+                        |aggregate| {
+                            if let Some(expr) = filter_expr.as_ref() {
+                                if !expr.matches_aggregate(&aggregate) {
+                                    return None;
+                                }
                             }
-                        }
-                        Some(aggregate)
-                    },
-                );
+                            Some(aggregate)
+                        },
+                    )
+                } else {
+                    store.aggregates_paginated_without_state(
+                        0,
+                        Some(take),
+                        Some(keys),
+                        scope,
+                        None,
+                        |aggregate| {
+                            if let Some(expr) = filter_expr.as_ref() {
+                                if !expr.matches_aggregate(&aggregate) {
+                                    return None;
+                                }
+                            }
+                            Some(aggregate)
+                        },
+                    )
+                };
                 if args.json {
-                    println!("{}", serde_json::to_string_pretty(&aggregates)?);
+                    print_json(aggregates)?;
                 } else {
                     let show_archived = matches!(
                         scope,
@@ -605,22 +778,39 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 return Ok(());
             }
 
-            let (aggregates, _next_cursor) = store.aggregates_page_with_transform(
-                cursor_token.as_ref(),
-                take,
-                scope,
-                |aggregate| {
-                    if let Some(expr) = filter_expr.as_ref() {
-                        if !expr.matches_aggregate(&aggregate) {
-                            return None;
+            let (aggregates, _next_cursor) = if needs_state {
+                store.aggregates_page_with_transform(
+                    cursor_token.as_ref(),
+                    take,
+                    scope,
+                    true,
+                    |aggregate| {
+                        if let Some(expr) = filter_expr.as_ref() {
+                            if !expr.matches_aggregate(&aggregate) {
+                                return None;
+                            }
                         }
-                    }
-                    Some(aggregate)
-                },
-            )?;
+                        Some(aggregate)
+                    },
+                )?
+            } else {
+                store.aggregates_page_without_state(
+                    cursor_token.as_ref(),
+                    take,
+                    scope,
+                    |aggregate| {
+                        if let Some(expr) = filter_expr.as_ref() {
+                            if !expr.matches_aggregate(&aggregate) {
+                                return None;
+                            }
+                        }
+                        Some(aggregate)
+                    },
+                )?
+            };
 
             if args.json {
-                println!("{}", serde_json::to_string_pretty(&aggregates)?);
+                print_json(aggregates)?;
             } else {
                 let show_archived = matches!(
                     scope,
@@ -654,7 +844,31 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 config.encryption_key()?,
                 config.snowflake_worker_id,
             )?;
+            let schemas = SchemaManager::load(config.schema_store_path())?;
+            let target = format!(
+                "{}#{}#{}",
+                config.active_domain(),
+                args.aggregate,
+                args.aggregate_id
+            );
+            let referrers = store.referrers_for_any_tenant(&target)?;
+            let (nullify, blockers) =
+                partition_referrers(&schemas, config.active_domain(), &referrers);
+            if !blockers.is_empty() {
+                bail!(
+                    "aggregate {}:{} cannot be removed; referenced by {}",
+                    args.aggregate,
+                    args.aggregate_id,
+                    blockers.into_iter().take(5).collect::<Vec<_>>().join(", ")
+                );
+            }
+            nullify_referrers_offline(&store, &schemas, config.active_domain(), &target, &nullify)?;
             store.remove_aggregate(&args.aggregate, &args.aggregate_id)?;
+            let _ = store.clear_reference_index(
+                config.active_domain(),
+                &args.aggregate,
+                &args.aggregate_id,
+            );
             let assignments = TenantAssignmentStore::open(config.tenant_meta_path())?;
             let usage = store.storage_usage_bytes()?;
             assignments.update_storage_usage_bytes(config.active_domain(), usage)?;
@@ -662,6 +876,52 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 "aggregate_type={} aggregate_id={} removed",
                 args.aggregate, args.aggregate_id
             );
+        }
+        AggregateCommands::Referrers(args) => {
+            let AggregateReferrersArgs {
+                aggregate,
+                aggregate_id,
+                token,
+                json,
+            } = args;
+            let tenant = config.active_domain().to_string();
+            let target = format!("{}#{}#{}", tenant, aggregate, aggregate_id);
+            let refs = match EventStore::open_read_only(
+                config.event_store_path(),
+                config.encryption_key()?,
+            ) {
+                Ok(store) => store
+                    .referrers_for_any_tenant(&target)?
+                    .into_iter()
+                    .map(|(_, aggregate_type, aggregate_id, path)| Referrer {
+                        aggregate_type,
+                        aggregate_id,
+                        path,
+                    })
+                    .collect(),
+                Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
+                    let token = ensure_proxy_token(&config, token)?;
+                    let client = ServerClient::new(&config)?;
+                    client.list_referrers(&token, &aggregate, &aggregate_id)?
+                }
+                Err(err) => return Err(err.into()),
+            };
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&refs)?);
+            } else if refs.is_empty() {
+                println!("no referrers found");
+            } else {
+                for reference in refs {
+                    println!(
+                        "aggregate_type={} aggregate_id={} path={}",
+                        reference.aggregate_type, reference.aggregate_id, reference.path
+                    );
+                }
+            }
+        }
+        AggregateCommands::Migrate(args) => {
+            migrate_reference_fields(&config, args)?;
         }
         AggregateCommands::Get(args) => {
             let store =
@@ -708,6 +968,43 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 output["events"] = serde_json::to_value(filtered)?;
             }
 
+            if args.resolve {
+                let schemas = SchemaManager::load(config.schema_store_path())?;
+                let tenant = config.active_domain().to_string();
+                let depth = args
+                    .resolve_depth
+                    .unwrap_or(config.reference_default_depth)
+                    .min(config.reference_max_depth);
+                let resolved = resolve_references(
+                    tenant.clone(),
+                    state.clone(),
+                    &schemas,
+                    depth,
+                    |reference| {
+                        if !reference.domain.eq_ignore_ascii_case(&tenant) {
+                            return Ok(ReferenceFetchOutcome {
+                                status: ReferenceResolutionStatus::Forbidden,
+                                aggregate: None,
+                            });
+                        }
+                        match store
+                            .get_aggregate_state(&reference.aggregate_type, &reference.aggregate_id)
+                        {
+                            Ok(agg) => Ok(ReferenceFetchOutcome {
+                                status: ReferenceResolutionStatus::Ok,
+                                aggregate: Some(agg),
+                            }),
+                            Err(EventError::AggregateNotFound) => Ok(ReferenceFetchOutcome {
+                                status: ReferenceResolutionStatus::NotFound,
+                                aggregate: None,
+                            }),
+                            Err(err) => Err(err),
+                        }
+                    },
+                )?;
+                output["resolved"] = serde_json::to_value(resolved)?;
+            }
+
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         AggregateCommands::Apply(args) => {
@@ -742,10 +1039,12 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 None => None,
             };
 
+            let normalized = normalize_event_type(&event)?;
             let command = AppendCommand {
                 aggregate,
                 aggregate_id,
-                event,
+                event: normalized.normalized,
+                event_raw: normalized.original,
                 stage,
                 token,
                 payload: payload_value,
@@ -780,10 +1079,12 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 None => None,
             };
 
+            let normalized = normalize_event_type(&event)?;
             let command = AppendCommand {
                 aggregate,
                 aggregate_id,
-                event,
+                event: normalized.normalized,
+                event_raw: normalized.original,
                 stage,
                 token,
                 payload: None,
@@ -847,6 +1148,25 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 config.encryption_key()?,
                 config.snowflake_worker_id,
             )?;
+            let schemas = SchemaManager::load(config.schema_store_path())?;
+            let target = format!(
+                "{}#{}#{}",
+                config.active_domain(),
+                args.aggregate,
+                args.aggregate_id
+            );
+            let referrers = store.referrers_for_any_tenant(&target)?;
+            let (nullify, blockers) =
+                partition_referrers(&schemas, config.active_domain(), &referrers);
+            if !blockers.is_empty() {
+                bail!(
+                    "aggregate {}:{} cannot be archived; referenced by {}",
+                    args.aggregate,
+                    args.aggregate_id,
+                    blockers.into_iter().take(5).collect::<Vec<_>>().join(", ")
+                );
+            }
+            nullify_referrers_offline(&store, &schemas, config.active_domain(), &target, &nullify)?;
             let meta = store.set_archive(
                 &args.aggregate,
                 &args.aggregate_id,
@@ -909,7 +1229,17 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
 
             for staged_event in &staged_events {
                 ensure_snake_case("aggregate_type", &staged_event.aggregate)?;
-                ensure_snake_case("event_type", &staged_event.event)?;
+                let normalized = normalize_event_type(
+                    staged_event
+                        .event_raw
+                        .as_deref()
+                        .unwrap_or(&staged_event.event),
+                )?;
+                let event = normalized.normalized;
+                let event_raw = staged_event
+                    .event_raw
+                    .clone()
+                    .or(normalized.original.clone());
                 ensure_aggregate_id(&staged_event.aggregate_id)?;
                 ensure_payload_size(&staged_event.payload)?;
                 if let Some(ref metadata) = staged_event.metadata {
@@ -922,7 +1252,7 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                     Some(version) if version > 0 => false,
                     Some(_) | None => true,
                 };
-                ensure_first_event_rule(is_new, &staged_event.event)?;
+                ensure_first_event_rule(is_new, &event)?;
 
                 let schema_present = match schema_manager.get(&staged_event.aggregate) {
                     Ok(_) => true,
@@ -939,12 +1269,17 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                 if schema_present {
                     schema_manager.validate_event(
                         &staged_event.aggregate,
-                        &staged_event.event,
+                        &event,
                         &staged_event.payload,
                     )?;
                 }
 
-                tx.append(staged_event.to_append_event())?;
+                let mut evt = staged_event.to_append_event();
+                evt.event_type = event;
+                evt.event_type_raw = event_raw.clone();
+                evt.tenant = config.active_domain().to_string();
+                evt.reference_targets = Vec::new();
+                tx.append(evt)?;
             }
 
             let records = tx.commit()?;
@@ -1006,6 +1341,393 @@ fn maybe_auto_snapshot(store: &EventStore, schemas: &SchemaManager, record: &Eve
     }
 }
 
+fn normalize_references_offline(
+    schemas: &SchemaManager,
+    store: &EventStore,
+    tenant: &str,
+    aggregate: &str,
+    payload: Value,
+) -> Result<(Value, Vec<(String, String)>)> {
+    match schemas.get(aggregate) {
+        Ok(_) => {}
+        Err(EventError::SchemaNotFound) => return Ok((payload, Vec::new())),
+        Err(err) => return Err(err.into()),
+    };
+
+    let context = ReferenceContext {
+        domain: tenant,
+        aggregate_type: aggregate,
+    };
+    let mut resolver = |reference: &AggregateReference,
+                        _integrity: ReferenceIntegrity|
+     -> eventdbx::error::Result<ReferenceResolutionStatus> {
+        if !reference.domain.eq_ignore_ascii_case(tenant) {
+            return Ok(ReferenceResolutionStatus::Forbidden);
+        }
+        match store.aggregate_version(&reference.aggregate_type, &reference.aggregate_id) {
+            Ok(Some(_)) => Ok(ReferenceResolutionStatus::Ok),
+            // The schema layer will turn NotFound into a validation error for strong integrity.
+            Ok(None) => Ok(ReferenceResolutionStatus::NotFound),
+            Err(err) => Err(err.into()),
+        }
+    };
+
+    let (normalized_payload, outcomes) =
+        schemas.normalize_references(aggregate, payload, context, &mut resolver)?;
+    let targets = outcomes
+        .iter()
+        .map(|outcome| (outcome.reference.to_canonical(), outcome.path.clone()))
+        .collect();
+    Ok((normalized_payload, targets))
+}
+
+fn migrate_reference_fields(config: &Config, args: AggregateMigrateRefsArgs) -> Result<()> {
+    let aggregate = args.aggregate.trim();
+    if aggregate.is_empty() {
+        bail!("aggregate name cannot be empty");
+    }
+
+    let mut fields: Vec<String> = args
+        .fields
+        .into_iter()
+        .map(|field| field.trim().to_string())
+        .filter(|field| !field.is_empty())
+        .collect();
+    fields.sort();
+    fields.dedup();
+    if fields.is_empty() {
+        bail!("at least one --field must be provided");
+    }
+
+    let note = match args.note {
+        Some(text) => {
+            if text.chars().count() > MAX_EVENT_NOTE_LENGTH {
+                bail!("note cannot exceed {} characters", MAX_EVENT_NOTE_LENGTH);
+            }
+            Some(text)
+        }
+        None => None,
+    };
+
+    let event = normalize_event_type(&args.event)?;
+    let event_type = event.normalized.clone();
+    let event_type_raw = event.original.clone();
+    let aggregate_id_filter = args.aggregate_id.as_deref().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+    if let Some(ref id) = aggregate_id_filter {
+        ensure_aggregate_id(id)?;
+    }
+
+    let schemas = SchemaManager::load(config.schema_store_path())?;
+    let schema = schemas.get(aggregate)?;
+
+    for field in &fields {
+        let settings = schema.column_types.get(field).ok_or_else(|| {
+            anyhow!(
+                "field '{}' is not defined for aggregate {}; set a reference column first",
+                field,
+                aggregate
+            )
+        })?;
+        if settings.rules.format != Some(FieldFormat::Reference) {
+            bail!(
+                "field '{}' is not marked as a reference field; set --type reference or --format reference",
+                field
+            );
+        }
+    }
+
+    let encryption = config.encryption_key()?;
+    let store = match EventStore::open(
+        config.event_store_path(),
+        encryption,
+        config.snowflake_worker_id,
+    ) {
+        Ok(store) => store,
+        Err(EventError::Storage(message)) if is_lock_error_message(&message) => {
+            bail!(
+                "event store is locked by a running server; stop it before running the migration.\n{}",
+                message
+            );
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    let assignments = if config.multi_tenant() {
+        Some(TenantAssignmentStore::open(config.tenant_meta_path())?)
+    } else {
+        None
+    };
+    if let Some(assignments) = assignments.as_ref() {
+        enforce_offline_tenant_quota(&config, &store, assignments)?;
+    }
+
+    let mut aggregate_ids = if let Some(id) = aggregate_id_filter {
+        vec![id]
+    } else {
+        store.list_aggregate_ids(aggregate)?
+    };
+    aggregate_ids.sort();
+    aggregate_ids.dedup();
+
+    if aggregate_ids.is_empty() {
+        println!("no aggregates found for '{}'", aggregate);
+        return Ok(());
+    }
+
+    let tenant = config.active_domain().to_string();
+    let mut planned = 0usize;
+    let mut applied = 0usize;
+    let mut unchanged = 0usize;
+    let mut skipped = 0usize;
+    let mut failures = 0usize;
+
+    for aggregate_id in aggregate_ids {
+        let state = match store.get_aggregate_state(aggregate, &aggregate_id) {
+            Ok(state) => state,
+            Err(err) => {
+                failures += 1;
+                eprintln!(
+                    "aggregate_type={} aggregate_id={} failed to load state: {}",
+                    aggregate, aggregate_id, err
+                );
+                continue;
+            }
+        };
+
+        if state.archived {
+            skipped += 1;
+            continue;
+        }
+        if state.version == 0 {
+            skipped += 1;
+            continue;
+        }
+
+        let mut original_map = JsonMap::new();
+        for field in &fields {
+            if let Some(value) = select_state_field(&state.state, field) {
+                original_map.insert(field.clone(), value);
+            }
+        }
+        if original_map.is_empty() {
+            skipped += 1;
+            continue;
+        }
+
+        let payload_value = Value::Object(original_map.clone());
+        let (normalized_payload, reference_targets) =
+            match normalize_references_offline(&schemas, &store, &tenant, aggregate, payload_value)
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    failures += 1;
+                    eprintln!(
+                        "aggregate_type={} aggregate_id={} failed to normalize references: {}",
+                        aggregate, aggregate_id, err
+                    );
+                    continue;
+                }
+            };
+
+        let normalized_map = match normalized_payload.as_object() {
+            Some(map) => map,
+            None => {
+                failures += 1;
+                eprintln!(
+                    "aggregate_type={} aggregate_id={} produced non-object payload",
+                    aggregate, aggregate_id
+                );
+                continue;
+            }
+        };
+
+        let mut changed_fields = Vec::new();
+        for field in &fields {
+            let before = original_map.get(field);
+            let after = normalized_map.get(field);
+            if before != after {
+                changed_fields.push(field.clone());
+            }
+        }
+
+        if changed_fields.is_empty() {
+            unchanged += 1;
+            continue;
+        }
+
+        planned += 1;
+        if args.dry_run {
+            println!(
+                "aggregate_type={} aggregate_id={} would update fields: {}",
+                aggregate,
+                aggregate_id,
+                changed_fields.join(", ")
+            );
+            continue;
+        }
+
+        if let Err(err) = ensure_payload_size(&normalized_payload) {
+            failures += 1;
+            eprintln!(
+                "aggregate_type={} aggregate_id={} payload too large: {}",
+                aggregate, aggregate_id, err
+            );
+            continue;
+        }
+
+        if let Err(err) = schemas.validate_event(aggregate, &event_type, &normalized_payload) {
+            failures += 1;
+            eprintln!(
+                "aggregate_type={} aggregate_id={} failed schema validation: {}",
+                aggregate, aggregate_id, err
+            );
+            continue;
+        }
+
+        match store.append(AppendEvent {
+            aggregate_type: aggregate.to_string(),
+            aggregate_id: aggregate_id.clone(),
+            event_type: event_type.clone(),
+            event_type_raw: event_type_raw.clone(),
+            payload: normalized_payload,
+            metadata: None,
+            issued_by: None,
+            note: note.clone(),
+            tenant: tenant.clone(),
+            reference_targets,
+        }) {
+            Ok(_) => {
+                applied += 1;
+                println!(
+                    "aggregate_type={} aggregate_id={} updated fields: {}",
+                    aggregate,
+                    aggregate_id,
+                    changed_fields.join(", ")
+                );
+            }
+            Err(err) => {
+                failures += 1;
+                eprintln!(
+                    "aggregate_type={} aggregate_id={} failed to append event: {}",
+                    aggregate, aggregate_id, err
+                );
+            }
+        }
+    }
+
+    if !args.dry_run {
+        if let Some(assignments) = assignments.as_ref() {
+            enforce_offline_tenant_quota(&config, &store, assignments)?;
+        }
+    }
+
+    println!(
+        "migrate references summary: planned={} applied={} unchanged={} skipped={} errors={}",
+        planned, applied, unchanged, skipped, failures
+    );
+    if args.dry_run {
+        println!("dry-run only; no events were written");
+    }
+    Ok(())
+}
+
+fn partition_referrers(
+    schemas: &SchemaManager,
+    tenant: &str,
+    referrers: &[(String, String, String, String)],
+) -> (Vec<(String, String, String, String)>, Vec<String>) {
+    let mut nullify = Vec::new();
+    let mut blockers = Vec::new();
+    for (ref_tenant, agg, id, path) in referrers {
+        if ref_tenant != tenant {
+            blockers.push(format!("{ref_tenant}:{agg}:{id} ({path})"));
+            continue;
+        }
+        let cascade = schemas
+            .reference_rules_for_path(agg, path)
+            .map(|rules| rules.cascade)
+            .unwrap_or_default();
+        match cascade {
+            ReferenceCascade::Nullify => nullify.push((
+                ref_tenant.to_string(),
+                agg.to_string(),
+                id.to_string(),
+                path.to_string(),
+            )),
+            _ => blockers.push(format!("{ref_tenant}:{agg}:{id} ({path})")),
+        }
+    }
+    (nullify, blockers)
+}
+
+fn nullify_referrers_offline(
+    store: &EventStore,
+    schemas: &SchemaManager,
+    tenant: &str,
+    target: &str,
+    referrers: &[(String, String, String, String)],
+) -> Result<()> {
+    if referrers.is_empty() {
+        return Ok(());
+    }
+    let mut grouped: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for (ref_tenant, agg, id, path) in referrers {
+        if ref_tenant != tenant {
+            continue;
+        }
+        if schemas
+            .reference_rules_for_path(agg, path)
+            .map(|rules| rules.cascade)
+            .unwrap_or_default()
+            != ReferenceCascade::Nullify
+        {
+            continue;
+        }
+        grouped
+            .entry((agg.clone(), id.clone()))
+            .or_default()
+            .insert(json_pointer_from_path(path)?);
+    }
+
+    for ((aggregate, aggregate_id), paths) in grouped {
+        let patch_ops: Vec<Value> = paths
+            .into_iter()
+            .map(|path| {
+                json!({
+                    "op": "replace",
+                    "path": path,
+                    "value": Value::Null
+                })
+            })
+            .collect();
+        if patch_ops.is_empty() {
+            continue;
+        }
+        let patch = Value::Array(patch_ops);
+        let payload = store.prepare_payload_from_patch(&aggregate, &aggregate_id, &patch)?;
+        store.append(AppendEvent {
+            aggregate_type: aggregate.clone(),
+            aggregate_id: aggregate_id.clone(),
+            event_type: "_ref_nullify".into(),
+            event_type_raw: Some("_ref_nullify".into()),
+            payload,
+            metadata: None,
+            issued_by: None,
+            note: Some(format!("auto-nullify due to {target}")),
+            tenant: tenant.to_string(),
+            reference_targets: Vec::new(),
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn ensure_schema_for_mode(
     mode: RestrictMode,
@@ -1057,7 +1779,9 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
     }
 
     ensure_snake_case("aggregate_type", &aggregate)?;
-    ensure_snake_case("event_type", &event)?;
+    let normalized_event = normalize_event_type(&event)?;
+    let event = normalized_event.normalized;
+    let event_raw = normalized_event.original;
     ensure_aggregate_id(&aggregate_id)?;
     ensure_payload_size(&payload)?;
 
@@ -1102,14 +1826,25 @@ fn execute_create_command(config: &Config, command: CreateCommand) -> Result<()>
             }
 
             let plugins = PluginManager::from_config(&config)?;
+            let (normalized_payload, reference_targets) = normalize_references_offline(
+                &schema_manager,
+                &store,
+                config.active_domain(),
+                &aggregate,
+                payload.clone(),
+            )?;
+            ensure_payload_size(&normalized_payload)?;
             let record = store.append(AppendEvent {
                 aggregate_type: aggregate.clone(),
                 aggregate_id: aggregate_id.clone(),
                 event_type: event.clone(),
-                payload: payload.clone(),
+                event_type_raw: event_raw.clone(),
+                payload: normalized_payload.clone(),
                 metadata: metadata.clone(),
                 issued_by: None,
                 note: note.clone(),
+                tenant: config.active_domain().to_string(),
+                reference_targets,
             })?;
 
             maybe_auto_snapshot(&store, &schema_manager, &record);
@@ -1198,6 +1933,7 @@ struct AppendCommand {
     aggregate: String,
     aggregate_id: String,
     event: String,
+    event_raw: Option<String>,
     stage: bool,
     token: Option<String>,
     payload: Option<Value>,
@@ -1212,6 +1948,7 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
         aggregate,
         aggregate_id,
         event,
+        event_raw,
         stage,
         token,
         payload,
@@ -1233,7 +1970,9 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
     }
 
     ensure_snake_case("aggregate_type", &aggregate)?;
-    ensure_snake_case("event_type", &event)?;
+    let normalized_event = normalize_event_type(event_raw.as_deref().unwrap_or(&event))?;
+    let event_raw = event_raw.or(normalized_event.original.clone());
+    let event = normalized_event.normalized;
     ensure_aggregate_id(&aggregate_id)?;
 
     let restrict_mode = config.restrict;
@@ -1292,16 +2031,27 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                     bail!("aggregate {}::{} does not exist", aggregate, aggregate_id);
                 }
                 ensure_first_event_rule(is_new, &event)?;
+                let (normalized_payload, reference_targets) = normalize_references_offline(
+                    &schema_manager,
+                    &store,
+                    config.active_domain(),
+                    &aggregate,
+                    effective_payload.clone(),
+                )?;
+                ensure_payload_size(&normalized_payload)?;
                 {
                     let mut tx = store.transaction()?;
                     tx.append(AppendEvent {
                         aggregate_type: aggregate.clone(),
                         aggregate_id: aggregate_id.clone(),
                         event_type: event.clone(),
-                        payload: effective_payload.clone(),
+                        event_type_raw: event_raw.clone(),
+                        payload: normalized_payload.clone(),
                         metadata: metadata.clone(),
                         issued_by: None,
                         note: note.clone(),
+                        tenant: config.active_domain().to_string(),
+                        reference_targets: reference_targets.clone(),
                     })?;
                 }
 
@@ -1309,7 +2059,8 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                     aggregate: aggregate.clone(),
                     aggregate_id: aggregate_id.clone(),
                     event: event.clone(),
-                    payload: effective_payload,
+                    event_raw: event_raw.clone(),
+                    payload: normalized_payload,
                     metadata: metadata.clone(),
                     issued_by: None,
                     note: note.clone(),
@@ -1367,14 +2118,25 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
                 bail!("aggregate {}::{} does not exist", aggregate, aggregate_id);
             }
             ensure_first_event_rule(is_new, &event)?;
+            let (normalized_payload, reference_targets) = normalize_references_offline(
+                &schema_manager,
+                &store,
+                config.active_domain(),
+                &aggregate,
+                effective_payload.clone(),
+            )?;
+            ensure_payload_size(&normalized_payload)?;
             let record = store.append(AppendEvent {
                 aggregate_type: aggregate.clone(),
                 aggregate_id: aggregate_id.clone(),
                 event_type: event.clone(),
-                payload: effective_payload.clone(),
+                event_type_raw: event_raw.clone(),
+                payload: normalized_payload.clone(),
                 metadata: metadata.clone(),
                 issued_by: None,
                 note: note.clone(),
+                tenant: config.active_domain().to_string(),
+                reference_targets,
             })?;
             if let Some(assignments) = assignments.as_ref() {
                 let usage = store.storage_usage_bytes()?;
@@ -2115,6 +2877,8 @@ struct StagedEvent {
     aggregate: String,
     aggregate_id: String,
     event: String,
+    #[serde(default)]
+    event_raw: Option<String>,
     #[serde(default = "default_event_payload")]
     payload: Value,
     #[serde(default)]
@@ -2137,10 +2901,13 @@ impl StagedEvent {
             aggregate_type: self.aggregate.clone(),
             aggregate_id: self.aggregate_id.clone(),
             event_type: self.event.clone(),
+            event_type_raw: self.event_raw.clone(),
             payload: self.payload.clone(),
             metadata: self.metadata.clone(),
             issued_by: self.issued_by.clone().map(Into::into),
             note: self.note.clone(),
+            tenant: "default".to_string(),
+            reference_targets: Vec::new(),
         }
     }
 }
@@ -2197,7 +2964,9 @@ fn save_staged_events(path: &Path, events: &[StagedEvent]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eventdbx::schema::CreateSchemaInput;
+    use eventdbx::reference::ReferenceRules;
+    use eventdbx::schema::{ColumnType, CreateSchemaInput, FieldRules, SchemaUpdate};
+    use serde_json::json;
 
     #[test]
     fn ensure_schema_for_mode_respects_modes() {
@@ -2224,5 +2993,102 @@ mod tests {
 
         ensure_schema_for_mode(RestrictMode::Strict, &manager, "account")
             .expect("strict mode accepts existing schema");
+    }
+
+    #[test]
+    fn migrate_reference_fields_normalizes_and_indexes() {
+        let dir = tempdir().expect("tempdir should be created");
+        let mut config = Config::default();
+        config.data_dir = dir.path().join("data");
+        config.domain = "default".into();
+        fs::create_dir_all(config.domain_data_dir()).expect("domain data dir should exist");
+
+        let manager = SchemaManager::load(config.schema_store_path()).expect("schema manager");
+        manager
+            .create(CreateSchemaInput {
+                aggregate: "farm".into(),
+                events: vec!["created".into(), "migrated".into()],
+                snapshot_threshold: None,
+            })
+            .expect("schema creation");
+
+        let mut type_update = SchemaUpdate::default();
+        type_update.column_type = Some(("address".into(), Some(ColumnType::Text)));
+        manager.update("farm", type_update).expect("type update");
+
+        let mut rules = FieldRules::default();
+        rules.format = Some(FieldFormat::Reference);
+        rules.reference = Some(ReferenceRules {
+            integrity: ReferenceIntegrity::Weak,
+            ..ReferenceRules::default()
+        });
+        let mut rules_update = SchemaUpdate::default();
+        rules_update.column_rules = Some(("address".into(), Some(rules)));
+        manager.update("farm", rules_update).expect("rules update");
+
+        {
+            let store = EventStore::open(
+                config.event_store_path(),
+                config.encryption_key().expect("encryption key"),
+                config.snowflake_worker_id,
+            )
+            .expect("event store");
+            store
+                .append(AppendEvent {
+                    aggregate_type: "farm".into(),
+                    aggregate_id: "1".into(),
+                    event_type: "created".into(),
+                    event_type_raw: None,
+                    payload: json!({ "address": "#123" }),
+                    metadata: None,
+                    issued_by: None,
+                    note: None,
+                    tenant: config.active_domain().to_string(),
+                    reference_targets: Vec::new(),
+                })
+                .expect("seed event");
+
+            let state = store.get_aggregate_state("farm", "1").expect("state fetch");
+            assert_eq!(state.state.get("address").map(String::as_str), Some("#123"));
+            let canonical = "default#farm#123";
+            let referrers = store
+                .referrers_for_any_tenant(canonical)
+                .expect("referrer lookup");
+            assert!(referrers.is_empty(), "index should not be populated yet");
+        }
+
+        migrate_reference_fields(
+            &config,
+            AggregateMigrateRefsArgs {
+                aggregate: "farm".into(),
+                event: "migrated".into(),
+                fields: vec!["address".into()],
+                aggregate_id: Some("1".into()),
+                dry_run: false,
+                note: None,
+            },
+        )
+        .expect("migration should succeed");
+
+        let store = EventStore::open_read_only(
+            config.event_store_path(),
+            config.encryption_key().expect("encryption key"),
+        )
+        .expect("reopen store");
+        let state = store
+            .get_aggregate_state("farm", "1")
+            .expect("state fetch after migration");
+        assert_eq!(
+            state.state.get("address").map(String::as_str),
+            Some("default#farm#123")
+        );
+        let referrers = store
+            .referrers_for_any_tenant("default#farm#123")
+            .expect("referrer lookup after migration");
+        assert_eq!(referrers.len(), 1);
+        assert_eq!(referrers[0].0, "default");
+        assert_eq!(referrers[0].1, "farm");
+        assert_eq!(referrers[0].2, "1");
+        assert_eq!(referrers[0].3, "address");
     }
 }

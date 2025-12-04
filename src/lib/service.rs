@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -8,6 +8,11 @@ use crate::{
     error::{EventError, Result},
     filter::FilterExpr,
     plugin::PublishTarget,
+    reference::{
+        AggregateReference, ReferenceCascade, ReferenceContext, ReferenceFetchOutcome,
+        ReferenceIntegrity, ReferenceResolutionStatus, Referrer, ResolvedAggregate,
+        resolve_references,
+    },
     restrict::{self, RestrictMode},
     schema::SchemaManager,
     snowflake::SnowflakeId,
@@ -20,11 +25,11 @@ use crate::{
     token::{JwtClaims, TokenManager},
     validation::{
         ensure_aggregate_id, ensure_first_event_rule, ensure_metadata_extensions,
-        ensure_payload_size, ensure_snake_case,
+        ensure_payload_size, ensure_snake_case, json_pointer_from_path, normalize_event_type,
     },
 };
 use parking_lot::Mutex;
-use serde_json::Value;
+use serde_json::{self, Value};
 /// Shared context exposing the core store, schema, and token managers so
 /// higher-level surfaces (REST, GraphQL, gRPC, plugins) can be layered on
 /// top of a consistent API.
@@ -40,6 +45,8 @@ pub struct CoreContext {
     storage_quota_mb: Option<u64>,
     assignments: Arc<TenantAssignmentStore>,
     usage_cache: Arc<Mutex<StorageUsageCache>>,
+    reference_default_depth: usize,
+    reference_max_depth: usize,
 }
 
 const STORAGE_USAGE_REFRESH_EVENTS: u64 = 128;
@@ -87,6 +94,8 @@ impl CoreContext {
         storage_quota_mb: Option<u64>,
         initial_usage_bytes: Option<u64>,
         assignments: Arc<TenantAssignmentStore>,
+        reference_default_depth: usize,
+        reference_max_depth: usize,
     ) -> Self {
         Self {
             tokens,
@@ -99,6 +108,8 @@ impl CoreContext {
             storage_quota_mb,
             assignments,
             usage_cache: Arc::new(Mutex::new(StorageUsageCache::new(initial_usage_bytes))),
+            reference_default_depth,
+            reference_max_depth,
         }
     }
 
@@ -126,12 +137,87 @@ impl CoreContext {
         self.restrict
     }
 
+    pub fn reference_default_depth(&self) -> usize {
+        self.reference_default_depth
+    }
+
+    pub fn reference_max_depth(&self) -> usize {
+        self.reference_max_depth
+    }
+
     pub fn list_page_size(&self) -> usize {
         self.list_page_size
     }
 
     pub fn page_limit(&self) -> usize {
         self.page_limit
+    }
+
+    fn inbound_referrers_for(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        // Reference targets are domain-scoped during normalization, so we only need
+        // to inspect the current tenant instead of scanning every tenant's index.
+        let target = format!("{}#{}#{}", self.tenant_id(), aggregate_type, aggregate_id);
+        let tenant = self.tenant_id().to_string();
+        self.store
+            .referrers_for(&tenant, &target)
+            .map(|refs| {
+                refs.into_iter()
+                    .map(|(agg_type, agg_id, path)| (tenant.clone(), agg_type, agg_id, path))
+                    .collect()
+            })
+            .map_err(Into::into)
+    }
+
+    fn nullify_referrers(
+        &self,
+        referrers: &[(String, String, String, String)],
+        target: &str,
+    ) -> Result<()> {
+        if referrers.is_empty() {
+            return Ok(());
+        }
+        let store = self.store();
+        let mut grouped: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+        for (_, agg_type, agg_id, path) in referrers {
+            let pointer = json_pointer_from_path(path)?;
+            grouped
+                .entry((agg_type.clone(), agg_id.clone()))
+                .or_default()
+                .insert(pointer);
+        }
+
+        for ((agg_type, agg_id), paths) in grouped {
+            let patch_ops: Vec<Value> = paths
+                .into_iter()
+                .map(|path| {
+                    serde_json::json!({
+                        "op": "replace",
+                        "path": path,
+                        "value": Value::Null
+                    })
+                })
+                .collect();
+            let patch = Value::Array(patch_ops);
+            let payload = store.prepare_payload_from_patch(&agg_type, &agg_id, &patch)?;
+            store.append(AppendEvent {
+                aggregate_type: agg_type.clone(),
+                aggregate_id: agg_id.clone(),
+                event_type: "_ref_nullify".into(),
+                event_type_raw: Some("_ref_nullify".into()),
+                payload,
+                metadata: None,
+                issued_by: None,
+                note: Some(format!("auto-nullify due to {}", target)),
+                tenant: self.tenant_id.clone(),
+                reference_targets: Vec::new(),
+            })?;
+            self.note_storage_mutation()?;
+        }
+        Ok(())
     }
 
     pub fn is_hidden_aggregate(&self, aggregate_type: &str) -> bool {
@@ -144,11 +230,6 @@ impl CoreContext {
     pub fn sanitize_aggregate(&self, mut aggregate: AggregateState) -> AggregateState {
         aggregate.state = self.filter_state_map(&aggregate.aggregate_type, aggregate.state);
         aggregate
-    }
-
-    #[allow(dead_code)]
-    fn storage_usage_bytes(&self) -> Result<u64> {
-        self.maybe_refresh_usage(false)
     }
 
     fn enforce_storage_quota(&self) -> Result<()> {
@@ -238,8 +319,13 @@ impl CoreContext {
             return Ok((aggregates, None));
         }
 
-        self.store
-            .aggregates_page_with_transform(cursor, effective_take, scope, &mut transform)
+        self.store.aggregates_page_with_transform(
+            cursor,
+            effective_take,
+            scope,
+            true,
+            &mut transform,
+        )
     }
 
     pub fn get_aggregate(
@@ -260,6 +346,64 @@ impl CoreContext {
             Err(EventError::AggregateNotFound) => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    pub fn resolve_aggregate(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        depth: Option<usize>,
+    ) -> Result<Option<ResolvedAggregate>> {
+        let Some(root) = self.get_aggregate(token, aggregate_type, aggregate_id)? else {
+            return Ok(None);
+        };
+
+        let schemas = self.schemas();
+        let store = self.store();
+        let tokens = self.tokens();
+        let tenant = self.tenant_id().to_string();
+        let hops = depth
+            .unwrap_or(self.reference_default_depth)
+            .min(self.reference_max_depth);
+
+        let resolved = resolve_references(tenant.clone(), root, &schemas, hops, |reference| {
+            if !reference.domain.eq_ignore_ascii_case(&tenant) {
+                return Ok(ReferenceFetchOutcome {
+                    status: ReferenceResolutionStatus::Forbidden,
+                    aggregate: None,
+                });
+            }
+
+            let resource = format!(
+                "aggregate:{}:{}",
+                reference.aggregate_type, reference.aggregate_id
+            );
+            match tokens.authorize_action(token, "aggregate.read", Some(resource.as_str())) {
+                Ok(_) => {}
+                Err(EventError::Unauthorized) => {
+                    return Ok(ReferenceFetchOutcome {
+                        status: ReferenceResolutionStatus::Forbidden,
+                        aggregate: None,
+                    });
+                }
+                Err(err) => return Err(err),
+            }
+
+            match store.get_aggregate_state(&reference.aggregate_type, &reference.aggregate_id) {
+                Ok(aggregate) => Ok(ReferenceFetchOutcome {
+                    status: ReferenceResolutionStatus::Ok,
+                    aggregate: Some(self.sanitize_aggregate(aggregate)),
+                }),
+                Err(EventError::AggregateNotFound) => Ok(ReferenceFetchOutcome {
+                    status: ReferenceResolutionStatus::NotFound,
+                    aggregate: None,
+                }),
+                Err(err) => Err(err),
+            }
+        })?;
+
+        Ok(Some(resolved))
     }
 
     pub fn select_aggregate_fields(
@@ -332,6 +476,53 @@ impl CoreContext {
         )
     }
 
+    pub fn list_referrers(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Vec<Referrer>> {
+        ensure_snake_case("aggregate_type", aggregate_type)?;
+        ensure_aggregate_id(aggregate_id)?;
+
+        if self.is_hidden_aggregate(aggregate_type) {
+            return Err(EventError::AggregateNotFound);
+        }
+
+        let resource = Self::aggregate_resource(aggregate_type, aggregate_id);
+        let claims: JwtClaims =
+            self.tokens()
+                .authorize_action(token, "aggregate.read", Some(resource.as_str()))?;
+
+        if self
+            .store
+            .aggregate_version(aggregate_type, aggregate_id)?
+            .is_none()
+        {
+            return Err(EventError::AggregateNotFound);
+        }
+
+        let target = format!("{}#{}#{}", self.tenant_id(), aggregate_type, aggregate_id);
+        let referrers = self.store.referrers_for(self.tenant_id(), &target)?;
+        Ok(referrers
+            .into_iter()
+            .filter_map(|(agg_type, agg_id, path)| {
+                if self.is_hidden_aggregate(&agg_type) {
+                    return None;
+                }
+                let resource = Self::aggregate_resource(&agg_type, &agg_id);
+                if !claims.allows_resource(Some(resource.as_str())) {
+                    return None;
+                }
+                Some(Referrer {
+                    aggregate_type: agg_type,
+                    aggregate_id: agg_id,
+                    path,
+                })
+            })
+            .collect())
+    }
+
     pub fn verify_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<String> {
         if self.is_hidden_aggregate(aggregate_type) {
             return Err(EventError::AggregateNotFound);
@@ -345,6 +536,7 @@ impl CoreContext {
             aggregate_type,
             aggregate_id,
             event_type,
+            event_type_raw,
             payload,
             metadata,
             note,
@@ -352,7 +544,10 @@ impl CoreContext {
         } = input;
 
         ensure_snake_case("aggregate_type", &aggregate_type)?;
-        ensure_snake_case("event_type", &event_type)?;
+        let normalized_event =
+            normalize_event_type(event_type_raw.as_deref().unwrap_or(&event_type))?;
+        let event_type_raw = event_type_raw.or(normalized_event.original.clone());
+        let event_type = normalized_event.normalized;
         ensure_aggregate_id(&aggregate_id)?;
         if let Some(ref metadata) = metadata {
             ensure_metadata_extensions(metadata)?;
@@ -384,6 +579,7 @@ impl CoreContext {
             aggregate_type: aggregate_type.clone(),
             aggregate_id: aggregate_id.clone(),
             event_type,
+            event_type_raw,
             payload: Some(payload),
             patch: None,
             metadata,
@@ -420,6 +616,38 @@ impl CoreContext {
         let comment = normalize_optional_note(note);
 
         let store = self.store();
+        if archived {
+            let referrers = self.inbound_referrers_for(&aggregate_type, &aggregate_id)?;
+            let mut blockers = Vec::new();
+            let mut nullify = Vec::new();
+            for (tenant, agg, id, path) in referrers {
+                if tenant != self.tenant_id() {
+                    blockers.push(format!("{tenant}:{agg}:{id} ({path})"));
+                    continue;
+                }
+                let cascade = self
+                    .schemas
+                    .reference_rules_for_path(&agg, &path)
+                    .map(|rules| rules.cascade)
+                    .unwrap_or_default();
+                match cascade {
+                    ReferenceCascade::Nullify => nullify.push((tenant, agg, id, path)),
+                    _ => blockers.push(format!("{tenant}:{agg}:{id} ({path})")),
+                }
+            }
+
+            if !blockers.is_empty() {
+                return Err(EventError::SchemaViolation(format!(
+                    "aggregate {}:{} cannot be archived; referenced by {}",
+                    aggregate_type,
+                    aggregate_id,
+                    blockers.into_iter().take(5).collect::<Vec<_>>().join(", ")
+                )));
+            }
+
+            let target = format!("{}#{}#{}", self.tenant_id(), aggregate_type, aggregate_id);
+            self.nullify_referrers(&nullify, &target)?;
+        }
         let state = store.set_archive(&aggregate_type, &aggregate_id, archived, comment)?;
         Ok(self.sanitize_aggregate(state))
     }
@@ -529,6 +757,7 @@ impl CoreContext {
             aggregate_type,
             aggregate_id,
             event_type,
+            event_type_raw,
             payload,
             patch,
             metadata,
@@ -557,7 +786,10 @@ impl CoreContext {
         };
 
         ensure_snake_case("aggregate_type", &aggregate_type)?;
-        ensure_snake_case("event_type", &event_type)?;
+        let normalized_event =
+            normalize_event_type(event_type_raw.as_deref().unwrap_or(&event_type))?;
+        let event_type_raw = event_type_raw.or(normalized_event.original.clone());
+        let event_type = normalized_event.normalized;
         ensure_aggregate_id(&aggregate_id)?;
         if let Some(ref metadata) = metadata {
             ensure_metadata_extensions(metadata)?;
@@ -583,7 +815,8 @@ impl CoreContext {
             self.tokens()
                 .authorize_action(&token, "aggregate.append", Some(resource.as_str()))?;
 
-        let effective_payload = match event_body {
+        let mut reference_targets = Vec::new();
+        let mut effective_payload = match event_body {
             EventBody::Payload(payload) => {
                 ensure_payload_size(&payload)?;
                 payload
@@ -619,6 +852,48 @@ impl CoreContext {
 
         if schema_present {
             schemas.validate_event(&aggregate_type, &event_type, &effective_payload)?;
+            let reference_context = ReferenceContext {
+                domain: self.tenant_id(),
+                aggregate_type: &aggregate_type,
+            };
+            let store = self.store();
+            let tokens = self.tokens();
+            let tenant = self.tenant_id().to_string();
+            let mut resolver = move |reference: &AggregateReference,
+                                     _integrity: ReferenceIntegrity|
+                  -> Result<ReferenceResolutionStatus> {
+                if !reference.domain.eq_ignore_ascii_case(tenant.as_str()) {
+                    return Ok(ReferenceResolutionStatus::Forbidden);
+                }
+                let resource = format!(
+                    "aggregate:{}:{}",
+                    reference.aggregate_type, reference.aggregate_id
+                );
+                match tokens.authorize_action(&token, "aggregate.read", Some(resource.as_str())) {
+                    Ok(_) => {}
+                    Err(EventError::Unauthorized) => {
+                        return Ok(ReferenceResolutionStatus::Forbidden);
+                    }
+                    Err(err) => return Err(err),
+                }
+                match store.aggregate_version(&reference.aggregate_type, &reference.aggregate_id) {
+                    Ok(Some(_)) => Ok(ReferenceResolutionStatus::Ok),
+                    Ok(None) => Ok(ReferenceResolutionStatus::NotFound),
+                    Err(err) => Err(err),
+                }
+            };
+            let (normalized_payload, outcomes) = schemas.normalize_references(
+                &aggregate_type,
+                effective_payload,
+                reference_context,
+                &mut resolver,
+            )?;
+            effective_payload = normalized_payload;
+            ensure_payload_size(&effective_payload)?;
+            reference_targets = outcomes
+                .iter()
+                .map(|outcome| (outcome.reference.to_canonical(), outcome.path.clone()))
+                .collect();
         }
 
         let issued_by: Option<ActorClaims> = claims.actor_claims();
@@ -630,10 +905,13 @@ impl CoreContext {
             aggregate_type,
             aggregate_id,
             event_type,
+            event_type_raw,
             payload: effective_payload,
             metadata,
             issued_by,
             note,
+            tenant: self.tenant_id.clone(),
+            reference_targets,
         })?;
         self.note_storage_mutation()?;
         Ok(record)
@@ -715,6 +993,7 @@ pub struct AppendEventInput {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub event_type: String,
+    pub event_type_raw: Option<String>,
     pub payload: Option<Value>,
     pub patch: Option<Value>,
     pub metadata: Option<Value>,
@@ -728,6 +1007,7 @@ pub struct CreateAggregateInput {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub event_type: String,
+    pub event_type_raw: Option<String>,
     pub payload: Value,
     pub metadata: Option<Value>,
     pub note: Option<String>,

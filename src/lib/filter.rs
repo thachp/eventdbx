@@ -58,6 +58,18 @@ impl FilterExpr {
         }
     }
 
+    /// Returns true when evaluating this filter requires reading aggregate state data
+    /// beyond the metadata stored alongside the aggregate (type/id/version/timestamps/etc).
+    pub fn requires_aggregate_state(&self) -> bool {
+        match self {
+            FilterExpr::And(children) | FilterExpr::Or(children) => children
+                .iter()
+                .any(|child| child.requires_aggregate_state()),
+            FilterExpr::Not(expr) => expr.requires_aggregate_state(),
+            FilterExpr::Comparison { field, .. } => !is_aggregate_meta_field(field),
+        }
+    }
+
     pub fn matches_event(&self, event: &EventRecord) -> bool {
         match self {
             FilterExpr::And(children) => children.iter().all(|child| child.matches_event(event)),
@@ -151,6 +163,24 @@ fn resolve_field_value(aggregate: &AggregateState, field: &str) -> Option<Compar
             _ => ComparableValue::Unsupported,
         }),
     }
+}
+
+fn is_aggregate_meta_field(field: &str) -> bool {
+    matches!(
+        field,
+        "aggregate_type"
+            | "aggregateType"
+            | "aggregate_id"
+            | "aggregateId"
+            | "merkle_root"
+            | "merkleRoot"
+            | "created_at"
+            | "createdAt"
+            | "updated_at"
+            | "updatedAt"
+            | "archived"
+            | "version"
+    )
 }
 
 fn resolve_event_value(event: &EventRecord, field: &str) -> Option<ComparableValue> {

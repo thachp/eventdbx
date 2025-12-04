@@ -8,11 +8,20 @@ use crate::{
 };
 
 pub const MAX_AGGREGATE_ID_LENGTH: usize = 128;
+pub const MAX_EVENT_TYPE_LENGTH: usize = 128;
 pub const MAX_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
 pub const MAX_EVENT_METADATA_BYTES: usize = 64 * 1024;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedEventType {
+    pub normalized: String,
+    pub original: Option<String>,
+}
 
 static SNAKE_CASE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z][a-z0-9_]*$").expect("valid snake_case regex"));
+static EVENT_TYPE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$").expect("valid event_type regex")
+});
 static AGGREGATE_ID_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,127})?$").expect("valid aggregate_id regex")
 });
@@ -26,6 +35,31 @@ pub fn ensure_snake_case(label: &str, value: &str) -> Result<()> {
         Err(EventError::InvalidSchema(format!(
             "{label} must be lowercase snake_case"
         )))
+    }
+}
+
+pub fn normalize_event_type(value: &str) -> Result<NormalizedEventType> {
+    if value.len() > MAX_EVENT_TYPE_LENGTH {
+        return Err(EventError::InvalidSchema(format!(
+            "event_type cannot exceed {} characters",
+            MAX_EVENT_TYPE_LENGTH
+        )));
+    }
+    if EVENT_TYPE_RE.is_match(value) {
+        let normalized = value.replace('.', "_");
+        let original = if normalized != value {
+            Some(value.to_string())
+        } else {
+            None
+        };
+        Ok(NormalizedEventType {
+            normalized,
+            original,
+        })
+    } else {
+        Err(EventError::InvalidSchema(
+            "event_type must be lowercase snake_case; dots may be used as separators".into(),
+        ))
     }
 }
 
@@ -115,6 +149,17 @@ pub fn ensure_metadata_extensions(metadata: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Convert a dot-separated reference path into a JSON Pointer string.
+/// An empty path is rejected to avoid unintentionally targeting the root.
+pub fn json_pointer_from_path(path: &str) -> Result<String> {
+    if path.is_empty() {
+        return Err(EventError::SchemaViolation(
+            "reference path cannot be empty".into(),
+        ));
+    }
+    Ok(format!("/{}", path.replace('.', "/")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +174,51 @@ mod tests {
     fn snake_case_validation_rejects_invalid_names() {
         let err = ensure_snake_case("event_type", "OrderCreated").unwrap_err();
         assert!(matches!(err, EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn event_type_normalization_accepts_dots() {
+        let normalized = normalize_event_type("person.created").expect("dot segments normalize");
+        assert_eq!(normalized.normalized, "person_created");
+        assert_eq!(normalized.original.as_deref(), Some("person.created"));
+    }
+
+    #[test]
+    fn event_type_normalization_rejects_uppercase() {
+        let err = normalize_event_type("Person.Created").unwrap_err();
+        assert!(matches!(err, EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn event_type_normalization_rejects_mixed_case_with_underscore() {
+        let err = normalize_event_type("Patient_Created").unwrap_err();
+        assert!(matches!(err, EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn event_type_normalization_rejects_hyphenated_segments() {
+        let err = normalize_event_type("patient-Created").unwrap_err();
+        assert!(matches!(err, EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn event_type_normalization_rejects_long_values() {
+        let too_long = format!("e{}", "x".repeat(MAX_EVENT_TYPE_LENGTH));
+        let err = normalize_event_type(&too_long).unwrap_err();
+        assert!(matches!(err, EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn json_pointer_from_path_rejects_empty() {
+        let err = json_pointer_from_path("").unwrap_err();
+        assert!(matches!(err, EventError::SchemaViolation(_)));
+    }
+
+    #[test]
+    fn event_type_normalization_passes_through_snake_case() {
+        let normalized = normalize_event_type("order_created").expect("snake_case passes through");
+        assert_eq!(normalized.normalized, "order_created");
+        assert_eq!(normalized.original, None);
     }
 
     #[test]

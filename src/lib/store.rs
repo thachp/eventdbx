@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering as StdOrdering,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, hash_map::Entry},
     convert::TryInto,
     fmt, fs, io,
     path::{Path, PathBuf},
@@ -29,6 +29,7 @@ use super::{
     error::{EventError, Result},
     merkle::{compute_merkle_root, empty_root},
     schema::MAX_EVENT_NOTE_LENGTH,
+    validation::MAX_EVENT_TYPE_LENGTH,
 };
 use crate::{
     filter::FilterExpr,
@@ -48,6 +49,8 @@ const PREFIX_META_CREATED_INDEX: &str = "meta-created";
 const PREFIX_META_UPDATED_INDEX: &str = "meta-updated";
 const PREFIX_META_CREATED_INDEX_ARCHIVED: &str = "meta-created-arch";
 const PREFIX_META_UPDATED_INDEX_ARCHIVED: &str = "meta-updated-arch";
+const PREFIX_REF_SOURCE: &str = "refsrc";
+const PREFIX_REF_TARGET: &str = "reftgt";
 const LOCK_RETRY_ATTEMPTS: usize = 5;
 const LOCK_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
@@ -56,6 +59,8 @@ pub struct EventRecord {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_type_raw: Option<String>,
     pub payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extensions: Option<Value>,
@@ -80,6 +85,24 @@ pub struct ActorClaims {
     pub user: String,
 }
 
+fn ensure_event_type_lengths(event_type: &str, event_type_raw: Option<&String>) -> Result<()> {
+    if event_type.len() > MAX_EVENT_TYPE_LENGTH {
+        return Err(EventError::InvalidSchema(format!(
+            "event_type cannot exceed {} characters",
+            MAX_EVENT_TYPE_LENGTH
+        )));
+    }
+    if let Some(raw) = event_type_raw {
+        if raw.len() > MAX_EVENT_TYPE_LENGTH {
+            return Err(EventError::InvalidSchema(format!(
+                "event_type_raw cannot exceed {} characters",
+                MAX_EVENT_TYPE_LENGTH
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl<'a> Transaction<'a> {
     pub fn append(&mut self, input: AppendEvent) -> Result<EventRecord> {
         if let Some(note) = input.note.as_ref() {
@@ -90,6 +113,9 @@ impl<'a> Transaction<'a> {
                 )));
             }
         }
+        ensure_event_type_lengths(&input.event_type, input.event_type_raw.as_ref())?;
+        let tenant = input.tenant.clone();
+        let references = input.reference_targets.clone();
         let key = AggregateKey::new(input.aggregate_type.clone(), input.aggregate_id.clone());
         let event_id = self.store.next_event_id();
         let (meta, state) = self.ensure_cache(&key)?;
@@ -105,6 +131,13 @@ impl<'a> Transaction<'a> {
             value: event_value,
         });
         self.pending_records.push(record.clone());
+
+        self.pending_refs.push(PendingRefUpdate {
+            tenant,
+            aggregate_type: record.aggregate_type.clone(),
+            aggregate_id: record.aggregate_id.clone(),
+            references,
+        });
         Ok(record)
     }
 
@@ -148,6 +181,17 @@ impl<'a> Transaction<'a> {
                 &mut batch,
                 state_key(aggregate_type, aggregate_id),
                 state_bytes,
+            )?;
+        }
+
+        for pending in self.pending_refs {
+            update_reference_index_inner(
+                &self.store.db,
+                &mut batch,
+                &pending.tenant,
+                &pending.aggregate_type,
+                &pending.aggregate_id,
+                &pending.references,
             )?;
         }
 
@@ -198,10 +242,12 @@ fn apply_event(
         aggregate_type,
         aggregate_id,
         event_type,
+        event_type_raw,
         payload,
         metadata,
         issued_by,
         note,
+        ..
     } = input;
 
     debug_assert_eq!(&meta.aggregate_type, &aggregate_type);
@@ -231,6 +277,7 @@ fn apply_event(
         aggregate_type,
         aggregate_id,
         event_type,
+        event_type_raw,
         payload,
         extensions: metadata,
         metadata: EventMetadata {
@@ -365,10 +412,15 @@ pub struct AppendEvent {
     pub aggregate_type: String,
     pub aggregate_id: String,
     pub event_type: String,
+    pub event_type_raw: Option<String>,
     pub payload: Value,
     pub metadata: Option<Value>,
     pub issued_by: Option<ActorClaims>,
     pub note: Option<String>,
+    /// Tenant that owns the aggregate/event (used for storage and quotas).
+    pub tenant: String,
+    /// (canonical_target, path) pairs for reference updates; path is where the ref lives on the aggregate.
+    pub reference_targets: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1350,6 +1402,26 @@ struct PendingEvent {
     value: Vec<u8>,
 }
 
+struct PendingRefUpdate {
+    tenant: String,
+    aggregate_type: String,
+    aggregate_id: String,
+    references: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredReferencePath {
+    target: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredReferrer {
+    aggregate_type: String,
+    aggregate_id: String,
+    path: String,
+}
+
 pub struct EventStore {
     db: DBWithThreadMode<MultiThreaded>,
     write_lock: Mutex<()>,
@@ -1363,6 +1435,7 @@ pub struct Transaction<'a> {
     _guard: MutexGuard<'a, ()>,
     pending_events: Vec<PendingEvent>,
     pending_records: Vec<EventRecord>,
+    pending_refs: Vec<PendingRefUpdate>,
     meta_cache: BTreeMap<AggregateKey, AggregateMeta>,
     state_cache: BTreeMap<AggregateKey, BTreeMap<String, String>>,
 }
@@ -1745,6 +1818,8 @@ impl EventStore {
         self.ensure_writable()?;
         let _guard = self.write_lock.lock();
 
+        let tenant = input.tenant.clone();
+        let references = input.reference_targets.clone();
         if let Some(note) = input.note.as_ref() {
             if note.chars().count() > MAX_EVENT_NOTE_LENGTH {
                 return Err(EventError::InvalidSchema(format!(
@@ -1753,6 +1828,7 @@ impl EventStore {
                 )));
             }
         }
+        ensure_event_type_lengths(&input.event_type, input.event_type_raw.as_ref())?;
 
         let aggregate_type = input.aggregate_type.clone();
         let aggregate_id = input.aggregate_id.clone();
@@ -1800,6 +1876,14 @@ impl EventStore {
             &mut batch,
             state_key(&record.aggregate_type, &record.aggregate_id),
             encoded_state,
+        )?;
+        update_reference_index_inner(
+            &self.db,
+            &mut batch,
+            &tenant,
+            &record.aggregate_type,
+            &record.aggregate_id,
+            &references,
         )?;
         self.sync_timestamp_indexes(
             &mut batch,
@@ -1924,6 +2008,7 @@ impl EventStore {
             _guard: guard,
             pending_events: Vec::new(),
             pending_records: Vec::new(),
+            pending_refs: Vec::new(),
             meta_cache: BTreeMap::new(),
             state_cache: BTreeMap::new(),
         })
@@ -2760,12 +2845,13 @@ impl EventStore {
     }
 
     pub fn aggregates_paginated(&self, skip: usize, take: Option<usize>) -> Vec<AggregateState> {
-        self.aggregates_paginated_with_transform(
+        self.aggregates_paginated_with_transform_internal(
             skip,
             take,
             None,
             AggregateQueryScope::ActiveOnly,
             None,
+            true,
             |aggregate| Some(aggregate),
         )
     }
@@ -2777,6 +2863,41 @@ impl EventStore {
         sort: Option<&[AggregateSort]>,
         scope: AggregateQueryScope,
         cursor: Option<&AggregateCursor>,
+        transform: F,
+    ) -> Vec<AggregateState>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
+        self.aggregates_paginated_with_transform_internal(
+            skip, take, sort, scope, cursor, true, transform,
+        )
+    }
+
+    pub fn aggregates_paginated_without_state<F>(
+        &self,
+        skip: usize,
+        take: Option<usize>,
+        sort: Option<&[AggregateSort]>,
+        scope: AggregateQueryScope,
+        cursor: Option<&AggregateCursor>,
+        transform: F,
+    ) -> Vec<AggregateState>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
+        self.aggregates_paginated_with_transform_internal(
+            skip, take, sort, scope, cursor, false, transform,
+        )
+    }
+
+    fn aggregates_paginated_with_transform_internal<F>(
+        &self,
+        skip: usize,
+        take: Option<usize>,
+        sort: Option<&[AggregateSort]>,
+        scope: AggregateQueryScope,
+        cursor: Option<&AggregateCursor>,
+        include_state: bool,
         mut transform: F,
     ) -> Vec<AggregateState>
     where
@@ -2791,6 +2912,7 @@ impl EventStore {
                     take,
                     descending,
                     cursor,
+                    include_state,
                     &mut transform,
                 );
             }
@@ -2801,6 +2923,7 @@ impl EventStore {
                 skip,
                 take,
                 sort,
+                include_state,
                 &mut transform,
             ),
             AggregateQueryScope::ArchivedOnly => self.collect_index_paginated(
@@ -2808,6 +2931,7 @@ impl EventStore {
                 skip,
                 take,
                 sort,
+                include_state,
                 &mut transform,
             ),
             AggregateQueryScope::IncludeArchived => {
@@ -2816,6 +2940,7 @@ impl EventStore {
                     0,
                     None,
                     None,
+                    include_state,
                     &mut transform,
                 );
                 let mut archived_items = self.collect_index_paginated(
@@ -2823,6 +2948,7 @@ impl EventStore {
                     0,
                     None,
                     None,
+                    include_state,
                     &mut transform,
                 );
                 items.append(&mut archived_items);
@@ -2851,6 +2977,7 @@ impl EventStore {
         take: Option<usize>,
         descending: bool,
         cursor: Option<&AggregateCursor>,
+        include_state: bool,
         transform: &mut F,
     ) -> Vec<AggregateState>
     where
@@ -2864,6 +2991,7 @@ impl EventStore {
                 take,
                 descending,
                 cursor,
+                include_state,
                 transform,
             ),
             AggregateQueryScope::ArchivedOnly => self.collect_timestamp_index_paginated(
@@ -2873,10 +3001,18 @@ impl EventStore {
                 take,
                 descending,
                 cursor,
+                include_state,
                 transform,
             ),
-            AggregateQueryScope::IncludeArchived => self
-                .collect_timestamp_indexes_merged(kind, skip, take, descending, cursor, transform),
+            AggregateQueryScope::IncludeArchived => self.collect_timestamp_indexes_merged(
+                kind,
+                skip,
+                take,
+                descending,
+                cursor,
+                include_state,
+                transform,
+            ),
         }
     }
 
@@ -2888,6 +3024,7 @@ impl EventStore {
         take: Option<usize>,
         descending: bool,
         cursor: Option<&AggregateCursor>,
+        include_state: bool,
         transform: &mut F,
     ) -> Vec<AggregateState>
     where
@@ -2917,6 +3054,7 @@ impl EventStore {
                 index,
                 &entry.aggregate_type,
                 &entry.aggregate_id,
+                include_state,
             ) {
                 Ok(Some(aggregate)) => aggregate,
                 Ok(None) => continue,
@@ -2976,6 +3114,7 @@ impl EventStore {
         take: Option<usize>,
         descending: bool,
         cursor: Option<&AggregateCursor>,
+        include_state: bool,
         transform: &mut F,
     ) -> Vec<AggregateState>
     where
@@ -3026,6 +3165,7 @@ impl EventStore {
                 source_index,
                 &entry.aggregate_type,
                 &entry.aggregate_id,
+                include_state,
             ) {
                 Ok(Some(aggregate)) => aggregate,
                 Ok(None) => {
@@ -3110,6 +3250,7 @@ impl EventStore {
         index: AggregateIndex,
         aggregate_type: &str,
         aggregate_id: &str,
+        include_state: bool,
     ) -> Result<Option<AggregateState>> {
         let meta = match self.load_meta_from(index, aggregate_type, aggregate_id)? {
             Some(meta) => meta,
@@ -3125,7 +3266,8 @@ impl EventStore {
             updated_at,
             ..
         } = meta;
-        let state = self.load_state_map_from(index, &aggregate_type, &aggregate_id)?;
+        let state =
+            self.maybe_load_state_map(include_state, index, &aggregate_type, &aggregate_id)?;
         Ok(Some(AggregateState {
             aggregate_type,
             aggregate_id,
@@ -3144,6 +3286,7 @@ impl EventStore {
         skip: usize,
         take: Option<usize>,
         sort: Option<&[AggregateSort]>,
+        include_state: bool,
         transform: &mut F,
     ) -> Vec<AggregateState>
     where
@@ -3200,7 +3343,12 @@ impl EventStore {
                 }
                 continue;
             }
-            let state = match self.load_state_map_from(index, &aggregate_type, &aggregate_id) {
+            let state = match self.maybe_load_state_map(
+                include_state,
+                index,
+                &aggregate_type,
+                &aggregate_id,
+            ) {
                 Ok(state) => state,
                 Err(_) => {
                     status = "err";
@@ -3244,7 +3392,8 @@ impl EventStore {
 
         if should_sort {
             let summaries = pending.unwrap_or_default();
-            let (mut aggregates, had_errors) = self.load_states_parallel(index, summaries);
+            let (mut aggregates, had_errors) =
+                self.load_states_parallel(index, summaries, include_state);
             if had_errors {
                 status = "err";
             }
@@ -3282,6 +3431,34 @@ impl EventStore {
         cursor: Option<&AggregateCursor>,
         take: usize,
         scope: AggregateQueryScope,
+        include_state: bool,
+        transform: F,
+    ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
+        self.aggregates_page_with_transform_internal(cursor, take, scope, include_state, transform)
+    }
+
+    pub fn aggregates_page_without_state<F>(
+        &self,
+        cursor: Option<&AggregateCursor>,
+        take: usize,
+        scope: AggregateQueryScope,
+        transform: F,
+    ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)>
+    where
+        F: FnMut(AggregateState) -> Option<AggregateState>,
+    {
+        self.aggregates_page_with_transform_internal(cursor, take, scope, false, transform)
+    }
+
+    fn aggregates_page_with_transform_internal<F>(
+        &self,
+        cursor: Option<&AggregateCursor>,
+        take: usize,
+        scope: AggregateQueryScope,
+        include_state: bool,
         mut transform: F,
     ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)>
     where
@@ -3292,9 +3469,13 @@ impl EventStore {
         }
 
         match scope {
-            AggregateQueryScope::ActiveOnly => {
-                self.collect_index_page(AggregateIndex::Active, cursor, take, &mut transform)
-            }
+            AggregateQueryScope::ActiveOnly => self.collect_index_page(
+                AggregateIndex::Active,
+                cursor,
+                take,
+                include_state,
+                &mut transform,
+            ),
             AggregateQueryScope::ArchivedOnly => {
                 if let Some(cursor) = cursor {
                     if cursor.index() != CursorIndex::Archived {
@@ -3303,7 +3484,13 @@ impl EventStore {
                         ));
                     }
                 }
-                self.collect_index_page(AggregateIndex::Archived, cursor, take, &mut transform)
+                self.collect_index_page(
+                    AggregateIndex::Archived,
+                    cursor,
+                    take,
+                    include_state,
+                    &mut transform,
+                )
             }
             AggregateQueryScope::IncludeArchived => {
                 let mut remaining = take;
@@ -3315,6 +3502,7 @@ impl EventStore {
                             AggregateIndex::Archived,
                             Some(cursor),
                             remaining,
+                            include_state,
                             &mut transform,
                         )?;
                         items.append(&mut archived);
@@ -3326,6 +3514,7 @@ impl EventStore {
                     AggregateIndex::Active,
                     cursor,
                     remaining,
+                    include_state,
                     &mut transform,
                 )?;
                 remaining = remaining.saturating_sub(active_items.len());
@@ -3340,6 +3529,7 @@ impl EventStore {
                     AggregateIndex::Archived,
                     None,
                     remaining,
+                    include_state,
                     &mut transform,
                 )?;
                 items.append(&mut archived_items);
@@ -3354,7 +3544,7 @@ impl EventStore {
         take: usize,
         scope: AggregateQueryScope,
     ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)> {
-        self.aggregates_page_with_transform(cursor, take, scope, |aggregate| Some(aggregate))
+        self.aggregates_page_with_transform(cursor, take, scope, true, |aggregate| Some(aggregate))
     }
 
     fn collect_index_page<F>(
@@ -3362,6 +3552,7 @@ impl EventStore {
         index: AggregateIndex,
         cursor: Option<&AggregateCursor>,
         take: usize,
+        include_state: bool,
         transform: &mut F,
     ) -> Result<(Vec<AggregateState>, Option<AggregateCursor>)>
     where
@@ -3425,7 +3616,12 @@ impl EventStore {
                 updated_at,
                 ..
             } = meta;
-            let state = match self.load_state_map_from(index, &aggregate_type, &aggregate_id) {
+            let state = match self.maybe_load_state_map(
+                include_state,
+                index,
+                &aggregate_type,
+                &aggregate_id,
+            ) {
                 Ok(state) => state,
                 Err(_) => {
                     status = "err";
@@ -3480,6 +3676,7 @@ impl EventStore {
         &self,
         index: AggregateIndex,
         summaries: Vec<AggregateSummary>,
+        include_state: bool,
     ) -> (Vec<AggregateState>, bool) {
         use rayon::prelude::*;
 
@@ -3495,7 +3692,12 @@ impl EventStore {
                     created_at,
                     updated_at,
                 } = summary;
-                let state = self.load_state_map_from(index, &aggregate_type, &aggregate_id)?;
+                let state = self.maybe_load_state_map(
+                    include_state,
+                    index,
+                    &aggregate_type,
+                    &aggregate_id,
+                )?;
                 Ok(AggregateState {
                     aggregate_type,
                     aggregate_id,
@@ -3999,7 +4201,150 @@ impl EventStore {
         batch.delete(meta_key(aggregate_type, aggregate_id));
         batch.delete(state_key(aggregate_type, aggregate_id));
         self.sync_timestamp_indexes(&mut batch, AggregateIndex::Active, Some(&meta), None);
+        // best-effort cleanup of reference index entries (tenant/domain handled by caller)
         self.write_batch(batch)
+    }
+
+    pub fn update_reference_index(
+        &self,
+        tenant: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        references: &[(String, String)],
+    ) -> Result<()> {
+        self.ensure_writable()?;
+        let _guard = self.write_lock.lock();
+
+        let source_key = refsrc_key(tenant, aggregate_type, aggregate_id);
+        let prev: Vec<StoredReferencePath> = self
+            .db
+            .get(source_key.clone())
+            .map_err(|err| EventError::Storage(err.to_string()))?
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()
+            .map_err(|err| EventError::Serialization(err.to_string()))?
+            .unwrap_or_default();
+
+        let mut batch = WriteBatch::default();
+
+        // Remove old target mappings
+        for entry in prev {
+            let target_key = reftgt_key(tenant, &entry.target);
+            let existing: Vec<StoredReferrer> = self
+                .db
+                .get(&target_key)
+                .map_err(|err| EventError::Storage(err.to_string()))?
+                .map(|bytes| serde_json::from_slice(&bytes))
+                .transpose()
+                .map_err(|err| EventError::Serialization(err.to_string()))?
+                .unwrap_or_default();
+            let filtered: Vec<StoredReferrer> = existing
+                .into_iter()
+                .filter(|r| !(r.aggregate_type == aggregate_type && r.aggregate_id == aggregate_id))
+                .collect();
+            if filtered.is_empty() {
+                batch.delete(target_key);
+            } else {
+                batch.put(target_key, serde_json::to_vec(&filtered)?);
+            }
+        }
+
+        // Add new mappings
+        let mut new_paths = Vec::new();
+        for (target, path) in references {
+            let path_entry = StoredReferencePath {
+                target: target.clone(),
+                path: path.clone(),
+            };
+            new_paths.push(path_entry.clone());
+
+            let target_key = reftgt_key(tenant, target);
+            let mut existing: Vec<StoredReferrer> = self
+                .db
+                .get(&target_key)
+                .map_err(|err| EventError::Storage(err.to_string()))?
+                .map(|bytes| serde_json::from_slice(&bytes))
+                .transpose()
+                .map_err(|err| EventError::Serialization(err.to_string()))?
+                .unwrap_or_default();
+            if !existing.iter().any(|r| {
+                r.aggregate_type == aggregate_type
+                    && r.aggregate_id == aggregate_id
+                    && r.path == *path
+            }) {
+                existing.push(StoredReferrer {
+                    aggregate_type: aggregate_type.to_string(),
+                    aggregate_id: aggregate_id.to_string(),
+                    path: path.clone(),
+                });
+                batch.put(target_key, serde_json::to_vec(&existing)?);
+            }
+        }
+
+        batch.put(source_key, serde_json::to_vec(&new_paths)?);
+        self.write_batch(batch)
+    }
+
+    pub fn clear_reference_index(
+        &self,
+        tenant: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<()> {
+        self.update_reference_index(tenant, aggregate_type, aggregate_id, &[])
+    }
+
+    pub fn referrers_for(
+        &self,
+        tenant: &str,
+        target: &str,
+    ) -> Result<Vec<(String, String, String)>> {
+        let target_key = reftgt_key(tenant, target);
+        let existing: Vec<StoredReferrer> = self
+            .db
+            .get(&target_key)
+            .map_err(|err| EventError::Storage(err.to_string()))?
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()
+            .map_err(|err| EventError::Serialization(err.to_string()))?
+            .unwrap_or_default();
+        Ok(existing
+            .into_iter()
+            .map(|r| (r.aggregate_type, r.aggregate_id, r.path))
+            .collect())
+    }
+
+    pub fn referrers_for_any_tenant(
+        &self,
+        target: &str,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let mut matches = Vec::new();
+        let prefix = PREFIX_REF_TARGET.as_bytes();
+        for entry in self.db.prefix_iterator(prefix) {
+            let (key, value) = entry.map_err(|err| EventError::Storage(err.to_string()))?;
+            let segments: Vec<&[u8]> = key.split(|byte| *byte == SEP).collect();
+            if segments.len() != 3 {
+                continue;
+            }
+            let key_target = match str::from_utf8(segments[2]) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if key_target != target {
+                continue;
+            }
+            let tenant = match str::from_utf8(segments[1]) {
+                Ok(value) => value.to_string(),
+                Err(_) => continue,
+            };
+            let referrers: Vec<StoredReferrer> = serde_json::from_slice(&value).map_err(|err| {
+                EventError::Serialization(format!("failed to decode referrer index: {err}"))
+            })?;
+            for r in referrers {
+                matches.push((tenant.clone(), r.aggregate_type, r.aggregate_id, r.path));
+            }
+        }
+        Ok(matches)
     }
 
     fn load_state_map_from(
@@ -4028,6 +4373,20 @@ impl EventStore {
             duration,
         );
         result
+    }
+
+    fn maybe_load_state_map(
+        &self,
+        include_state: bool,
+        index: AggregateIndex,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<BTreeMap<String, String>> {
+        if include_state {
+            self.load_state_map_from(index, aggregate_type, aggregate_id)
+        } else {
+            Ok(BTreeMap::new())
+        }
     }
 
     fn load_state_map(
@@ -4302,6 +4661,104 @@ fn key_with_segments(parts: &[&str]) -> Vec<u8> {
     key
 }
 
+fn refsrc_key(tenant: &str, aggregate_type: &str, aggregate_id: &str) -> Vec<u8> {
+    key_with_segments(&[PREFIX_REF_SOURCE, tenant, aggregate_type, aggregate_id])
+}
+
+fn reftgt_key(tenant: &str, target: &str) -> Vec<u8> {
+    key_with_segments(&[PREFIX_REF_TARGET, tenant, target])
+}
+
+fn update_reference_index_inner(
+    db: &DBWithThreadMode<MultiThreaded>,
+    batch: &mut WriteBatch,
+    tenant: &str,
+    aggregate_type: &str,
+    aggregate_id: &str,
+    references: &[(String, String)],
+) -> Result<()> {
+    let source_key = refsrc_key(tenant, aggregate_type, aggregate_id);
+    let prev: Vec<StoredReferencePath> = db
+        .get(source_key.clone())
+        .map_err(|err| EventError::Storage(err.to_string()))?
+        .map(|bytes| serde_json::from_slice(&bytes))
+        .transpose()
+        .map_err(|err| EventError::Serialization(err.to_string()))?
+        .unwrap_or_default();
+
+    fn load_target_referrers<'a>(
+        db: &DBWithThreadMode<MultiThreaded>,
+        tenant: &str,
+        target: &str,
+        cache: &'a mut HashMap<String, Vec<StoredReferrer>>,
+    ) -> Result<&'a mut Vec<StoredReferrer>> {
+        match cache.entry(target.to_string()) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let target_key = reftgt_key(tenant, target);
+                let existing: Vec<StoredReferrer> = db
+                    .get(&target_key)
+                    .map_err(|err| EventError::Storage(err.to_string()))?
+                    .map(|bytes| serde_json::from_slice(&bytes))
+                    .transpose()
+                    .map_err(|err| EventError::Serialization(err.to_string()))?
+                    .unwrap_or_default();
+                Ok(entry.insert(existing))
+            }
+        }
+    }
+
+    let mut target_referrers: HashMap<String, Vec<StoredReferrer>> = HashMap::new();
+    let mut updated_targets = BTreeSet::new();
+
+    // Remove old target mappings
+    for entry in prev {
+        let referrers = load_target_referrers(db, tenant, &entry.target, &mut target_referrers)?;
+        let len_before = referrers.len();
+        referrers
+            .retain(|r| !(r.aggregate_type == aggregate_type && r.aggregate_id == aggregate_id));
+        if referrers.len() != len_before {
+            updated_targets.insert(entry.target.clone());
+        }
+    }
+
+    // Add new mappings
+    let mut new_paths = Vec::new();
+    for (target, path) in references {
+        let path_entry = StoredReferencePath {
+            target: target.clone(),
+            path: path.clone(),
+        };
+        new_paths.push(path_entry);
+
+        let referrers = load_target_referrers(db, tenant, target, &mut target_referrers)?;
+        if !referrers.iter().any(|r| {
+            r.aggregate_type == aggregate_type && r.aggregate_id == aggregate_id && r.path == *path
+        }) {
+            referrers.push(StoredReferrer {
+                aggregate_type: aggregate_type.to_string(),
+                aggregate_id: aggregate_id.to_string(),
+                path: path.clone(),
+            });
+            updated_targets.insert(target.clone());
+        }
+    }
+
+    for target in updated_targets {
+        let target_key = reftgt_key(tenant, &target);
+        if let Some(referrers) = target_referrers.get(&target) {
+            if referrers.is_empty() {
+                batch.delete(target_key);
+            } else {
+                batch.put(target_key, serde_json::to_vec(referrers)?);
+            }
+        }
+    }
+
+    batch.put(source_key, serde_json::to_vec(&new_paths)?);
+    Ok(())
+}
+
 fn record_store_op(operation: &'static str, status: &'static str, duration: f64) {
     let labels = [("operation", operation), ("status", status)];
     counter!("eventdbx_store_operations_total", &labels).increment(1);
@@ -4384,10 +4841,13 @@ mod tests {
                     aggregate_type: "patient".into(),
                     aggregate_id: "patient-1".into(),
                     event_type: "patient-created".into(),
+                    event_type_raw: None,
                     payload: payload.clone(),
                     metadata: None,
                     issued_by: None,
                     note: None,
+                    tenant: "default".into(),
+                    reference_targets: Vec::new(),
                 })
                 .unwrap();
 
@@ -4416,10 +4876,13 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-42".into(),
                 event_type: "order-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "processing" }),
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
         assert_eq!(first.version, 1);
@@ -4429,6 +4892,7 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-42".into(),
                 event_type: "order-updated".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({
                     "status": "shipped",
                     "tracking": "abc123"
@@ -4436,6 +4900,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
         assert_eq!(second.version, 2);
@@ -4632,6 +5098,7 @@ mod tests {
                 aggregate_type: aggregate_type.into(),
                 aggregate_id: aggregate_id.to_string(),
                 event_type: event_type.into(),
+                event_type_raw: None,
                 payload: payload.clone(),
                 extensions: None,
                 metadata: EventMetadata {
@@ -4660,10 +5127,13 @@ mod tests {
                 aggregate_type: "invoice".into(),
                 aggregate_id: "inv-1".into(),
                 event_type: "invoice-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "total": "100.00" }),
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
         }
@@ -4685,10 +5155,13 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-1".into(),
                 event_type: "order-created".into(),
+                event_type_raw: None,
                 payload,
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
 
@@ -4708,10 +5181,13 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-1".into(),
                 event_type: "order-updated".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({}),
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap_err();
         assert!(matches!(err, crate::error::EventError::AggregateArchived));
@@ -4738,10 +5214,13 @@ mod tests {
                 aggregate_type: "account".into(),
                 aggregate_id: "acct-1".into(),
                 event_type: "account-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "active" }),
                 metadata: None,
                 issued_by: None,
                 note: Some(note_text.clone()),
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
 
@@ -4760,10 +5239,38 @@ mod tests {
                 aggregate_type: "account".into(),
                 aggregate_id: "acct-2".into(),
                 event_type: "account-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "pending" }),
                 metadata: None,
                 issued_by: None,
                 note: Some(long_note),
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, crate::error::EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn reject_event_type_raw_exceeding_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None, 0).unwrap();
+
+        let too_long = "x".repeat(MAX_EVENT_TYPE_LENGTH + 1);
+        let err = store
+            .append(AppendEvent {
+                aggregate_type: "account".into(),
+                aggregate_id: "acct-3".into(),
+                event_type: "account-created".into(),
+                event_type_raw: Some(too_long),
+                payload: serde_json::json!({ "status": "active" }),
+                metadata: None,
+                issued_by: None,
+                note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap_err();
 
@@ -4782,10 +5289,13 @@ mod tests {
                 aggregate_type: "account".into(),
                 aggregate_id: "acct-3".into(),
                 event_type: "account-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "active" }),
                 metadata: Some(metadata.clone()),
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
 
@@ -4809,6 +5319,7 @@ mod tests {
                 aggregate_type: "patient".into(),
                 aggregate_id: "p-1".into(),
                 event_type: "patient-created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({
                     "status": "active",
                     "contact": {
@@ -4818,6 +5329,8 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
 
@@ -4960,10 +5473,13 @@ mod tests {
                     aggregate_type: "account".into(),
                     aggregate_id: "acct-42".into(),
                     event_type: "created".into(),
+                    event_type_raw: None,
                     payload: serde_json::json!({ "status": "active" }),
                     metadata: None,
                     issued_by: None,
                     note: None,
+                    tenant: "default".into(),
+                    reference_targets: Vec::new(),
                 })
                 .unwrap();
             store
@@ -4992,10 +5508,13 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-9".into(),
                 event_type: "created".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "new" }),
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
         store
@@ -5009,10 +5528,13 @@ mod tests {
                 aggregate_type: "order".into(),
                 aggregate_id: "order-9".into(),
                 event_type: "updated".into(),
+                event_type_raw: None,
                 payload: serde_json::json!({ "status": "shipped" }),
                 metadata: None,
                 issued_by: None,
                 note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
             })
             .unwrap();
         store
@@ -5045,10 +5567,13 @@ mod tests {
                     aggregate_type: "person".into(),
                     aggregate_id: agg_id.to_string(),
                     event_type: "created".into(),
+                    event_type_raw: None,
                     payload: serde_json::json!({ "name": agg_id }),
                     metadata: None,
                     issued_by: None,
                     note: None,
+                    tenant: "default".into(),
+                    reference_targets: Vec::new(),
                 })
                 .unwrap();
             store
@@ -5060,5 +5585,53 @@ mod tests {
             .list_snapshots(None, None, None)
             .expect("list all snapshots");
         assert_eq!(snapshots.len(), 2);
+    }
+
+    #[test]
+    fn referrers_for_any_tenant_returns_cross_tenant_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None, 0).unwrap();
+
+        // target aggregate in tenant beta
+        store
+            .append(AppendEvent {
+                aggregate_type: "address".into(),
+                aggregate_id: "addr-1".into(),
+                event_type: "created".into(),
+                event_type_raw: None,
+                payload: serde_json::json!({ "status": "active" }),
+                metadata: None,
+                issued_by: None,
+                note: None,
+                tenant: "beta".into(),
+                reference_targets: Vec::new(),
+            })
+            .unwrap();
+
+        // referrer stored under tenant alpha pointing at the beta address
+        store
+            .append(AppendEvent {
+                aggregate_type: "farm".into(),
+                aggregate_id: "farm-1".into(),
+                event_type: "created".into(),
+                event_type_raw: None,
+                payload: serde_json::json!({ "address": "beta#address#addr-1" }),
+                metadata: None,
+                issued_by: None,
+                note: None,
+                tenant: "alpha".into(),
+                reference_targets: vec![("beta#address#addr-1".into(), "/address".into())],
+            })
+            .unwrap();
+
+        let refs = store
+            .referrers_for_any_tenant("beta#address#addr-1")
+            .unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].0, "alpha");
+        assert_eq!(refs[0].1, "farm");
+        assert_eq!(refs[0].2, "farm-1");
+        assert_eq!(refs[0].3, "/address");
     }
 }

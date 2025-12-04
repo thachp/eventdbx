@@ -2,7 +2,6 @@ use std::{
     collections::BTreeMap,
     io::Write,
     net::{IpAddr, SocketAddr, TcpStream},
-    sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,26 +16,15 @@ use eventdbx::replication_noise::{
 use eventdbx::{
     config::Config,
     control_capnp::{control_hello, control_hello_response, control_request, control_response},
+    reference::{Referrer, ResolvedAggregate},
     schema::AggregateSchema,
     snowflake::SnowflakeId,
     store::{AggregateState, EventRecord, SnapshotRecord},
 };
 use serde_json::{self, Value};
-use tracing::debug;
 
 const CONTROL_PROTOCOL_VERSION: u16 = 1;
 const DEFAULT_PAGE_SIZE: usize = 256;
-static NO_NOISE_OVERRIDE: OnceLock<bool> = OnceLock::new();
-
-/// Set a process-wide override for disabling Noise. Intended to be called once
-/// at application startup (e.g., from CLI flag parsing).
-pub fn set_no_noise(no_noise: bool) {
-    let _ = NO_NOISE_OVERRIDE.set(no_noise);
-}
-
-fn resolve_no_noise(config_value: bool) -> bool {
-    NO_NOISE_OVERRIDE.get().copied().unwrap_or(config_value)
-}
 
 #[derive(Clone)]
 pub struct ServerClient {
@@ -62,7 +50,7 @@ pub struct TenantSchemaPublishResult {
 impl ServerClient {
     pub fn new(config: &Config) -> Result<Self> {
         let connect_addr = normalize_connect_addr(&config.socket.bind_addr);
-        let no_noise = resolve_no_noise(config.no_noise);
+        let no_noise = config.no_noise;
 
         Ok(Self {
             connect_addr,
@@ -71,16 +59,11 @@ impl ServerClient {
         })
     }
 
-    #[allow(dead_code)]
-    pub fn with_addr<S: Into<String>>(connect_addr: S) -> Self {
-        Self::with_addr_and_tenant(connect_addr, None)
-    }
-
     pub fn with_addr_and_tenant<S: Into<String>>(connect_addr: S, tenant: Option<String>) -> Self {
         Self {
             connect_addr: connect_addr.into(),
             tenant,
-            no_noise: resolve_no_noise(false),
+            no_noise: false,
         }
     }
 
@@ -327,6 +310,17 @@ impl ServerClient {
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Option<AggregateState>> {
+        let resolved = self.get_aggregate_resolved(token, aggregate_type, aggregate_id, None)?;
+        Ok(resolved.map(|resolved| resolved.aggregate))
+    }
+
+    pub fn get_aggregate_resolved(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        resolve_depth: Option<usize>,
+    ) -> Result<Option<ResolvedAggregate>> {
         let request_id = next_request_id();
         self.send_control_request(
             token,
@@ -337,6 +331,13 @@ impl ServerClient {
                 get.set_token(token);
                 get.set_aggregate_type(aggregate_type);
                 get.set_aggregate_id(aggregate_id);
+                get.set_resolve(true);
+                if let Some(depth) = resolve_depth {
+                    get.set_has_resolve_depth(true);
+                    get.set_resolve_depth(depth as u32);
+                } else {
+                    get.set_has_resolve_depth(false);
+                }
                 Ok(())
             },
             |response| {
@@ -351,13 +352,30 @@ impl ServerClient {
                         if !result.get_found() {
                             return Ok(None);
                         }
+                        if result.get_has_resolved_json() {
+                            let json = read_text(result.get_resolved_json(), "resolved_json")?;
+                            if json.trim().is_empty() {
+                                return Ok(None);
+                            }
+                            let resolved: ResolvedAggregate = serde_json::from_str(&json)
+                                .context("failed to parse resolved aggregate payload")?;
+                            return Ok(Some(resolved));
+                        }
                         let json = read_text(result.get_aggregate_json(), "aggregate_json")?;
                         if json.trim().is_empty() {
                             Ok(None)
                         } else {
                             let state: AggregateState = serde_json::from_str(&json)
                                 .context("failed to parse get_aggregate response payload")?;
-                            Ok(Some(state))
+                            Ok(Some(ResolvedAggregate {
+                                domain: self
+                                    .endpoint()
+                                    .tenant
+                                    .clone()
+                                    .unwrap_or_else(|| "default".to_string()),
+                                aggregate: state,
+                                references: Vec::new(),
+                            }))
                         }
                     }
                     payload::Error(Ok(error)) => {
@@ -375,6 +393,31 @@ impl ServerClient {
                 }
             },
         )
+    }
+
+    pub fn list_referrers(
+        &self,
+        token: &str,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Vec<Referrer>> {
+        let endpoint = self.endpoint();
+        let token = token.to_string();
+        let aggregate_type = aggregate_type.to_string();
+        let aggregate_id = aggregate_id.to_string();
+
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return tokio::task::block_in_place(move || {
+                list_referrers_blocking(
+                    endpoint.clone(),
+                    token.clone(),
+                    aggregate_type.clone(),
+                    aggregate_id.clone(),
+                )
+            });
+        }
+
+        list_referrers_blocking(endpoint, token, aggregate_type, aggregate_id)
     }
 
     pub fn list_aggregates(
@@ -488,32 +531,6 @@ impl ServerClient {
                 }
             },
         )
-    }
-
-    #[allow(dead_code)]
-    pub fn list_events(
-        &self,
-        token: &str,
-        aggregate_type: &str,
-        aggregate_id: &str,
-    ) -> Result<Vec<EventRecord>> {
-        let mut cursor: Option<String> = None;
-        let mut results = Vec::new();
-        loop {
-            let (page, next_cursor) = self.list_events_page(
-                token,
-                aggregate_type,
-                aggregate_id,
-                cursor.as_deref(),
-                DEFAULT_PAGE_SIZE,
-            )?;
-            results.extend(page);
-            cursor = next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        Ok(results)
     }
 
     pub fn list_events_since(
@@ -1085,6 +1102,64 @@ impl ServerClient {
             },
         )
     }
+}
+
+fn list_referrers_blocking(
+    endpoint: ControlEndpoint,
+    token: String,
+    aggregate_type: String,
+    aggregate_id: String,
+) -> Result<Vec<Referrer>> {
+    let request_id = next_request_id();
+    send_control_request_blocking(
+        &endpoint,
+        &token,
+        request_id,
+        |request| {
+            let payload_builder = request.reborrow().init_payload();
+            let mut req = payload_builder.init_list_referrers();
+            req.set_token(&token);
+            req.set_aggregate_type(&aggregate_type);
+            req.set_aggregate_id(&aggregate_id);
+            Ok(())
+        },
+        |response| {
+            use control_response::payload;
+
+            match response
+                .get_payload()
+                .which()
+                .context("failed to decode list_referrers response payload")?
+            {
+                payload::ListReferrers(Ok(list)) => {
+                    let json = read_text(list.get_referrers_json(), "referrers_json")?;
+                    if json.trim().is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        let refs: Vec<Referrer> = serde_json::from_str(&json)
+                            .context("failed to parse list_referrers payload")?;
+                        Ok(refs)
+                    }
+                }
+                payload::ListReferrers(Err(err)) => Err(anyhow!(
+                    "failed to decode list_referrers payload from CLI proxy: {}",
+                    err
+                )),
+                payload::Error(Ok(error)) => {
+                    let code = read_text(error.get_code(), "code")?;
+                    let message = read_text(error.get_message(), "message")?;
+                    Err(anyhow!("server returned {}: {}", code, message))
+                }
+                payload::Error(Err(err)) => Err(anyhow!(
+                    "failed to decode error payload from CLI proxy: {}",
+                    err
+                )),
+                _ => Err(anyhow!(
+                    "unexpected payload returned from CLI proxy response"
+                )),
+            }
+        },
+    )
 }
 
 fn create_aggregate_blocking(

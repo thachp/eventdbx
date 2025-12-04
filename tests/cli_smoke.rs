@@ -749,6 +749,55 @@ fn schema_hide_field() -> Result<()> {
 }
 
 #[test]
+fn schema_unhide_field() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run_json(&[
+        "schema",
+        "create",
+        "orders",
+        "--events",
+        "order_created",
+        "--json",
+    ])?;
+
+    cli.run(&[
+        "schema",
+        "hide",
+        "--aggregate",
+        "orders",
+        "--field",
+        "internal_notes",
+    ])?;
+
+    let unhide_out = cli.run(&[
+        "schema",
+        "hide",
+        "--aggregate",
+        "orders",
+        "--field",
+        "internal_notes",
+        "--unhide",
+    ])?;
+    assert!(
+        unhide_out.contains("aggregate=orders field=internal_notes unhidden"),
+        "unexpected schema unhide output:\n{}",
+        unhide_out
+    );
+
+    let schema_after_unhide = cli.run_json(&["schema", "orders"])?;
+    let hidden = schema_after_unhide["hidden_fields"]
+        .as_array()
+        .context("hidden_fields not present in schema json")?;
+    assert!(
+        !hidden.iter().any(|value| value == "internal_notes"),
+        "expected hidden_fields to exclude internal_notes after unhide: {}",
+        schema_after_unhide
+    );
+
+    Ok(())
+}
+
+#[test]
 fn schema_field_sets_type_and_rules() -> Result<()> {
     let cli = CliTest::new()?;
     cli.run(&[
@@ -2123,6 +2172,12 @@ fn aggregate_list_json_empty() -> Result<()> {
     Ok(())
 }
 
+cli_failure_test!(
+    aggregate_list_resolve_requires_json,
+    ["aggregate", "list", "--resolve"],
+    "--resolve requires --json output"
+);
+
 #[test]
 fn aggregate_list_accepts_positional_type() -> Result<()> {
     let cli = CliTest::new()?;
@@ -2162,6 +2217,134 @@ fn aggregate_list_accepts_positional_type() -> Result<()> {
             .iter()
             .all(|entry| entry["aggregate_type"] == "order")
     );
+
+    Ok(())
+}
+
+#[test]
+fn aggregate_list_resolves_references() -> Result<()> {
+    let cli = CliTest::new()?;
+    // Schemas
+    cli.run(&["schema", "create", "address", "--events", "address_created"])?;
+    cli.run(&["schema", "create", "farm", "--events", "farm_created"])?;
+    cli.run(&["schema", "field", "--type", "reference", "farm", "address"])?;
+
+    // Target aggregate
+    cli.create_aggregate("address", "addr-1", "address_created")?;
+    // Aggregate with reference (same domain shorthand)
+    cli.run(&[
+        "aggregate",
+        "create",
+        "farm",
+        "farm-1",
+        "--event",
+        "farm_created",
+        "--field",
+        "address=address#addr-1",
+    ])?;
+
+    let output = cli.run_json(&["aggregate", "list", "farm", "--json", "--resolve"])?;
+    let array = output
+        .as_array()
+        .context("aggregate list did not return an array")?;
+    assert_eq!(array.len(), 1);
+    let resolved = &array[0];
+    assert_eq!(resolved["aggregate"]["aggregate_id"], json!("farm-1"));
+
+    let references = resolved["references"]
+        .as_array()
+        .context("resolved references missing")?;
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0]["status"], json!("ok"));
+    assert_eq!(
+        references[0]["reference"],
+        json!({"domain":"default","aggregate_type":"address","aggregate_id":"addr-1"})
+    );
+    assert_eq!(
+        references[0]["resolved"]
+            .get("aggregate")
+            .and_then(|agg| agg.get("aggregate_type"))
+            .cloned(),
+        Some(json!("address"))
+    );
+
+    Ok(())
+}
+
+#[test]
+fn aggregate_referrers_reports_sources() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "address", "--events", "address_created"])?;
+    cli.run(&["schema", "create", "farm", "--events", "farm_created"])?;
+    cli.run(&["schema", "field", "--type", "reference", "farm", "address"])?;
+
+    cli.create_aggregate("address", "addr-1", "address_created")?;
+    cli.run(&[
+        "aggregate",
+        "create",
+        "farm",
+        "farm-1",
+        "--event",
+        "farm_created",
+        "--field",
+        "address=address#addr-1",
+    ])?;
+
+    let refs = cli.run_json(&["aggregate", "referrers", "address", "addr-1", "--json"])?;
+    let arr = refs
+        .as_array()
+        .context("referrers output was not an array")?;
+    assert_eq!(arr.len(), 1, "expected a single referrer: {}", refs);
+    assert_eq!(arr[0]["aggregate_type"], json!("farm"));
+    assert_eq!(arr[0]["aggregate_id"], json!("farm-1"));
+    assert!(
+        arr[0]["path"]
+            .as_str()
+            .map(|path| path.contains("address"))
+            .unwrap_or(false),
+        "expected path to mention address field: {}",
+        refs
+    );
+
+    Ok(())
+}
+
+#[test]
+fn aggregate_archive_nullifies_references() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&["schema", "create", "address", "--events", "address_created"])?;
+    cli.run(&["schema", "create", "farm", "--events", "farm_created"])?;
+    cli.run(&[
+        "schema",
+        "field",
+        "--type",
+        "reference",
+        "--reference-cascade",
+        "nullify",
+        "farm",
+        "address",
+    ])?;
+
+    cli.create_aggregate("address", "addr-1", "address_created")?;
+    cli.run(&[
+        "aggregate",
+        "create",
+        "farm",
+        "farm-1",
+        "--event",
+        "farm_created",
+        "--field",
+        "address=address#addr-1",
+    ])?;
+
+    cli.run(&["aggregate", "archive", "address", "addr-1"])?;
+    let farms = cli.run_json(&["aggregate", "list", "farm", "--json"])?;
+    let farm = farms
+        .as_array()
+        .and_then(|arr| arr.first())
+        .cloned()
+        .context("expected farm aggregate after archive")?;
+    assert_eq!(farm["state"]["address"], json!(""));
 
     Ok(())
 }

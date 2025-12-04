@@ -88,7 +88,7 @@ const HELP_CASES: &[HelpCase] = &[
     },
     HelpCase {
         path: &["schema", "hide"],
-        expected_snippet: "Hide a field from aggregate detail responses",
+        expected_snippet: "Hide or unhide a field from aggregate detail responses",
     },
     HelpCase {
         path: &["schema", "validate"],
