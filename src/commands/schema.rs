@@ -859,7 +859,6 @@ fn schema_field(config_path: Option<PathBuf>, args: SchemaFieldArgs) -> Result<(
             || args.format == Some(FieldFormatArg::Reference)
             || rules.format == Some(FieldFormat::Reference);
         args.apply_rule_overrides(&mut rules, is_reference_field)?;
-        // flag presence is already captured; no need to recompute here
         update.column_rules = Some((field.to_string(), Some(rules)));
         actions.push("rules=updated".to_string());
     }

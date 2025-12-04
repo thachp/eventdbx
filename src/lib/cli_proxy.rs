@@ -1915,6 +1915,7 @@ async fn execute_control_command(
                 let resolve = resolve;
                 let resolve_depth = resolve_depth;
                 let tenant_id = tenant_owned.clone();
+                let core_provider = Arc::clone(&core_provider);
                 move || {
                     let sort_ref = sort.as_ref().map(|keys| keys.as_slice());
                     let timestamp_sort = sort_ref.and_then(store::timestamp_sort_hint);
@@ -2012,6 +2013,7 @@ async fn execute_control_command(
                 let aggregate_id = aggregate_id.clone();
                 let token = token.clone();
                 let tenant_id = tenant_owned.clone();
+                let core_provider = Arc::clone(&core_provider);
                 move || {
                     if resolve {
                         let aggregate =
