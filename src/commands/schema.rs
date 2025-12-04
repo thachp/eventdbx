@@ -870,7 +870,7 @@ fn schema_field(config_path: Option<PathBuf>, args: SchemaFieldArgs) -> Result<(
             FieldRules::default()
         };
         rules.format = Some(FieldFormat::Reference);
-        rules.reference = Some(rules.reference.unwrap_or_else(ReferenceRules::default));
+        rules.reference = Some(rules.reference.unwrap_or_else(|| ReferenceRules::default()));
         update.column_rules = Some((field.to_string(), Some(rules)));
         actions.push("rules=reference".to_string());
     }
