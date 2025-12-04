@@ -29,6 +29,7 @@ use super::{
     error::{EventError, Result},
     merkle::{compute_merkle_root, empty_root},
     schema::MAX_EVENT_NOTE_LENGTH,
+    validation::MAX_EVENT_TYPE_LENGTH,
 };
 use crate::{
     filter::FilterExpr,
@@ -84,6 +85,24 @@ pub struct ActorClaims {
     pub user: String,
 }
 
+fn ensure_event_type_lengths(event_type: &str, event_type_raw: Option<&String>) -> Result<()> {
+    if event_type.len() > MAX_EVENT_TYPE_LENGTH {
+        return Err(EventError::InvalidSchema(format!(
+            "event_type cannot exceed {} characters",
+            MAX_EVENT_TYPE_LENGTH
+        )));
+    }
+    if let Some(raw) = event_type_raw {
+        if raw.len() > MAX_EVENT_TYPE_LENGTH {
+            return Err(EventError::InvalidSchema(format!(
+                "event_type_raw cannot exceed {} characters",
+                MAX_EVENT_TYPE_LENGTH
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl<'a> Transaction<'a> {
     pub fn append(&mut self, input: AppendEvent) -> Result<EventRecord> {
         if let Some(note) = input.note.as_ref() {
@@ -94,6 +113,7 @@ impl<'a> Transaction<'a> {
                 )));
             }
         }
+        ensure_event_type_lengths(&input.event_type, input.event_type_raw.as_ref())?;
         let tenant = input.tenant.clone();
         let references = input.reference_targets.clone();
         let key = AggregateKey::new(input.aggregate_type.clone(), input.aggregate_id.clone());
@@ -1808,6 +1828,7 @@ impl EventStore {
                 )));
             }
         }
+        ensure_event_type_lengths(&input.event_type, input.event_type_raw.as_ref())?;
 
         let aggregate_type = input.aggregate_type.clone();
         let aggregate_id = input.aggregate_id.clone();
@@ -5223,6 +5244,31 @@ mod tests {
                 metadata: None,
                 issued_by: None,
                 note: Some(long_note),
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, crate::error::EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn reject_event_type_raw_exceeding_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None, 0).unwrap();
+
+        let too_long = "x".repeat(MAX_EVENT_TYPE_LENGTH + 1);
+        let err = store
+            .append(AppendEvent {
+                aggregate_type: "account".into(),
+                aggregate_id: "acct-3".into(),
+                event_type: "account-created".into(),
+                event_type_raw: Some(too_long),
+                payload: serde_json::json!({ "status": "active" }),
+                metadata: None,
+                issued_by: None,
+                note: None,
                 tenant: "default".into(),
                 reference_targets: Vec::new(),
             })
