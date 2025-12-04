@@ -397,8 +397,10 @@ pub struct AppendEvent {
     pub metadata: Option<Value>,
     pub issued_by: Option<ActorClaims>,
     pub note: Option<String>,
+    /// Tenant that owns the aggregate/event (used for storage and quotas).
     pub tenant: String,
-    pub reference_targets: Vec<(String, String)>, // (canonical_target, path)
+    /// (canonical_target, path) pairs for reference updates; path is where the ref lives on the aggregate.
+    pub reference_targets: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

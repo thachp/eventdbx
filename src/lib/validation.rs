@@ -8,6 +8,7 @@ use crate::{
 };
 
 pub const MAX_AGGREGATE_ID_LENGTH: usize = 128;
+pub const MAX_EVENT_TYPE_LENGTH: usize = 128;
 pub const MAX_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
 pub const MAX_EVENT_METADATA_BYTES: usize = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,12 @@ pub fn ensure_snake_case(label: &str, value: &str) -> Result<()> {
 }
 
 pub fn normalize_event_type(value: &str) -> Result<NormalizedEventType> {
+    if value.len() > MAX_EVENT_TYPE_LENGTH {
+        return Err(EventError::InvalidSchema(format!(
+            "event_type cannot exceed {} characters",
+            MAX_EVENT_TYPE_LENGTH
+        )));
+    }
     if EVENT_TYPE_RE.is_match(value) {
         let normalized = value.replace('.', "_");
         let original = if normalized != value {
@@ -191,6 +198,13 @@ mod tests {
     #[test]
     fn event_type_normalization_rejects_hyphenated_segments() {
         let err = normalize_event_type("patient-Created").unwrap_err();
+        assert!(matches!(err, EventError::InvalidSchema(_)));
+    }
+
+    #[test]
+    fn event_type_normalization_rejects_long_values() {
+        let too_long = format!("e{}", "x".repeat(MAX_EVENT_TYPE_LENGTH));
+        let err = normalize_event_type(&too_long).unwrap_err();
         assert!(matches!(err, EventError::InvalidSchema(_)));
     }
 
