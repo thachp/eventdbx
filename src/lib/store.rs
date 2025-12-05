@@ -103,6 +103,42 @@ fn ensure_event_type_lengths(event_type: &str, event_type_raw: Option<&String>) 
     Ok(())
 }
 
+impl EventRecord {
+    /// Render the event for user-facing output by inlining extensions into metadata
+    /// and omitting the raw event type.
+    pub fn to_output_value(&self) -> serde_json::Result<Value> {
+        let mut value = serde_json::to_value(self)?;
+        let Some(object) = value.as_object_mut() else {
+            return Ok(value);
+        };
+
+        object.remove("event_type_raw");
+
+        if let Some(extensions) = object.remove("extensions") {
+            let metadata_entry = object
+                .entry("metadata")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Some(meta) = metadata_entry.as_object_mut() {
+                if let Some(ext_map) = extensions.as_object() {
+                    for (key, value) in ext_map {
+                        meta.insert(key.clone(), value.clone());
+                    }
+                } else {
+                    meta.insert("@extensions".to_string(), extensions);
+                }
+            } else if let Some(ext_map) = extensions.as_object() {
+                object.insert("metadata".into(), Value::Object(ext_map.clone()));
+            } else {
+                let mut meta = serde_json::Map::new();
+                meta.insert("@extensions".into(), extensions);
+                object.insert("metadata".into(), Value::Object(meta));
+            }
+        }
+
+        Ok(value)
+    }
+}
+
 impl<'a> Transaction<'a> {
     pub fn append(&mut self, input: AppendEvent) -> Result<EventRecord> {
         if let Some(note) = input.note.as_ref() {
@@ -5306,6 +5342,54 @@ mod tests {
         let events = reopened.list_events("account", "acct-3").unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].extensions, Some(metadata));
+    }
+
+    #[test]
+    fn output_value_inlines_extensions_and_hides_raw_type() {
+        let record = EventRecord {
+            aggregate_type: "person".into(),
+            aggregate_id: "p-1".into(),
+            event_type: "person_updated".into(),
+            event_type_raw: Some("person.updated".into()),
+            payload: serde_json::json!({ "status": "active" }),
+            extensions: Some(serde_json::json!({
+                "@trace": { "id": "abc123" },
+                "@channel": "beta"
+            })),
+            metadata: EventMetadata {
+                event_id: SnowflakeId::from_u64(42),
+                created_at: Utc::now(),
+                issued_by: None,
+                note: None,
+            },
+            version: 7,
+            hash: "hash".into(),
+            merkle_root: "root".into(),
+        };
+
+        let rendered = record.to_output_value().expect("serializes for output");
+        let object = rendered.as_object().expect("event renders as object");
+        assert!(
+            !object.contains_key("extensions"),
+            "extensions should be folded into metadata"
+        );
+        assert!(
+            !object.contains_key("event_type_raw"),
+            "raw event type should be hidden in output"
+        );
+        let metadata = object
+            .get("metadata")
+            .and_then(Value::as_object)
+            .expect("metadata should be present");
+        assert_eq!(metadata.get("@channel"), Some(&serde_json::json!("beta")));
+        assert_eq!(
+            metadata
+                .get("@trace")
+                .and_then(Value::as_object)
+                .and_then(|trace| trace.get("id")),
+            Some(&serde_json::json!("abc123"))
+        );
+        assert!(metadata.contains_key("created_at"));
     }
 
     #[test]

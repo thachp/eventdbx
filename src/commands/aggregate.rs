@@ -965,7 +965,11 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
                         .collect(),
                     None => events,
                 };
-                output["events"] = serde_json::to_value(filtered)?;
+                let rendered_events: Vec<Value> = filtered
+                    .into_iter()
+                    .map(|event| event.to_output_value())
+                    .collect::<serde_json::Result<_>>()?;
+                output["events"] = Value::Array(rendered_events);
             }
 
             if args.resolve {
@@ -1284,7 +1288,8 @@ pub fn execute(config_path: Option<PathBuf>, command: AggregateCommands) -> Resu
 
             let records = tx.commit()?;
             for record in &records {
-                println!("{}", serde_json::to_string_pretty(record)?);
+                let rendered = record.to_output_value()?;
+                println!("{}", serde_json::to_string_pretty(&rendered)?);
                 maybe_auto_snapshot(&store, &schema_manager, record);
             }
 
@@ -2145,7 +2150,8 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
 
             maybe_auto_snapshot(&store, &schema_manager, &record);
             if verbose {
-                println!("{}", serde_json::to_string_pretty(&record)?);
+                let rendered = record.to_output_value()?;
+                println!("{}", serde_json::to_string_pretty(&rendered)?);
             } else {
                 println!("Ok");
             }
@@ -2196,7 +2202,8 @@ fn execute_append_command(config: &Config, command: AppendCommand) -> Result<()>
             )?;
             if verbose {
                 if let Some(record) = record {
-                    println!("{}", serde_json::to_string_pretty(&record)?);
+                    let rendered = record.to_output_value()?;
+                    println!("{}", serde_json::to_string_pretty(&rendered)?);
                 } else {
                     println!("Ok");
                 }
