@@ -5,9 +5,9 @@ use chrono::{TimeZone, Utc};
 use clap::{Args, Subcommand};
 use serde_json::{self, json};
 
-use crate::commands::schema_version::{report_schema_reload, schema_reload_online};
+use crate::commands::{cli_token, client::ServerClient};
 use eventdbx::{
-    config::{DEFAULT_DOMAIN_NAME, load_or_default},
+    config::{Config, DEFAULT_DOMAIN_NAME, load_or_default},
     schema::{AggregateSchema, SchemaManager},
     schema_source::{CompiledSchema, compile_schema_source, load_schema_file},
 };
@@ -194,4 +194,24 @@ fn normalize_preview_schema(mut compiled: CompiledSchema) -> CompiledSchema {
 fn normalize_preview_timestamps(schema: &mut AggregateSchema, timestamp: chrono::DateTime<Utc>) {
     schema.created_at = timestamp;
     schema.updated_at = timestamp;
+}
+
+fn schema_reload_online(config: &Config, tenant: &str) -> Result<bool> {
+    if let Ok(token) = cli_token::ensure_bootstrap_token(config, None) {
+        if let Ok(client) = ServerClient::new(config) {
+            let client = client.with_tenant(Some(tenant.to_string()));
+            if let Ok(reloaded) = client.reload_tenant(&token, tenant) {
+                return Ok(reloaded);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn report_schema_reload(tenant: &str, reloaded: bool) {
+    if reloaded {
+        println!("tenant={} schema cache reloaded", tenant);
+    } else {
+        println!("tenant={} schema cache reload skipped", tenant);
+    }
 }
