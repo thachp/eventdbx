@@ -129,6 +129,8 @@ Supported commands:
 - `dbx aggregate create|apply|list|get|verify`
 - `dbx events`
 
+`dbx destroy` removes the active `.dbx` workspace directory after confirmation.
+
 ## Configuration
 
 `dbx config` manages the lean runtime surface:

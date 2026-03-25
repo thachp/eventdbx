@@ -40,7 +40,7 @@ const HELP_CASES: &[HelpCase] = &[
     },
     HelpCase {
         path: &["destroy"],
-        expected_snippet: "Destroy all EventDBX data and configuration",
+        expected_snippet: "Remove the active EventDBX workspace (.dbx)",
     },
     HelpCase {
         path: &["config"],

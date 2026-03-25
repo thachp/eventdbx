@@ -45,7 +45,7 @@ enum Commands {
     Status,
     /// Restart the EventDBX server
     Restart(StartArgs),
-    /// Destroy all EventDBX data and configuration
+    /// Remove the active EventDBX workspace (.dbx)
     Destroy(DestroyArgs),
     /// Update system configuration
     Config(ConfigArgs),

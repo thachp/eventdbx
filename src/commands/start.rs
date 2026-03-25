@@ -13,7 +13,7 @@ use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 use eventdbx::{
-    config::{Config, ConfigUpdate, load_or_default},
+    config::{Config, ConfigUpdate, WORKSPACE_DIR_NAME, load_or_default},
     restrict::{self, RESTRICT_ENV},
     server,
 };
@@ -241,13 +241,13 @@ pub fn status(config_path: Option<PathBuf>) -> Result<()> {
 }
 
 pub fn destroy(config_path: Option<PathBuf>, args: DestroyArgs) -> Result<()> {
-    let (config, path) = load_or_default(config_path)?;
+    let (_, path) = load_or_default(config_path)?;
+    let workspace_path = workspace_root(&path)?;
 
     if !args.yes {
         eprint!(
-            "This will permanently delete all EventDBX data under {} and remove the config file at {}.\nType \"destroy\" to continue: ",
-            config.data_dir.display(),
-            path.display()
+            "This will permanently remove the active EventDBX workspace at {}.\nType \"destroy\" to continue: ",
+            workspace_path.display()
         );
         io::stderr().flush()?;
         let mut confirmation = String::new();
@@ -262,19 +262,30 @@ pub fn destroy(config_path: Option<PathBuf>, args: DestroyArgs) -> Result<()> {
         tracing::warn!("failed to stop running server before destroy: {err}");
     }
 
-    if config.data_dir.exists() {
-        fs::remove_dir_all(&config.data_dir)?;
+    if workspace_path.exists() {
+        fs::remove_dir_all(&workspace_path)?;
     }
 
-    if path.exists() {
-        fs::remove_file(&path)?;
-    }
-
-    println!(
-        "All EventDBX data and configuration removed from {}",
-        config.data_dir.display()
-    );
+    println!("Removed EventDBX workspace at {}", workspace_path.display());
     Ok(())
+}
+
+fn workspace_root(config_path: &Path) -> Result<PathBuf> {
+    let workspace_path = config_path.parent().ok_or_else(|| {
+        anyhow!(
+            "config path {} has no parent directory",
+            config_path.display()
+        )
+    })?;
+    let workspace_name = workspace_path.file_name().and_then(|name| name.to_str());
+    if workspace_name != Some(WORKSPACE_DIR_NAME) {
+        anyhow::bail!(
+            "refusing to destroy workspace for config at {} because its parent directory is not `{}`",
+            config_path.display(),
+            WORKSPACE_DIR_NAME
+        );
+    }
+    Ok(workspace_path.to_path_buf())
 }
 
 async fn start_foreground(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {

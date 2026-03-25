@@ -526,6 +526,53 @@ fn init_is_idempotent() -> Result<()> {
 }
 
 #[test]
+fn destroy_removes_workspace_directory() -> Result<()> {
+    let cli = CliTest::new()?;
+    let _ = cli.init()?;
+
+    let stdout = cli.run(&["destroy", "--yes"])?;
+
+    assert!(stdout.contains("Removed EventDBX workspace"));
+    assert!(!cli.workspace_dir()?.exists());
+    Ok(())
+}
+
+#[test]
+fn runtime_commands_fail_after_destroy_removes_workspace() -> Result<()> {
+    let cli = CliTest::new()?;
+    let _ = cli.init()?;
+
+    let _ = cli.run(&["destroy", "--yes"])?;
+    let failure = cli.run_failure(&["status"])?;
+
+    assert!(failure.stderr.contains("Run `dbx init`"));
+    Ok(())
+}
+
+#[test]
+fn destroy_preserves_external_data_dir() -> Result<()> {
+    let cli = CliTest::new()?;
+    let _ = cli.init()?;
+
+    let external_data_dir = cli.home.join("external-data");
+    fs::create_dir_all(&external_data_dir).context("failed to create external data dir")?;
+    fs::write(external_data_dir.join("sentinel.txt"), "keep me")
+        .context("failed to write sentinel file")?;
+
+    let mut config = cli.load_config()?;
+    config.data_dir = external_data_dir.clone();
+    let contents = toml::to_string_pretty(&config).context("failed to serialize config")?;
+    fs::write(cli.config_path()?, contents).context("failed to update config.toml")?;
+
+    let _ = cli.run(&["destroy", "--yes"])?;
+
+    assert!(!cli.workspace_dir()?.exists());
+    assert!(external_data_dir.exists());
+    assert!(external_data_dir.join("sentinel.txt").exists());
+    Ok(())
+}
+
+#[test]
 fn init_ttl_accepts_human_duration_suffixes() -> Result<()> {
     let cli = CliTest::new()?;
 
