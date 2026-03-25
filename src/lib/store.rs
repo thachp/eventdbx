@@ -39,6 +39,7 @@ use crate::{
 const SEP: u8 = 0x1F;
 const PREFIX_EVENT: &str = "evt";
 const PREFIX_EVENT_ARCHIVED: &str = "evt-arch";
+const PREFIX_OUTBOX_ACTIVE: &str = "outbox";
 const PREFIX_META: &str = "meta";
 const PREFIX_STATE: &str = "state";
 const PREFIX_META_ARCHIVED: &str = "meta-arch";
@@ -191,6 +192,7 @@ impl<'a> Transaction<'a> {
         self.pending_events.push(PendingEvent {
             key: event_key(&record.aggregate_type, &record.aggregate_id, record.version),
             value: event_value,
+            event_id: record.metadata.event_id,
         });
         self.pending_records.push(record.clone());
 
@@ -219,6 +221,7 @@ impl<'a> Transaction<'a> {
         let mut batch = WriteBatch::default();
 
         for pending in pending_events {
+            batch.put(outbox_key(pending.event_id), pending.value.clone());
             batch_put(&mut batch, pending.key, pending.value)?;
         }
 
@@ -1489,6 +1492,7 @@ impl AggregateKey {
 struct PendingEvent {
     key: Vec<u8>,
     value: Vec<u8>,
+    event_id: SnowflakeId,
 }
 
 struct PendingRefUpdate {
@@ -1948,13 +1952,19 @@ impl EventStore {
             };
         let record = apply_event(&mut meta, &mut state, input, event_id);
         let stored_record = self.encode_record(&record)?;
+        let stored_record_bytes = serde_json::to_vec(&stored_record)?;
         let encoded_state = self.encode_state_map(&state)?;
 
         let mut batch = WriteBatch::default();
         batch_put(
             &mut batch,
             event_key(&record.aggregate_type, &record.aggregate_id, record.version),
-            serde_json::to_vec(&stored_record)?,
+            stored_record_bytes.clone(),
+        )?;
+        batch_put(
+            &mut batch,
+            outbox_key(record.metadata.event_id),
+            stored_record_bytes,
         )?;
         batch_put(
             &mut batch,
@@ -2068,12 +2078,18 @@ impl EventStore {
         }
 
         let stored_record = self.encode_record(&record)?;
+        let stored_record_bytes = serde_json::to_vec(&stored_record)?;
 
         let mut batch = WriteBatch::default();
         batch_put(
             &mut batch,
             event_key(&aggregate_type, &aggregate_id, record.version),
-            serde_json::to_vec(&stored_record)?,
+            stored_record_bytes.clone(),
+        )?;
+        batch_put(
+            &mut batch,
+            outbox_key(record.metadata.event_id),
+            stored_record_bytes,
         )?;
         self.sync_timestamp_indexes(
             &mut batch,
@@ -2432,6 +2448,48 @@ impl EventStore {
         self.find_event_by_id_in_index(AggregateIndex::Archived, event_id)
     }
 
+    pub fn read_outbox(
+        &self,
+        after_event_id: Option<SnowflakeId>,
+        take: usize,
+    ) -> Result<Vec<EventRecord>> {
+        if take == 0 {
+            return Ok(Vec::new());
+        }
+
+        let prefix = key_with_segments(&[PREFIX_OUTBOX_ACTIVE]);
+        let start_key = after_event_id
+            .map(outbox_key)
+            .unwrap_or_else(|| prefix.clone());
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(start_key.as_slice(), Direction::Forward));
+        let mut items = Vec::new();
+
+        for entry in iter {
+            let (key, value) = entry.map_err(|err| EventError::Storage(err.to_string()))?;
+            if !key.starts_with(prefix.as_slice()) {
+                break;
+            }
+
+            let raw: EventRecord = serde_json::from_slice(&value)
+                .map_err(|err| EventError::Serialization(err.to_string()))?;
+            let record = self.decode_record(raw)?;
+            if after_event_id
+                .map(|after| record.metadata.event_id <= after)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            items.push(record);
+            if items.len() >= take {
+                break;
+            }
+        }
+
+        Ok(items)
+    }
+
     pub fn aggregate_version(
         &self,
         aggregate_type: &str,
@@ -2780,11 +2838,24 @@ impl EventStore {
         }
 
         for (old_key, value, version) in records {
+            let event_id = serde_json::from_slice::<EventRecord>(&value)
+                .map_err(|err| EventError::Serialization(err.to_string()))?
+                .metadata
+                .event_id;
             batch.delete(old_key);
             batch.put(
                 event_key_for(to, aggregate_type, aggregate_id, version),
-                value,
+                value.clone(),
             );
+            match (from, to) {
+                (AggregateIndex::Active, AggregateIndex::Archived) => {
+                    batch.delete(outbox_key(event_id));
+                }
+                (AggregateIndex::Archived, AggregateIndex::Active) => {
+                    batch.put(outbox_key(event_id), value);
+                }
+                _ => {}
+            }
         }
 
         Ok(())
@@ -4720,6 +4791,13 @@ fn event_prefix_for_scope(index: AggregateIndex, scope: EventQueryScope<'_>) -> 
     }
 }
 
+fn outbox_key(event_id: SnowflakeId) -> Vec<u8> {
+    let mut key = key_with_segments(&[PREFIX_OUTBOX_ACTIVE]);
+    key.push(SEP);
+    key.extend_from_slice(&event_id.as_u64().to_be_bytes());
+    key
+}
+
 fn event_cursor_matches_scope(cursor: &EventCursor, scope: EventQueryScope<'_>) -> bool {
     match scope {
         EventQueryScope::All => true,
@@ -5307,6 +5385,64 @@ mod tests {
             .find_snapshot_by_id(snapshot.snapshot_id.expect("snapshot id"))
             .unwrap();
         assert!(found.is_some());
+    }
+
+    #[test]
+    fn read_outbox_tracks_active_events_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+        let store = EventStore::open(path, None, 0).unwrap();
+
+        let first = store
+            .append(AppendEvent {
+                aggregate_type: "order".into(),
+                aggregate_id: "order-1".into(),
+                event_type: "order-created".into(),
+                event_type_raw: None,
+                payload: serde_json::json!({ "status": "new" }),
+                metadata: None,
+                issued_by: None,
+                note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
+            })
+            .unwrap();
+        let second = store
+            .append(AppendEvent {
+                aggregate_type: "order".into(),
+                aggregate_id: "order-1".into(),
+                event_type: "order-paid".into(),
+                event_type_raw: None,
+                payload: serde_json::json!({ "status": "paid" }),
+                metadata: None,
+                issued_by: None,
+                note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
+            })
+            .unwrap();
+
+        let initial = store.read_outbox(None, 10).unwrap();
+        assert_eq!(initial.len(), 2);
+        assert_eq!(initial[0].metadata.event_id, first.metadata.event_id);
+        assert_eq!(initial[1].metadata.event_id, second.metadata.event_id);
+
+        let resumed = store
+            .read_outbox(Some(first.metadata.event_id), 10)
+            .unwrap();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].metadata.event_id, second.metadata.event_id);
+
+        store
+            .set_archive("order", "order-1", true, Some("closed".into()))
+            .unwrap();
+        assert!(store.read_outbox(None, 10).unwrap().is_empty());
+
+        store.set_archive("order", "order-1", false, None).unwrap();
+        let restored = store.read_outbox(None, 10).unwrap();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[0].metadata.event_id, first.metadata.event_id);
+        assert_eq!(restored[1].metadata.event_id, second.metadata.event_id);
     }
 
     #[test]

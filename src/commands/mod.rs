@@ -9,19 +9,12 @@ pub mod aggregate;
 pub mod cli_token;
 pub mod client;
 pub mod config;
-pub mod domain;
 pub mod events;
-pub mod plugin;
-pub mod queue;
 pub mod schema;
 pub mod schema_version;
-pub mod snapshots;
 pub mod start;
-pub mod system;
 pub mod tenant;
 pub mod token;
-pub mod upgrade;
-pub mod watch;
 
 pub(crate) fn resolve_actor_name(
     explicit: Option<&str>,

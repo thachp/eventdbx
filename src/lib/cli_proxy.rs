@@ -26,7 +26,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     cli_capnp::{cli_request, cli_response},
-    config::{Config, PluginPayloadMode},
+    config::{Config, DEFAULT_DOMAIN_NAME, PluginPayloadMode},
     control_capnp::{
         control_hello, control_hello_response, control_request, control_response, publish_target,
     },
@@ -82,6 +82,10 @@ enum ControlReply {
         aggregate_id: String,
         events: Vec<EventRecord>,
         next_cursor: Option<String>,
+    },
+    ReadOutbox {
+        events: Vec<EventRecord>,
+        next_after_event_id: Option<SnowflakeId>,
     },
     AppendEvent {
         event_json: Option<String>,
@@ -165,6 +169,11 @@ enum ControlCommand {
         aggregate_type: String,
         aggregate_id: String,
         cursor: Option<EventCursor>,
+        take: Option<usize>,
+    },
+    ReadOutbox {
+        token: String,
+        after_event_id: Option<SnowflakeId>,
         take: Option<usize>,
     },
     AppendEvent {
@@ -478,6 +487,7 @@ fn control_command_name(command: &ControlCommand) -> &'static str {
         ControlCommand::ListReferrers { .. } => "list_referrers",
         ControlCommand::GetAggregate { .. } => "get_aggregate",
         ControlCommand::ListEvents { .. } => "list_events",
+        ControlCommand::ReadOutbox { .. } => "read_outbox",
         ControlCommand::AppendEvent { .. } => "append_event",
         ControlCommand::PatchEvent { .. } => "patch_event",
         ControlCommand::VerifyAggregate { .. } => "verify_aggregate",
@@ -831,19 +841,21 @@ where
         .read()
         .expect("config lock poisoned while resolving tenant")
         .clone();
-    let require_tenant = config_snapshot.multi_tenant();
 
     if accepted {
         let tenant = match requested_tenant.filter(|value| !value.is_empty()) {
             Some(value) => value,
-            None if require_tenant => {
-                accepted = false;
-                response_text =
-                    "tenantId is required when multi-tenant mode is enabled".to_string();
-                String::new()
-            }
-            None => config_snapshot.active_domain().to_string(),
+            None => DEFAULT_DOMAIN_NAME.to_string(),
         };
+        if accepted {
+            if tenant != DEFAULT_DOMAIN_NAME {
+                accepted = false;
+                response_text = format!(
+                    "single-tenant core only supports tenantId='{}'",
+                    DEFAULT_DOMAIN_NAME
+                );
+            }
+        }
         if accepted {
             if let Some(claims) = &claims {
                 if !claims.allows_tenant(&tenant) {
@@ -1151,6 +1163,36 @@ where
                                     builder.set_next_cursor("");
                                 }
                             }
+                            ControlReply::ReadOutbox {
+                                events,
+                                next_after_event_id,
+                            } => {
+                                let encoded = encode_json_list_response(
+                                    request_id,
+                                    &events,
+                                    |payload, json| {
+                                        let mut builder = payload.init_read_outbox();
+                                        builder.set_events_json(json);
+                                    },
+                                )?;
+                                if encoded.included < events.len() {
+                                    debug!(
+                                        target: "cli_proxy",
+                                        requested = events.len(),
+                                        included = encoded.included,
+                                        "truncated read_outbox response to satisfy control frame limit"
+                                    );
+                                }
+                                let mut builder = payload.init_read_outbox();
+                                builder.set_events_json(&encoded.json);
+                                if let Some(event_id) = next_after_event_id {
+                                    builder.set_has_next_after_event_id(true);
+                                    builder.set_next_after_event_id(event_id.as_u64());
+                                } else {
+                                    builder.set_has_next_after_event_id(false);
+                                    builder.set_next_after_event_id(0);
+                                }
+                            }
                             ControlReply::AppendEvent { event_json } => {
                                 let mut builder = payload.init_append_event();
                                 if let Some(json) = event_json {
@@ -1428,6 +1470,30 @@ fn parse_control_command(
                 aggregate_type,
                 aggregate_id,
                 cursor,
+                take,
+            })
+        }
+        payload::ReadOutbox(req) => {
+            let req = req.map_err(|err| EventError::Serialization(err.to_string()))?;
+            let token = read_control_text(req.get_token(), "token")?
+                .trim()
+                .to_string();
+            let after_event_id = if req.get_has_after_event_id() {
+                Some(SnowflakeId::from_u64(req.get_after_event_id()))
+            } else {
+                None
+            };
+            let take = if req.get_has_take() {
+                Some(usize::try_from(req.get_take()).map_err(|_| {
+                    EventError::InvalidSchema("take exceeds platform limits".into())
+                })?)
+            } else {
+                None
+            };
+
+            Ok(ControlCommand::ReadOutbox {
+                token,
+                after_event_id,
                 take,
             })
         }
@@ -2091,6 +2157,25 @@ async fn execute_control_command(
                 aggregate_id,
                 events,
                 next_cursor: next_cursor.map(|cursor| cursor.encode()),
+            })
+        }
+        ControlCommand::ReadOutbox {
+            token,
+            after_event_id,
+            take,
+        } => {
+            let outbox = spawn_blocking({
+                let core = core.clone();
+                let token = token.clone();
+                move || core.read_outbox(&token, after_event_id, take)
+            })
+            .await
+            .map_err(|err| EventError::Storage(format!("read outbox task failed: {err}")))??;
+
+            let (events, next_after_event_id) = outbox;
+            Ok(ControlReply::ReadOutbox {
+                events,
+                next_after_event_id,
             })
         }
         ControlCommand::AppendEvent {

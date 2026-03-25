@@ -1,15 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
+use chrono::{TimeZone, Utc};
 use clap::{Args, Subcommand};
 use serde_json::{self, json};
 
-use crate::commands::schema_version::{
-    report_schema_reload, resolve_schema_tenant, schema_reload_online,
-};
+use crate::commands::schema_version::{report_schema_reload, schema_reload_online};
 use eventdbx::{
-    config::load_or_default,
-    schema::SchemaManager,
+    config::{DEFAULT_DOMAIN_NAME, load_or_default},
+    schema::{AggregateSchema, SchemaManager},
     schema_source::{CompiledSchema, compile_schema_source, load_schema_file},
 };
 
@@ -54,10 +53,6 @@ pub struct SchemaApplyArgs {
     /// Explicit schema source path; defaults to nearest schema.dbx in the current directory tree
     #[arg(long = "file", value_name = "PATH")]
     pub file: Option<PathBuf>,
-
-    /// Tenant/domain whose runtime schema store should be updated
-    #[arg(long = "tenant", value_name = "TENANT")]
-    pub tenant: Option<String>,
 
     /// Skip daemon schema cache reload after applying
     #[arg(long = "no-reload", default_value_t = false)]
@@ -118,6 +113,7 @@ fn schema_validate(args: SchemaValidateArgs) -> Result<()> {
 
 fn schema_show(args: SchemaShowArgs) -> Result<()> {
     let (_, compiled) = load_compiled_schema(args.file.as_deref(), None)?;
+    let compiled = normalize_preview_schema(compiled);
     if let Some(aggregate) = args.aggregate.as_deref() {
         let schema = compiled.schemas.get(aggregate).ok_or_else(|| {
             anyhow!(
@@ -134,7 +130,7 @@ fn schema_show(args: SchemaShowArgs) -> Result<()> {
 
 fn schema_apply(config_path: Option<PathBuf>, args: SchemaApplyArgs) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
-    let tenant = resolve_schema_tenant(&config, args.tenant.as_deref())?;
+    let tenant = DEFAULT_DOMAIN_NAME.to_string();
     let manager = SchemaManager::load(config.schema_store_path_for(&tenant))?;
     let existing = manager.snapshot();
 
@@ -185,4 +181,17 @@ fn load_compiled_schema(
     let (path, contents) = load_schema_file(explicit_file)?;
     let compiled = compile_schema_source(&contents, existing)?;
     Ok((path, compiled))
+}
+
+fn normalize_preview_schema(mut compiled: CompiledSchema) -> CompiledSchema {
+    let preview_timestamp = Utc.timestamp_opt(0, 0).single().expect("unix epoch");
+    for schema in compiled.schemas.values_mut() {
+        normalize_preview_timestamps(schema, preview_timestamp);
+    }
+    compiled
+}
+
+fn normalize_preview_timestamps(schema: &mut AggregateSchema, timestamp: chrono::DateTime<Utc>) {
+    schema.created_at = timestamp;
+    schema.updated_at = timestamp;
 }
