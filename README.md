@@ -29,6 +29,8 @@ dbx init
 ```
 
 This creates `./.dbx` and stores both configuration and runtime data there. Runtime commands discover the nearest `.dbx/config.toml` by walking up from the current directory, similar to Git repository discovery.
+`dbx init` also emits a CLI bootstrap token and persists it under `.dbx/cli.token`; the default init-issued token expires after 86,400 seconds.
+Use `--ttl` to override that bootstrap token lifetime with either raw seconds or human suffixes like `10m`, `24h`, `10d`, or `2w`.
 
 2. Start the daemon:
 

@@ -10,6 +10,7 @@ use eventdbx::observability;
 use crate::commands::{
     aggregate::AggregateCommands,
     config::ConfigArgs,
+    init::InitArgs,
     schema::SchemaCommands,
     start::{DestroyArgs, StartArgs},
     token::TokenCommands,
@@ -35,7 +36,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a local EventDBX workspace
-    Init,
+    Init(InitArgs),
     /// Start the EventDBX server
     Start(StartArgs),
     /// Stop the EventDBX server
@@ -83,7 +84,7 @@ async fn main() -> Result<()> {
     let Cli { config, command } = Cli::parse();
 
     match command {
-        Commands::Init => commands::init::execute(config)?,
+        Commands::Init(args) => commands::init::execute(config, args)?,
         Commands::Start(args) => commands::start::execute(config, args).await?,
         Commands::Stop => commands::start::stop(config)?,
         Commands::Status => commands::start::status(config)?,

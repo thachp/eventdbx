@@ -7,7 +7,7 @@ use assert_cmd::{Command, cargo::cargo_bin_cmd};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use eventdbx::{config::Config, store::EventStore};
+use eventdbx::{config::Config, store::EventStore, token::TokenManager};
 
 struct CliTest {
     _tmp: TempDir,
@@ -134,7 +134,13 @@ impl CliTest {
     }
 
     fn init(&self) -> Result<String> {
-        self.run(&["init"])
+        self.init_with_args(&[])
+    }
+
+    fn init_with_args(&self, args: &[&str]) -> Result<String> {
+        let mut argv = vec!["init"];
+        argv.extend_from_slice(args);
+        self.run(&argv)
     }
 
     fn load_config(&self) -> Result<Config> {
@@ -208,12 +214,12 @@ fn core_schema() -> &'static str {
 }
 
 #[test]
-fn token_list_empty_prints_hint() -> Result<()> {
+fn token_list_includes_init_bootstrap_token() -> Result<()> {
     let cli = CliTest::new()?;
     let _ = cli.init()?;
     let stdout = cli.run(&["token", "list"])?;
     assert!(
-        stdout.contains("no issued tokens"),
+        stdout.contains("subject=cli:bootstrap"),
         "unexpected output:\n{stdout}"
     );
     Ok(())
@@ -243,8 +249,14 @@ fn token_generate_and_list_json_round_trip() -> Result<()> {
     let records = listed
         .as_array()
         .context("token list did not return an array")?;
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["group"], json!("ops"));
+    let generated_record = records
+        .iter()
+        .find(|record| {
+            record.get("group") == Some(&json!("ops"))
+                && record.get("user") == Some(&json!("alice"))
+        })
+        .context("generated token missing from token list")?;
+    assert_eq!(generated_record["actions"], json!(["aggregate.read"]));
     Ok(())
 }
 
@@ -473,11 +485,32 @@ fn init_creates_local_workspace() -> Result<()> {
 
     let stdout = cli.init()?;
     let config = cli.load_config()?;
+    let token = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Bootstrap token (ttl=86400s): "))
+        .context("init output missing bootstrap token")?
+        .to_string();
+    let manager = TokenManager::load(
+        config.jwt_manager_config()?,
+        config.tokens_path(),
+        config.jwt_revocations_path(),
+        config.encryption_key()?,
+    )?;
+    let claims = manager.verify(&token)?;
+    let ttl_secs = claims
+        .exp
+        .map(|exp| exp - claims.iat)
+        .context("bootstrap token should expire")?;
 
     assert!(stdout.contains("Initialized empty EventDBX workspace"));
     assert!(cli.config_path()?.exists());
     assert!(cli.data_dir()?.exists());
+    assert!(config.cli_token_path().exists());
     assert!(config.event_store_path().join("CURRENT").exists());
+    assert!(
+        (ttl_secs - 86_400).abs() <= 1,
+        "expected bootstrap TTL close to 86400, got {ttl_secs}"
+    );
     Ok(())
 }
 
@@ -489,6 +522,36 @@ fn init_is_idempotent() -> Result<()> {
     let stdout = cli.init()?;
 
     assert!(stdout.contains("already initialized"));
+    Ok(())
+}
+
+#[test]
+fn init_ttl_accepts_human_duration_suffixes() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    let stdout = cli.init_with_args(&["--ttl", "10d"])?;
+    let config = cli.load_config()?;
+    let token = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Bootstrap token (ttl=864000s): "))
+        .context("init output missing bootstrap token")?
+        .to_string();
+    let manager = TokenManager::load(
+        config.jwt_manager_config()?,
+        config.tokens_path(),
+        config.jwt_revocations_path(),
+        config.encryption_key()?,
+    )?;
+    let claims = manager.verify(&token)?;
+    let ttl_secs = claims
+        .exp
+        .map(|exp| exp - claims.iat)
+        .context("bootstrap token should expire")?;
+
+    assert!(
+        (ttl_secs - 864_000).abs() <= 1,
+        "expected bootstrap TTL close to 864000, got {ttl_secs}"
+    );
     Ok(())
 }
 
