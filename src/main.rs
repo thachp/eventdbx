@@ -8,12 +8,8 @@ use clap::{Parser, Subcommand};
 use eventdbx::observability;
 
 use crate::commands::{
-    aggregate::AggregateCommands,
-    config::ConfigArgs,
-    init::InitArgs,
-    schema::SchemaCommands,
-    start::{DestroyArgs, StartArgs},
-    token::TokenCommands,
+    aggregate::AggregateCommands, config::ConfigArgs, init::InitArgs, schema::SchemaCommands,
+    serve::ServeCommands, token::TokenCommands,
 };
 
 #[derive(Parser)]
@@ -37,16 +33,11 @@ struct Cli {
 enum Commands {
     /// Initialize a local EventDBX workspace
     Init(InitArgs),
-    /// Start the EventDBX server
-    Start(StartArgs),
-    /// Stop the EventDBX server
-    Stop,
-    /// Display EventDBX server status
-    Status,
-    /// Restart the EventDBX server
-    Restart(StartArgs),
-    /// Remove the active EventDBX workspace (.dbx)
-    Destroy(DestroyArgs),
+    /// Manage EventDBX server lifecycle
+    Serve {
+        #[command(subcommand)]
+        command: ServeCommands,
+    },
     /// Update system configuration
     Config(ConfigArgs),
     /// Manage access tokens
@@ -85,17 +76,13 @@ async fn main() -> Result<()> {
 
     match command {
         Commands::Init(args) => commands::init::execute(config, args)?,
-        Commands::Start(args) => commands::start::execute(config, args).await?,
-        Commands::Stop => commands::start::stop(config)?,
-        Commands::Status => commands::start::status(config)?,
-        Commands::Restart(args) => restart(config, args).await?,
-        Commands::Destroy(args) => commands::start::destroy(config, args)?,
+        Commands::Serve { command } => commands::serve::execute(config, command).await?,
         Commands::Config(args) => commands::config::execute(config, args)?,
         Commands::Token { command } => commands::token::execute(config, command)?,
         Commands::Schema { command } => commands::schema::execute(config, command)?,
         Commands::Events(args) => commands::events::list(config, args)?,
         Commands::Aggregate { command } => commands::aggregate::execute(config, command)?,
-        Commands::InternalServer => commands::start::run_internal(config).await?,
+        Commands::InternalServer => commands::serve::run_internal(config).await?,
         Commands::External(argv) => {
             if let Some(name) = argv.first() {
                 anyhow::bail!("unknown command '{}'", name);
@@ -109,11 +96,4 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn restart(config: Option<PathBuf>, args: StartArgs) -> Result<()> {
-    if let Err(err) = commands::start::stop(config.clone()) {
-        tracing::warn!("failed to stop EventDBX server before restart: {err}");
-    }
-    commands::start::execute(config, args).await
 }

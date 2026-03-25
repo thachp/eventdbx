@@ -23,23 +23,27 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "--ttl <TTL>",
     },
     HelpCase {
-        path: &["start"],
+        path: &["serve"],
+        expected_snippet: "Manage EventDBX server lifecycle",
+    },
+    HelpCase {
+        path: &["serve", "start"],
         expected_snippet: "Start the EventDBX server",
     },
     HelpCase {
-        path: &["stop"],
+        path: &["serve", "stop"],
         expected_snippet: "Stop the EventDBX server",
     },
     HelpCase {
-        path: &["status"],
+        path: &["serve", "status"],
         expected_snippet: "Display EventDBX server status",
     },
     HelpCase {
-        path: &["restart"],
+        path: &["serve", "restart"],
         expected_snippet: "Restart the EventDBX server",
     },
     HelpCase {
-        path: &["destroy"],
+        path: &["serve", "destroy"],
         expected_snippet: "Remove the active EventDBX workspace (.dbx)",
     },
     HelpCase {
@@ -164,6 +168,11 @@ fn removed_commands_no_longer_appear_in_root_help() -> Result<()> {
     for removed in [
         "checkout",
         "merge",
+        "start",
+        "stop",
+        "status",
+        "restart",
+        "destroy",
         "push",
         "pull",
         "watch",

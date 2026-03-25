@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use clap::{Args, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 use eventdbx::{
@@ -17,6 +17,20 @@ use eventdbx::{
     restrict::{self, RESTRICT_ENV},
     server,
 };
+
+#[derive(Subcommand)]
+pub enum ServeCommands {
+    /// Start the EventDBX server
+    Start(StartArgs),
+    /// Stop the EventDBX server
+    Stop,
+    /// Display EventDBX server status
+    Status,
+    /// Restart the EventDBX server
+    Restart(StartArgs),
+    /// Remove the active EventDBX workspace (.dbx)
+    Destroy(DestroyArgs),
+}
 
 #[derive(Args, Clone)]
 pub struct StartArgs {
@@ -105,7 +119,17 @@ pub struct DestroyArgs {
     pub yes: bool,
 }
 
-pub async fn execute(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
+pub async fn execute(config_path: Option<PathBuf>, command: ServeCommands) -> Result<()> {
+    match command {
+        ServeCommands::Start(args) => start(config_path, args).await,
+        ServeCommands::Stop => stop(config_path),
+        ServeCommands::Status => status(config_path),
+        ServeCommands::Restart(args) => restart(config_path, args).await,
+        ServeCommands::Destroy(args) => destroy(config_path, args),
+    }
+}
+
+async fn start(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     restrict::set_env(args.restrict.into());
     if args.foreground {
         start_foreground(config_path, args).await
@@ -119,6 +143,13 @@ pub async fn run_internal(config_path: Option<PathBuf>) -> Result<()> {
     let args = StartArgs::default();
     restrict::set_env(args.restrict.into());
     start_foreground(config_path, args).await
+}
+
+async fn restart(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
+    if let Err(err) = stop(config_path.clone()) {
+        tracing::warn!("failed to stop EventDBX server before restart: {err}");
+    }
+    start(config_path, args).await
 }
 
 pub fn stop(config_path: Option<PathBuf>) -> Result<()> {
@@ -325,11 +356,11 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
             let message = if let Some(code) = status.code() {
                 format!(
                     "EventDBX server failed to start (process exited with status {code}). \
-                     Re-run with `eventdbx start --foreground` for details."
+                     Re-run with `dbx serve start --foreground` for details."
                 )
             } else {
                 "EventDBX server failed to start (process terminated unexpectedly). \
-                 Re-run with `eventdbx start --foreground` for details."
+                 Re-run with `dbx serve start --foreground` for details."
                     .to_string()
             };
             return Err(anyhow!(message));

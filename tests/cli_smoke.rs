@@ -428,7 +428,7 @@ fn status_rejects_non_default_domain_config() -> Result<()> {
     contents = contents.replace("domain = \"default\"\n", "domain = \"legacy\"\n");
     fs::write(cli.config_path()?, contents).context("failed to write legacy config")?;
 
-    let failure = cli.run_failure(&["status"])?;
+    let failure = cli.run_failure(&["serve", "status"])?;
     assert!(
         failure
             .stderr
@@ -454,7 +454,7 @@ fn status_rejects_legacy_tenant_layout() -> Result<()> {
     fs::create_dir_all(&rogue_dir).context("failed to create legacy tenant dir")?;
     fs::write(rogue_dir.join("README"), "legacy").context("failed to seed legacy tenant dir")?;
 
-    let failure = cli.run_failure(&["status"])?;
+    let failure = cli.run_failure(&["serve", "status"])?;
     assert!(
         failure
             .stderr
@@ -530,7 +530,7 @@ fn destroy_removes_workspace_directory() -> Result<()> {
     let cli = CliTest::new()?;
     let _ = cli.init()?;
 
-    let stdout = cli.run(&["destroy", "--yes"])?;
+    let stdout = cli.run(&["serve", "destroy", "--yes"])?;
 
     assert!(stdout.contains("Removed EventDBX workspace"));
     assert!(!cli.workspace_dir()?.exists());
@@ -542,8 +542,8 @@ fn runtime_commands_fail_after_destroy_removes_workspace() -> Result<()> {
     let cli = CliTest::new()?;
     let _ = cli.init()?;
 
-    let _ = cli.run(&["destroy", "--yes"])?;
-    let failure = cli.run_failure(&["status"])?;
+    let _ = cli.run(&["serve", "destroy", "--yes"])?;
+    let failure = cli.run_failure(&["serve", "status"])?;
 
     assert!(failure.stderr.contains("Run `dbx init`"));
     Ok(())
@@ -564,7 +564,7 @@ fn destroy_preserves_external_data_dir() -> Result<()> {
     let contents = toml::to_string_pretty(&config).context("failed to serialize config")?;
     fs::write(cli.config_path()?, contents).context("failed to update config.toml")?;
 
-    let _ = cli.run(&["destroy", "--yes"])?;
+    let _ = cli.run(&["serve", "destroy", "--yes"])?;
 
     assert!(!cli.workspace_dir()?.exists());
     assert!(external_data_dir.exists());
@@ -608,8 +608,33 @@ fn runtime_commands_fail_without_workspace() -> Result<()> {
     let outside = cli.home.join("outside");
     fs::create_dir_all(&outside).context("failed to create outside dir")?;
 
-    let failure = cli.run_failure_in(&outside, &["status"])?;
+    let failure = cli.run_failure_in(&outside, &["serve", "status"])?;
     assert!(failure.stderr.contains("Run `dbx init`"));
+    Ok(())
+}
+
+#[test]
+fn removed_top_level_serve_commands_are_rejected() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    for args in [
+        ["start"].as_slice(),
+        ["stop"].as_slice(),
+        ["status"].as_slice(),
+        ["restart"].as_slice(),
+        ["destroy"].as_slice(),
+    ] {
+        let failure = cli.run_failure(args)?;
+        assert!(
+            failure.stderr.contains("unrecognized subcommand")
+                || failure.stderr.contains("unexpected argument")
+                || failure.stderr.contains("unknown command"),
+            "unexpected stderr for {:?}:\n{}",
+            args,
+            failure.stderr
+        );
+    }
+
     Ok(())
 }
 

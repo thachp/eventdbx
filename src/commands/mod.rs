@@ -5,7 +5,7 @@ pub mod config;
 pub mod events;
 pub mod init;
 pub mod schema;
-pub mod start;
+pub mod serve;
 pub mod token;
 
 pub(crate) fn is_lock_error_message(message: &str) -> bool {

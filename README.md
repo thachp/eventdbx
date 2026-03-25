@@ -35,7 +35,7 @@ Use `--ttl` to override that bootstrap token lifetime with either raw seconds or
 2. Start the daemon:
 
 ```bash
-dbx start --foreground
+dbx serve start --foreground
 ```
 
 3. Author a schema in `schema.dbx`:
@@ -398,11 +398,7 @@ This replaces built-in peer replication. The core daemon does not manage destina
 Supported commands:
 
 - `dbx init`
-- `dbx start`
-- `dbx stop`
-- `dbx status`
-- `dbx restart`
-- `dbx destroy`
+- `dbx serve start|stop|status|restart|destroy`
 - `dbx config`
 - `dbx token generate|list|revoke|refresh|bootstrap`
 - `dbx schema validate|show|apply`
@@ -411,9 +407,9 @@ Supported commands:
 
 Operational notes:
 
-- `dbx start --restrict [off|default|strict]` controls schema enforcement mode for the running daemon
-- `dbx destroy` removes the active `.dbx` workspace directory and prompts for confirmation unless `--yes` is passed
-- `dbx destroy` does not imply that an external `data_dir` outside the workspace will be removed
+- `dbx serve start --restrict [off|default|strict]` controls schema enforcement mode for the running daemon
+- `dbx serve destroy` removes the active `.dbx` workspace directory and prompts for confirmation unless `--yes` is passed
+- `dbx serve destroy` does not imply that an external `data_dir` outside the workspace will be removed
 - `dbx schema validate|show|apply` discover the nearest `schema.dbx` by default and accept `--file <PATH>` to override
 - `dbx schema show [AGGREGATE]` renders either the full compiled schema set or a single aggregate preview
 
@@ -435,7 +431,7 @@ Writable configuration flags are:
 
 The default config location is the nearest `.dbx/config.toml` in the current directory tree.
 Workspace initialization generates auth keys automatically; the printed config includes the `auth` block even though key material is not configured through dedicated `dbx config` flags.
-Schema enforcement mode is a runtime/startup concern controlled via `dbx start --restrict`, not `dbx config`.
+Schema enforcement mode is a runtime/startup concern controlled via `dbx serve start --restrict`, not `dbx config`.
 
 EventDBX now runs as a single-tenant core pinned to the logical domain `default`.
 
