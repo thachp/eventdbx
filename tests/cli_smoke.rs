@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::path::PathBuf;
 use std::{fs, process::Output};
 
@@ -38,11 +39,17 @@ impl CliTest {
     }
 
     fn command(&self) -> Result<Command> {
+        let project_dir = self.project_dir()?;
+        self.command_in(project_dir.as_path())
+    }
+
+    fn command_in(&self, cwd: &Path) -> Result<Command> {
         let mut cmd = cargo_bin_cmd!("dbx");
         cmd.env("HOME", &self.home);
         cmd.env("EVENTDBX_LOG_DIR", &self.log_dir);
         cmd.env("DBX_NO_UPGRADE_CHECK", "1");
         cmd.env("XDG_CONFIG_HOME", &self.config_home);
+        cmd.current_dir(cwd);
         Ok(cmd)
     }
 
@@ -83,19 +90,59 @@ impl CliTest {
             .with_context(|| format!("failed to run dbx {:?}", args))
     }
 
-    fn data_dir(&self) -> PathBuf {
-        self.home.join(".eventdbx")
+    fn exec_in(&self, cwd: &Path, args: &[&str]) -> Result<Output> {
+        let mut cmd = self.command_in(cwd)?;
+        cmd.args(args);
+        cmd.output()
+            .with_context(|| format!("failed to run dbx {:?} in {}", args, cwd.display()))
     }
 
-    fn config_path(&self) -> PathBuf {
-        self.data_dir().join("config.toml")
+    fn run_in(&self, cwd: &Path, args: &[&str]) -> Result<String> {
+        let output = self.exec_in(cwd, args)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "dbx {:?} exited with {}: {}",
+                args,
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(normalize_output(output.stdout)?)
+    }
+
+    fn run_failure_in(&self, cwd: &Path, args: &[&str]) -> Result<FailureOutput> {
+        let output = self.exec_in(cwd, args)?;
+        if output.status.success() {
+            anyhow::bail!("expected dbx {:?} to fail but it succeeded", args);
+        }
+        Ok(FailureOutput {
+            stdout: normalize_output(output.stdout)?,
+            stderr: normalize_output(output.stderr)?,
+        })
+    }
+
+    fn workspace_dir(&self) -> Result<PathBuf> {
+        Ok(self.project_dir()?.join(".dbx"))
+    }
+
+    fn data_dir(&self) -> Result<PathBuf> {
+        self.workspace_dir()
+    }
+
+    fn config_path(&self) -> Result<PathBuf> {
+        Ok(self.workspace_dir()?.join("config.toml"))
+    }
+
+    fn init(&self) -> Result<String> {
+        self.run(&["init"])
     }
 
     fn load_config(&self) -> Result<Config> {
-        if !self.config_path().exists() {
-            let _ = self.run(&["config"])?;
+        let config_path = self.config_path()?;
+        if !config_path.exists() {
+            let _ = self.init()?;
         }
-        let contents = fs::read_to_string(self.config_path()).context("failed to read config")?;
+        let contents = fs::read_to_string(&config_path).context("failed to read config")?;
         toml::from_str(&contents).context("failed to parse config.toml")
     }
 
@@ -121,6 +168,7 @@ impl CliTest {
     }
 
     fn apply_schema_source(&self, contents: &str) -> Result<()> {
+        let _ = self.init()?;
         let path = self.write_schema_source(contents)?;
         self.run(&[
             "schema",
@@ -162,6 +210,7 @@ fn core_schema() -> &'static str {
 #[test]
 fn token_list_empty_prints_hint() -> Result<()> {
     let cli = CliTest::new()?;
+    let _ = cli.init()?;
     let stdout = cli.run(&["token", "list"])?;
     assert!(
         stdout.contains("no issued tokens"),
@@ -173,6 +222,7 @@ fn token_list_empty_prints_hint() -> Result<()> {
 #[test]
 fn token_generate_and_list_json_round_trip() -> Result<()> {
     let cli = CliTest::new()?;
+    let _ = cli.init()?;
     let generated = cli.run_json(&[
         "token",
         "generate",
@@ -360,11 +410,11 @@ fn aggregate_and_event_history_flow() -> Result<()> {
 #[test]
 fn status_rejects_non_default_domain_config() -> Result<()> {
     let cli = CliTest::new()?;
-    let _ = cli.run(&["config"])?;
+    let _ = cli.init()?;
     let mut contents =
-        fs::read_to_string(cli.config_path()).context("failed to read generated config.toml")?;
+        fs::read_to_string(cli.config_path()?).context("failed to read generated config.toml")?;
     contents = contents.replace("domain = \"default\"\n", "domain = \"legacy\"\n");
-    fs::write(cli.config_path(), contents).context("failed to write legacy config")?;
+    fs::write(cli.config_path()?, contents).context("failed to write legacy config")?;
 
     let failure = cli.run_failure(&["status"])?;
     assert!(
@@ -381,10 +431,10 @@ fn status_rejects_non_default_domain_config() -> Result<()> {
 #[test]
 fn status_rejects_legacy_tenant_layout() -> Result<()> {
     let cli = CliTest::new()?;
-    let _ = cli.run(&["config"])?;
+    let _ = cli.init()?;
 
     let rogue_dir = cli
-        .data_dir()
+        .data_dir()?
         .join("shards")
         .join("shard-0000")
         .join("tenants")
@@ -407,11 +457,62 @@ fn status_rejects_legacy_tenant_layout() -> Result<()> {
 #[test]
 fn config_prints_lean_surface() -> Result<()> {
     let cli = CliTest::new()?;
+    let _ = cli.init()?;
     let stdout = cli.run(&["config"])?;
     assert!(stdout.contains("socket"));
     assert!(stdout.contains("auth"));
     assert!(!stdout.contains("multi_tenant"));
     assert!(!stdout.contains("snapshot_threshold"));
     assert!(!stdout.contains("plugin_max_attempts"));
+    Ok(())
+}
+
+#[test]
+fn init_creates_local_workspace() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    let stdout = cli.init()?;
+    let config = cli.load_config()?;
+
+    assert!(stdout.contains("Initialized empty EventDBX workspace"));
+    assert!(cli.config_path()?.exists());
+    assert!(cli.data_dir()?.exists());
+    assert!(config.event_store_path().join("CURRENT").exists());
+    Ok(())
+}
+
+#[test]
+fn init_is_idempotent() -> Result<()> {
+    let cli = CliTest::new()?;
+
+    let _ = cli.init()?;
+    let stdout = cli.init()?;
+
+    assert!(stdout.contains("already initialized"));
+    Ok(())
+}
+
+#[test]
+fn runtime_commands_fail_without_workspace() -> Result<()> {
+    let cli = CliTest::new()?;
+    let outside = cli.home.join("outside");
+    fs::create_dir_all(&outside).context("failed to create outside dir")?;
+
+    let failure = cli.run_failure_in(&outside, &["status"])?;
+    assert!(failure.stderr.contains("Run `dbx init`"));
+    Ok(())
+}
+
+#[test]
+fn runtime_commands_discover_workspace_from_nested_directory() -> Result<()> {
+    let cli = CliTest::new()?;
+    let _ = cli.init()?;
+    let nested = cli.project_dir()?.join("nested").join("deeper");
+    fs::create_dir_all(&nested).context("failed to create nested dir")?;
+
+    let stdout = cli.run_in(&nested, &["config"])?;
+
+    assert!(stdout.contains("data_dir"));
+    assert!(stdout.contains(".dbx"));
     Ok(())
 }

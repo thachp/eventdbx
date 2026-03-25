@@ -15,6 +15,10 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "EventDBX server CLI",
     },
     HelpCase {
+        path: &["init"],
+        expected_snippet: "Initialize a local EventDBX workspace",
+    },
+    HelpCase {
         path: &["start"],
         expected_snippet: "Start the EventDBX server",
     },

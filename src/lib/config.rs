@@ -28,6 +28,9 @@ pub const DEFAULT_PORT: u16 = 7070;
 pub const DEFAULT_SOCKET_PORT: u16 = 6363;
 pub const DEFAULT_CACHE_THRESHOLD: usize = 10_000;
 pub const DEFAULT_DOMAIN_NAME: &str = "default";
+pub const WORKSPACE_DIR_NAME: &str = ".dbx";
+
+const CONFIG_FILE_NAME: &str = "config.toml";
 
 const ENV_DATA_ENCRYPTION_KEY: &str = "EVENTDBX_DATA_ENCRYPTION_KEY";
 const ENV_AUTH_PRIVATE_KEY: &str = "EVENTDBX_AUTH_PRIVATE_KEY";
@@ -272,56 +275,47 @@ pub struct TenantRoutingConfigUpdate {
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
-    let mut path = default_config_root()?;
-    path.push("config.toml");
-    Ok(path)
+    find_workspace_config_path(None)
+}
+
+pub fn init_workspace(path: Option<PathBuf>) -> Result<(Config, PathBuf, bool)> {
+    let config_path = init_config_path(path)?;
+    if config_path.exists() {
+        let (config, path) = load_config(config_path)?;
+        return Ok((config, path, false));
+    }
+
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let data_dir = config_path
+        .parent()
+        .ok_or_else(|| EventError::Config("config path must have a parent directory".to_string()))?
+        .to_path_buf();
+
+    let mut cfg = Config {
+        data_dir,
+        ..Config::default()
+    };
+    cfg.ensure_single_tenant_layout()?;
+    let _ = cfg.ensure_encryption_key();
+    cfg.ensure_auth_keys()?;
+    cfg.ensure_data_dir()?;
+    let _ = cfg.migrate_plugins()?;
+    let _ = cfg.migrate_plugin_config_to_root()?;
+    let _ = cfg.migrate_plugin_queue_to_root()?;
+    let _ = cfg.migrate_plugin_runtime_to_root()?;
+    cfg.save(&config_path)?;
+    Ok((cfg, config_path, true))
 }
 
 pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
-    let config_path = if let Some(path) = path {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        path
-    } else {
-        default_config_path()?
+    let config_path = match path {
+        Some(path) => normalize_path(path)?,
+        None => default_config_path()?,
     };
-
-    if config_path.exists() {
-        let contents = fs::read_to_string(&config_path)?;
-        let mut cfg: Config = toml::from_str(&contents)?;
-        cfg.ensure_single_tenant_layout()?;
-
-        let updated = cfg.ensure_encryption_key();
-        let auth_updated = cfg.ensure_auth_keys()?;
-        cfg.ensure_data_dir()?;
-        let migrated = cfg.migrate_plugins()?;
-        let plugins_relocated = cfg.migrate_plugin_config_to_root()?;
-        let queue_relocated = cfg.migrate_plugin_queue_to_root()?;
-        let runtime_relocated = cfg.migrate_plugin_runtime_to_root()?;
-        if updated
-            || migrated
-            || auth_updated
-            || plugins_relocated
-            || queue_relocated
-            || runtime_relocated
-        {
-            cfg.save(&config_path)?;
-        }
-        Ok((cfg, config_path))
-    } else {
-        let mut cfg = Config::default();
-        cfg.ensure_single_tenant_layout()?;
-        let _ = cfg.ensure_encryption_key();
-        cfg.ensure_auth_keys()?;
-        cfg.ensure_data_dir()?;
-        let _ = cfg.migrate_plugins()?;
-        let _ = cfg.migrate_plugin_config_to_root()?;
-        let _ = cfg.migrate_plugin_queue_to_root()?;
-        let _ = cfg.migrate_plugin_runtime_to_root()?;
-        cfg.save(&config_path)?;
-        Ok((cfg, config_path))
-    }
+    load_config(config_path)
 }
 
 impl Config {
@@ -798,13 +792,85 @@ pub struct SocketConfigUpdate {
     pub bind_addr: Option<String>,
 }
 
-fn default_config_root() -> Result<PathBuf> {
-    if let Some(home) = dirs::home_dir() {
-        Ok(home.join(".eventdbx"))
+fn find_workspace_config_path(start: Option<&Path>) -> Result<PathBuf> {
+    let start = match start {
+        Some(path) => path.to_path_buf(),
+        None => env::current_dir().map_err(|err| {
+            EventError::Config(format!("failed to resolve current directory: {err}"))
+        })?,
+    };
+    find_workspace_config_path_from(start.as_path())
+}
+
+fn find_workspace_config_path_from(start: &Path) -> Result<PathBuf> {
+    let mut current = normalize_path(start.to_path_buf())?;
+    loop {
+        let candidate = current.join(WORKSPACE_DIR_NAME).join(CONFIG_FILE_NAME);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+
+    Err(EventError::Config(format!(
+        "no EventDBX workspace found from {} upward.\nRun `dbx init` to create {} in the current directory or pass `--config <path>`.",
+        start.display(),
+        WORKSPACE_DIR_NAME
+    )))
+}
+
+fn init_config_path(path: Option<PathBuf>) -> Result<PathBuf> {
+    match path {
+        Some(path) => normalize_path(path),
+        None => {
+            let cwd = env::current_dir().map_err(|err| {
+                EventError::Config(format!("failed to resolve current directory: {err}"))
+            })?;
+            Ok(cwd.join(WORKSPACE_DIR_NAME).join(CONFIG_FILE_NAME))
+        }
+    }
+}
+
+fn load_config(config_path: PathBuf) -> Result<(Config, PathBuf)> {
+    if !config_path.exists() {
+        return Err(EventError::Config(format!(
+            "config file not found at {}.\nRun `dbx init` to create a workspace or pass an existing `--config <path>`.",
+            config_path.display()
+        )));
+    }
+
+    let contents = fs::read_to_string(&config_path)?;
+    let mut cfg: Config = toml::from_str(&contents)?;
+    cfg.ensure_single_tenant_layout()?;
+
+    let updated = cfg.ensure_encryption_key();
+    let auth_updated = cfg.ensure_auth_keys()?;
+    cfg.ensure_data_dir()?;
+    let migrated = cfg.migrate_plugins()?;
+    let plugins_relocated = cfg.migrate_plugin_config_to_root()?;
+    let queue_relocated = cfg.migrate_plugin_queue_to_root()?;
+    let runtime_relocated = cfg.migrate_plugin_runtime_to_root()?;
+    if updated
+        || migrated
+        || auth_updated
+        || plugins_relocated
+        || queue_relocated
+        || runtime_relocated
+    {
+        cfg.save(&config_path)?;
+    }
+    Ok((cfg, config_path))
+}
+
+fn normalize_path(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
     } else {
-        env::current_dir()
-            .map(|dir| dir.join(".eventdbx"))
-            .map_err(|err| EventError::Config(err.to_string()))
+        env::current_dir().map(|cwd| cwd.join(path)).map_err(|err| {
+            EventError::Config(format!("failed to resolve current directory: {err}"))
+        })
     }
 }
 
@@ -893,7 +959,9 @@ fn generate_jwt_keypair() -> Result<(String, String)> {
 }
 
 fn default_data_dir() -> PathBuf {
-    default_config_root().unwrap_or_else(|_| PathBuf::from(".eventdbx"))
+    env::current_dir()
+        .map(|dir| dir.join(WORKSPACE_DIR_NAME))
+        .unwrap_or_else(|_| PathBuf::from(WORKSPACE_DIR_NAME))
 }
 
 fn default_domain() -> String {
@@ -1113,6 +1181,7 @@ fn default_log_level() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn applies_snapshot_threshold_updates() {
@@ -1190,6 +1259,53 @@ mod tests {
         config.restrict = RestrictMode::Strict;
         let payload = toml::to_string(&config).expect("config should serialize");
         assert!(payload.contains("restrict = \"strict\""));
+    }
+
+    #[test]
+    fn finds_nearest_workspace_config_in_parent_tree() {
+        let temp = tempdir().expect("temp dir");
+        let project = temp.path().join("project");
+        let nested = project.join("nested").join("deeper");
+        let config_path = project.join(WORKSPACE_DIR_NAME).join(CONFIG_FILE_NAME);
+        fs::create_dir_all(&nested).expect("nested dir");
+        fs::create_dir_all(config_path.parent().expect("config parent")).expect("workspace dir");
+        fs::write(&config_path, "").expect("config file");
+
+        let resolved =
+            find_workspace_config_path_from(&nested).expect("workspace discovery should succeed");
+        assert_eq!(resolved, config_path);
+    }
+
+    #[test]
+    fn reports_missing_workspace_when_no_parent_contains_dbx() {
+        let temp = tempdir().expect("temp dir");
+        let nested = temp.path().join("project").join("nested");
+        fs::create_dir_all(&nested).expect("nested dir");
+
+        let err = find_workspace_config_path_from(&nested).expect_err("workspace should be absent");
+        assert!(err.to_string().contains("Run `dbx init`"));
+    }
+
+    #[test]
+    fn init_workspace_creates_local_config_and_data_dir() {
+        let temp = tempdir().expect("temp dir");
+        let config_path = temp
+            .path()
+            .join("project")
+            .join(WORKSPACE_DIR_NAME)
+            .join(CONFIG_FILE_NAME);
+
+        let (config, resolved_path, created) =
+            init_workspace(Some(config_path.clone())).expect("workspace init should succeed");
+
+        assert!(created);
+        assert_eq!(resolved_path, config_path);
+        assert_eq!(
+            config.data_dir,
+            config_path.parent().expect("config parent").to_path_buf()
+        );
+        assert!(resolved_path.exists());
+        assert!(config.event_store_path().join("CURRENT").exists());
     }
 }
 

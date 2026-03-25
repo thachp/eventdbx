@@ -22,13 +22,21 @@ Removed from the supported product surface:
 
 ## Quick Start
 
-1. Start the daemon:
+1. Initialize a local workspace in your project directory:
+
+```bash
+dbx init
+```
+
+This creates `./.dbx` and stores both configuration and runtime data there. Runtime commands discover the nearest `.dbx/config.toml` by walking up from the current directory, similar to Git repository discovery.
+
+2. Start the daemon:
 
 ```bash
 dbx start --foreground
 ```
 
-2. Author a schema in `schema.dbx`:
+3. Author a schema in `schema.dbx`:
 
 ```text
 aggregate order {
@@ -48,7 +56,7 @@ aggregate order {
 }
 ```
 
-3. Validate and preview the compiled runtime schema:
+4. Validate and preview the compiled runtime schema:
 
 ```bash
 dbx schema validate
@@ -57,20 +65,20 @@ dbx schema show
 
 `dbx schema show` is a deterministic preview of the compiled runtime shape. It intentionally normalizes volatile timestamps so unchanged source renders the same output across runs.
 
-4. Apply the schema:
+5. Apply the schema:
 
 ```bash
 dbx schema apply
 ```
 
-5. Bootstrap or mint a token:
+6. Bootstrap or mint a token:
 
 ```bash
 dbx token bootstrap --stdout
 dbx token generate --group ops --user alice --action aggregate.read --action aggregate.append --json
 ```
 
-6. Write and read aggregates:
+7. Write and read aggregates:
 
 ```bash
 dbx aggregate create order order-42 --event order_created --field status=open --json
@@ -107,6 +115,7 @@ This replaces built-in peer replication. The core daemon does not manage destina
 
 Supported commands:
 
+- `dbx init`
 - `dbx start`
 - `dbx stop`
 - `dbx status`
@@ -129,6 +138,8 @@ Supported commands:
 - auth keys
 - Snowflake worker id
 - control-channel Noise toggle
+
+The default config location is the nearest `.dbx/config.toml` in the current directory tree.
 
 EventDBX now runs as a single-tenant core pinned to the logical domain `default`.
 

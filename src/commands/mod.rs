@@ -3,6 +3,7 @@ pub mod cli_token;
 pub mod client;
 pub mod config;
 pub mod events;
+pub mod init;
 pub mod schema;
 pub mod start;
 pub mod token;

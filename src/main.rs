@@ -24,7 +24,7 @@ use crate::commands::{
     disable_version_flag = true
 )]
 struct Cli {
-    /// Path to the configuration file. Defaults to ~/.eventdbx/config.toml
+    /// Path to the configuration file. Defaults to the nearest .dbx/config.toml in the current directory tree
     #[arg(long)]
     config: Option<PathBuf>,
 
@@ -34,6 +34,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize a local EventDBX workspace
+    Init,
     /// Start the EventDBX server
     Start(StartArgs),
     /// Stop the EventDBX server
@@ -81,6 +83,7 @@ async fn main() -> Result<()> {
     let Cli { config, command } = Cli::parse();
 
     match command {
+        Commands::Init => commands::init::execute(config)?,
         Commands::Start(args) => commands::start::execute(config, args).await?,
         Commands::Stop => commands::start::stop(config)?,
         Commands::Status => commands::start::status(config)?,
