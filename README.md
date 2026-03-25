@@ -1,24 +1,33 @@
 # EventDBX
 
-EventDBX is a single-tenant, single-authority write-side event database.
+EventDBX is a local-first, single-tenant, write-side event database for developers who want an auditable system of record without standing up a full event platform.
 
-The supported core is:
+It stores every accepted change as an immutable event, materializes current aggregate state from that history, and keeps the write path explicit and schema-checked. In practice, that makes it a good fit for applications where state transitions matter more than ad hoc document updates: order flows, workflow engines, internal tools, operational systems, and domain models that need replayable history.
 
-- authenticated writes
-- schema enforcement from `schema.dbx`
-- immutable event history
-- aggregate reads
+The core model is intentionally narrow:
+
+- one logical domain, pinned to `default`
+- one authority for writes
+- one local workspace discovered from `.dbx/config.toml`
+- one schema source, authored in `schema.dbx`
+
+What the supported core provides:
+
+- authenticated control-plane and write operations
+- immutable event history and aggregate reconstruction
+- schema enforcement and reference validation from `schema.dbx`
+- aggregate reads and event inspection from the local daemon
 - Merkle-style integrity verification
-- automatic snapshots
-- a pull-based outbox for downstream replication
+- automatic snapshots on the write path
+- a pull-based outbox for downstream consumers
 
-Removed from the supported product surface:
+What this lean build does not try to be:
 
-- multi-tenant hosting and tenant management
-- built-in peer replication (`checkout`, `merge`, `push`, `pull`, `watch`)
-- plugin and queue orchestration
-- manual snapshot management commands
-- backup, restore, and upgrade commands
+- a multi-tenant hosting platform
+- a built-in peer replication system
+- a plugin runtime or queue orchestrator
+- a general-purpose document database
+- a full backup, restore, and upgrade management suite
 
 ## Quick Start
 
@@ -37,6 +46,8 @@ Use `--ttl` to override that bootstrap token lifetime with either raw seconds or
 ```bash
 dbx serve start --foreground
 ```
+
+Use `dbx serve status` to inspect the daemon, `dbx serve restart` to restart it, and `dbx serve stop` when you want to shut it down.
 
 3. Author a schema in `schema.dbx`:
 
@@ -242,7 +253,7 @@ Supported `reference` keys:
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `integrity` | string | `strong` or `weak`. `strong` rejects missing/forbidden targets; `weak` allows unresolved targets. |
-| `tenant` | string | Restricts the reference to a specific domain/tenant. |
+| `tenant` | string | Restricts the reference to a specific domain. The schema key remains named `tenant` for compatibility; single-tenant builds effectively pin this to `default`. |
 | `aggregate_type` | string | Restricts the reference to a specific aggregate type. |
 | `cascade` | string | `none`, `restrict`, or `nullify`. Stored in schema metadata for downstream reference handling. |
 
@@ -252,7 +263,7 @@ Accepted reference string shapes:
 - `aggregate#id`
 - `#id`
 
-Reference values are canonicalized to `domain#aggregate#id` during normalization. Invalid shapes, wrong target tenant/aggregate, or unresolved strong references fail validation.
+Reference values are canonicalized to `domain#aggregate#id` during normalization. Invalid shapes, wrong target domain/aggregate, or unresolved strong references fail validation.
 
 ### Nested Object Rules
 
@@ -407,11 +418,22 @@ Supported commands:
 
 Operational notes:
 
+- Server lifecycle commands now live under `dbx serve`. The old top-level commands `dbx start`, `dbx stop`, `dbx status`, `dbx restart`, and `dbx destroy` are no longer supported.
 - `dbx serve start --restrict [off|default|strict]` controls schema enforcement mode for the running daemon
 - `dbx serve destroy` removes the active `.dbx` workspace directory and prompts for confirmation unless `--yes` is passed
 - `dbx serve destroy` does not imply that an external `data_dir` outside the workspace will be removed
 - `dbx schema validate|show|apply` discover the nearest `schema.dbx` by default and accept `--file <PATH>` to override
 - `dbx schema show [AGGREGATE]` renders either the full compiled schema set or a single aggregate preview
+
+Lifecycle examples:
+
+```bash
+dbx serve start
+dbx serve status
+dbx serve restart --foreground
+dbx serve stop
+dbx serve destroy --yes
+```
 
 ## Configuration
 
