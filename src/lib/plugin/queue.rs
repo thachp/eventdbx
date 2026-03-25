@@ -1,6 +1,12 @@
-use std::{fs, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+    sync::{Arc, Weak},
+};
 
 use chrono::Utc;
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rocksdb::{DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options, WriteBatch};
 use serde::{Deserialize, Serialize};
@@ -20,6 +26,12 @@ const PREFIX_JOB: &[u8] = b"job";
 const PREFIX_STATUS: &[u8] = b"status";
 
 const PROCESSING_TIMEOUT_MS: i64 = 60_000;
+const LEGACY_DEAD_QUEUE_ERROR: &str = "migrated from legacy dead queue";
+
+type SharedDb = Arc<DBWithThreadMode<MultiThreaded>>;
+
+static PLUGIN_QUEUE_DB_CACHE: Lazy<Mutex<HashMap<PathBuf, Weak<DBWithThreadMode<MultiThreaded>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct JobRecord {
@@ -90,7 +102,7 @@ pub struct PluginQueueStatus {
 
 #[derive(Clone)]
 pub struct PluginQueueStore {
-    db: Arc<DBWithThreadMode<MultiThreaded>>,
+    db: SharedDb,
     id_generator: Arc<Mutex<SnowflakeGenerator>>,
 }
 
@@ -102,6 +114,7 @@ impl PluginQueueStore {
     pub fn open_with_legacy(db_path: &Path, legacy_json_path: &Path) -> Result<Self> {
         let store = Self::open_internal(db_path)?;
         store.migrate_from_legacy(legacy_json_path)?;
+        store.finalize_legacy_jobs()?;
         Ok(store)
     }
 
@@ -520,19 +533,35 @@ impl PluginQueueStore {
             }
         }
 
+        let normalized_path = normalize_db_path(path)?;
         let mut options = Options::default();
         options.create_if_missing(true);
 
-        let db = DBWithThreadMode::<MultiThreaded>::open(&options, path).map_err(|err| {
-            EventError::Storage(format!(
-                "failed to open plugin queue store at {}: {}",
-                path.display(),
-                err
-            ))
-        })?;
+        // Serialize the initial open per process so callers reuse a shared handle.
+        let db = {
+            let mut cache = PLUGIN_QUEUE_DB_CACHE.lock();
+            if let Some(existing) = cache.get(&normalized_path).and_then(Weak::upgrade) {
+                existing
+            } else {
+                cache.remove(&normalized_path);
+                let opened = Arc::new(
+                    DBWithThreadMode::<MultiThreaded>::open(&options, &normalized_path).map_err(
+                        |err| {
+                            EventError::Storage(format!(
+                                "failed to open plugin queue store at {}: {}",
+                                normalized_path.display(),
+                                err
+                            ))
+                        },
+                    )?,
+                );
+                cache.insert(normalized_path.clone(), Arc::downgrade(&opened));
+                opened
+            }
+        };
 
         Ok(Self {
-            db: Arc::new(db),
+            db,
             id_generator: Arc::new(Mutex::new(SnowflakeGenerator::new(0))),
         })
     }
@@ -586,12 +615,13 @@ impl PluginQueueStore {
                 event.aggregate_id,
                 event.event_type,
             );
-            let _ = self.enqueue_job(
+            let job = self.enqueue_job(
                 "legacy",
                 payload,
                 Utc::now().timestamp_millis(),
                 JobPriority::Normal,
             )?;
+            self.complete_job(job.id)?;
         }
 
         for event in legacy.dead_events.into_iter() {
@@ -607,15 +637,32 @@ impl PluginQueueStore {
                 Utc::now().timestamp_millis(),
                 JobPriority::Normal,
             )?;
-            let _ = self.fail_job(
-                job.id,
-                "migrated from legacy dead queue".to_string(),
-                Utc::now().timestamp_millis(),
-                u8::MAX,
-            )?;
+            self.transition_job(job.id, |job| {
+                job.status = JobStatus::Dead;
+                job.attempts = u8::MAX;
+                job.last_error = Some(LEGACY_DEAD_QUEUE_ERROR.to_string());
+                job.next_retry_at = None;
+            })?;
         }
 
         self.archive_legacy_file(legacy_path);
+        Ok(())
+    }
+
+    fn finalize_legacy_jobs(&self) -> Result<()> {
+        let pending = self.collect_jobs(JobStatus::Pending)?;
+        for job in pending.into_iter().filter(|job| job.plugin == "legacy") {
+            if job.last_error.as_deref() == Some(LEGACY_DEAD_QUEUE_ERROR) {
+                self.transition_job(job.id, |job| {
+                    job.status = JobStatus::Dead;
+                    job.attempts = u8::MAX;
+                    job.next_retry_at = None;
+                })?;
+            } else {
+                self.complete_job(job.id)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -723,17 +770,88 @@ fn legacy_payload(
     .expect("legacy payload serialization should succeed")
 }
 
+fn normalize_db_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|err| {
+                EventError::Storage(format!("failed to resolve current directory: {err}"))
+            })?
+    };
+
+    if absolute.exists() {
+        return fs::canonicalize(&absolute).map_err(|err| {
+            EventError::Storage(format!(
+                "failed to normalize plugin queue path {}: {}",
+                absolute.display(),
+                err
+            ))
+        });
+    }
+
+    let Some(parent) = absolute.parent() else {
+        return Ok(absolute);
+    };
+
+    let canonical_parent = fs::canonicalize(parent).map_err(|err| {
+        EventError::Storage(format!(
+            "failed to normalize plugin queue path {}: {}",
+            absolute.display(),
+            err
+        ))
+    })?;
+
+    Ok(match absolute.file_name() {
+        Some(name) => canonical_parent.join(name),
+        None => canonical_parent,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::Result;
     use chrono::Utc;
     use serde_json::json;
+    use std::{
+        fs,
+        sync::{Arc, Barrier},
+        thread,
+    };
     use tempfile::TempDir;
 
     fn open_store(tmp: &TempDir) -> Result<PluginQueueStore> {
         let path = tmp.path().join("queue.db");
         PluginQueueStore::open(path.as_path())
+    }
+
+    #[test]
+    fn open_reuses_cached_db_handle_across_threads() -> Result<()> {
+        let tmp = TempDir::new().expect("create temp dir");
+        let queue_path = tmp.path().join("queue.db");
+        let barrier = Arc::new(Barrier::new(4));
+        let mut handles = Vec::new();
+
+        for _ in 0..4 {
+            let queue_path = queue_path.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                PluginQueueStore::open(queue_path.as_path())
+            }));
+        }
+
+        let stores: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread should not panic"))
+            .collect::<Result<Vec<_>>>()?;
+
+        let first = &stores[0];
+        assert!(stores.iter().all(|store| Arc::ptr_eq(&first.db, &store.db)));
+
+        Ok(())
     }
 
     #[test]
@@ -807,6 +925,100 @@ mod tests {
 
         assert_eq!(store.truncate_done(0)?, 1);
         assert!(store.status()?.done.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn open_with_legacy_completes_pending_entries_and_preserves_dead_entries() -> Result<()> {
+        let tmp = TempDir::new().expect("create temp dir");
+        let db_path = tmp.path().join("queue.db");
+        let legacy_path = tmp.path().join("plugin-queue.json");
+        fs::write(
+            &legacy_path,
+            json!({
+                "pending_events": [
+                    {
+                        "event_id": "1",
+                        "aggregate_type": "order",
+                        "aggregate_id": "order-1",
+                        "event_type": "created",
+                        "_attempts": 0
+                    }
+                ],
+                "dead_events": [
+                    {
+                        "event_id": "2",
+                        "aggregate_type": "order",
+                        "aggregate_id": "order-2",
+                        "event_type": "failed",
+                        "_attempts": 3
+                    }
+                ]
+            })
+            .to_string(),
+        )?;
+
+        let store = PluginQueueStore::open_with_legacy(db_path.as_path(), legacy_path.as_path())?;
+        let status = store.status()?;
+
+        assert!(status.pending.is_empty());
+        assert_eq!(status.done.len(), 1);
+        assert_eq!(status.done[0].plugin, "legacy");
+        assert_eq!(status.dead.len(), 1);
+        assert_eq!(status.dead[0].plugin, "legacy");
+        assert!(!legacy_path.exists());
+        assert!(legacy_path.with_extension("json.migrated").exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn open_with_legacy_repairs_previously_migrated_legacy_entries() -> Result<()> {
+        let tmp = TempDir::new().expect("create temp dir");
+        let db_path = tmp.path().join("queue.db");
+        let missing_legacy_path = tmp.path().join("missing-legacy.json");
+        let store = PluginQueueStore::open(db_path.as_path())?;
+        let now = Utc::now().timestamp_millis();
+
+        let pending_job = store.enqueue_job(
+            "legacy",
+            legacy_payload(
+                SnowflakeId::from_u64(1),
+                "order".to_string(),
+                "order-1".to_string(),
+                "created".to_string(),
+            ),
+            now,
+            JobPriority::Normal,
+        )?;
+        let dead_job = store.enqueue_job(
+            "legacy",
+            legacy_payload(
+                SnowflakeId::from_u64(2),
+                "order".to_string(),
+                "order-2".to_string(),
+                "failed".to_string(),
+            ),
+            now,
+            JobPriority::Normal,
+        )?;
+        store.fail_job(
+            dead_job.id,
+            LEGACY_DEAD_QUEUE_ERROR.to_string(),
+            now,
+            u8::MAX,
+        )?;
+
+        let repaired =
+            PluginQueueStore::open_with_legacy(db_path.as_path(), missing_legacy_path.as_path())?;
+        let status = repaired.status()?;
+
+        assert!(status.pending.is_empty());
+        assert_eq!(status.done.len(), 1);
+        assert_eq!(status.done[0].id, pending_job.id);
+        assert_eq!(status.dead.len(), 1);
+        assert_eq!(status.dead[0].id, dead_job.id);
+
         Ok(())
     }
 }

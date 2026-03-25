@@ -478,14 +478,18 @@ fn build_job_payload(
 mod tests {
     use super::*;
     use crate::{
-        config::PluginQueuePruneConfig,
+        config::{Config, LogPluginConfig, PluginConfig, PluginDefinition, PluginQueuePruneConfig},
         schema::AggregateSchema,
         snowflake::SnowflakeId,
         store::{AggregateState, EventMetadata, EventRecord},
     };
     use chrono::Utc;
     use serde_json::json;
-    use std::collections::BTreeMap;
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Barrier},
+        thread,
+    };
     use tempfile::TempDir;
 
     struct FailingPlugin;
@@ -559,6 +563,46 @@ mod tests {
         assert!(job_record.payload.is_null());
         assert_eq!(job_record.extensions, record.extensions);
         assert_eq!(job_record.aggregate_id, record.aggregate_id);
+    }
+
+    #[test]
+    fn from_config_initializes_queue_for_concurrent_callers() -> Result<()> {
+        let temp = TempDir::new().expect("tempdir");
+        let mut config = Config::default();
+        config.data_dir = temp.path().to_path_buf();
+        config.ensure_data_dir()?;
+        config.save_plugins(&[PluginDefinition {
+            enabled: true,
+            emit_events: true,
+            name: Some("logger".into()),
+            payload_mode: PluginPayloadMode::All,
+            config: PluginConfig::Log(LogPluginConfig {
+                level: "info".into(),
+                template: None,
+                detail: Default::default(),
+            }),
+        }])?;
+
+        let barrier = Arc::new(Barrier::new(4));
+        let mut handles = Vec::new();
+
+        for _ in 0..4 {
+            let barrier = Arc::clone(&barrier);
+            let config = config.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                PluginManager::from_config(&config)
+            }));
+        }
+
+        let managers: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread should not panic"))
+            .collect::<Result<Vec<_>>>()?;
+
+        assert!(managers.iter().all(|manager| manager.queue.is_some()));
+
+        Ok(())
     }
 
     #[test]

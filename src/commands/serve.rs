@@ -9,14 +9,28 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use clap::{Args, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 use eventdbx::{
-    config::{Config, ConfigUpdate, load_or_default},
+    config::{Config, ConfigUpdate, WORKSPACE_DIR_NAME, load_or_default},
     restrict::{self, RESTRICT_ENV},
     server,
 };
+
+#[derive(Subcommand)]
+pub enum ServeCommands {
+    /// Start the EventDBX server
+    Start(StartArgs),
+    /// Stop the EventDBX server
+    Stop,
+    /// Display EventDBX server status
+    Status,
+    /// Restart the EventDBX server
+    Restart(StartArgs),
+    /// Remove the active EventDBX workspace (.dbx)
+    Destroy(DestroyArgs),
+}
 
 #[derive(Args, Clone)]
 pub struct StartArgs {
@@ -105,7 +119,17 @@ pub struct DestroyArgs {
     pub yes: bool,
 }
 
-pub async fn execute(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
+pub async fn execute(config_path: Option<PathBuf>, command: ServeCommands) -> Result<()> {
+    match command {
+        ServeCommands::Start(args) => start(config_path, args).await,
+        ServeCommands::Stop => stop(config_path),
+        ServeCommands::Status => status(config_path),
+        ServeCommands::Restart(args) => restart(config_path, args).await,
+        ServeCommands::Destroy(args) => destroy(config_path, args),
+    }
+}
+
+async fn start(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
     restrict::set_env(args.restrict.into());
     if args.foreground {
         start_foreground(config_path, args).await
@@ -119,6 +143,13 @@ pub async fn run_internal(config_path: Option<PathBuf>) -> Result<()> {
     let args = StartArgs::default();
     restrict::set_env(args.restrict.into());
     start_foreground(config_path, args).await
+}
+
+async fn restart(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
+    if let Err(err) = stop(config_path.clone()) {
+        tracing::warn!("failed to stop EventDBX server before restart: {err}");
+    }
+    start(config_path, args).await
 }
 
 pub fn stop(config_path: Option<PathBuf>) -> Result<()> {
@@ -205,7 +236,6 @@ mod tests {
 pub fn status(config_path: Option<PathBuf>) -> Result<()> {
     let (config, _) = load_or_default(config_path)?;
     let pid_path = config.pid_file_path();
-    let domain = config.active_domain().to_string();
 
     match read_pid_record(&pid_path)? {
         Some(record) => {
@@ -215,29 +245,26 @@ pub fn status(config_path: Option<PathBuf>) -> Result<()> {
                     resolve_socket_port(&config.socket.bind_addr).unwrap_or(config.port);
                 if let Some(started_at) = record.started_at {
                     println!(
-                        "EventDBX server is running on port {} (pid {}) — restrict={} — domain={} — up for {} (since {})",
+                        "EventDBX server is running on port {} (pid {}) — restrict={} — up for {} (since {})",
                         socket_port,
                         pid,
                         config.restrict,
-                        domain,
                         describe_uptime(started_at),
                         started_at.to_rfc3339()
                     );
                 } else {
                     println!(
-                        "EventDBX server is running on port {} (pid {}) — restrict={} — domain={}",
-                        socket_port, pid, config.restrict, domain
+                        "EventDBX server is running on port {} (pid {}) — restrict={}",
+                        socket_port, pid, config.restrict
                     );
                 }
             } else {
                 let _ = fs::remove_file(&pid_path);
                 println!("EventDBX server is not running (removed stale pid file).");
-                println!("Active domain: {}", domain);
             }
         }
         None => {
             println!("EventDBX server is not running.");
-            println!("Active domain: {}", domain);
         }
     }
 
@@ -245,13 +272,13 @@ pub fn status(config_path: Option<PathBuf>) -> Result<()> {
 }
 
 pub fn destroy(config_path: Option<PathBuf>, args: DestroyArgs) -> Result<()> {
-    let (config, path) = load_or_default(config_path)?;
+    let (_, path) = load_or_default(config_path)?;
+    let workspace_path = workspace_root(&path)?;
 
     if !args.yes {
         eprint!(
-            "This will permanently delete all EventDBX data under {} and remove the config file at {}.\nType \"destroy\" to continue: ",
-            config.data_dir.display(),
-            path.display()
+            "This will permanently remove the active EventDBX workspace at {}.\nType \"destroy\" to continue: ",
+            workspace_path.display()
         );
         io::stderr().flush()?;
         let mut confirmation = String::new();
@@ -266,19 +293,30 @@ pub fn destroy(config_path: Option<PathBuf>, args: DestroyArgs) -> Result<()> {
         tracing::warn!("failed to stop running server before destroy: {err}");
     }
 
-    if config.data_dir.exists() {
-        fs::remove_dir_all(&config.data_dir)?;
+    if workspace_path.exists() {
+        fs::remove_dir_all(&workspace_path)?;
     }
 
-    if path.exists() {
-        fs::remove_file(&path)?;
-    }
-
-    println!(
-        "All EventDBX data and configuration removed from {}",
-        config.data_dir.display()
-    );
+    println!("Removed EventDBX workspace at {}", workspace_path.display());
     Ok(())
+}
+
+fn workspace_root(config_path: &Path) -> Result<PathBuf> {
+    let workspace_path = config_path.parent().ok_or_else(|| {
+        anyhow!(
+            "config path {} has no parent directory",
+            config_path.display()
+        )
+    })?;
+    let workspace_name = workspace_path.file_name().and_then(|name| name.to_str());
+    if workspace_name != Some(WORKSPACE_DIR_NAME) {
+        anyhow::bail!(
+            "refusing to destroy workspace for config at {} because its parent directory is not `{}`",
+            config_path.display(),
+            WORKSPACE_DIR_NAME
+        );
+    }
+    Ok(workspace_path.to_path_buf())
 }
 
 async fn start_foreground(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
@@ -318,11 +356,11 @@ fn start_daemon(config_path: Option<PathBuf>, args: StartArgs) -> Result<()> {
             let message = if let Some(code) = status.code() {
                 format!(
                     "EventDBX server failed to start (process exited with status {code}). \
-                     Re-run with `eventdbx start --foreground` for details."
+                     Re-run with `dbx serve start --foreground` for details."
                 )
             } else {
                 "EventDBX server failed to start (process terminated unexpectedly). \
-                 Re-run with `eventdbx start --foreground` for details."
+                 Re-run with `dbx serve start --foreground` for details."
                     .to_string()
             };
             return Err(anyhow!(message));

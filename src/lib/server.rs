@@ -15,7 +15,10 @@ use super::{
     config::Config,
     error::{EventError, Result},
     observability,
-    tenant::{CoreProvider, TenantRegistry},
+    schema::SchemaManager,
+    service::CoreContext,
+    store::EventStore,
+    tenant::{CoreProvider, StaticCoreProvider},
     token::TokenManager,
 };
 
@@ -35,26 +38,36 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         config_snapshot.jwt_revocations_path(),
         encryption.clone(),
     )?);
-    let tenant_registry = Arc::new(TenantRegistry::new(
-        config_snapshot.clone(),
-        Arc::clone(&tokens),
+    let store = Arc::new(EventStore::open(
+        config_snapshot.event_store_path(),
         encryption,
+        config_snapshot.snowflake_worker_id,
     )?);
-    tenant_registry
-        .core_for(config_snapshot.active_domain())
-        .map_err(|err| {
-            EventError::Config(format!(
-                "failed to initialize tenant '{}': {err}",
-                config_snapshot.active_domain()
-            ))
-        })?;
+    let schemas = Arc::new(SchemaManager::load(config_snapshot.schema_store_path())?);
+    let core = CoreContext::new(
+        Arc::clone(&tokens),
+        schemas,
+        store,
+        config_snapshot.restrict,
+        config_snapshot.list_page_size,
+        config_snapshot.page_limit,
+        config_snapshot.active_domain().to_string(),
+        None,
+        None,
+        Arc::new(crate::tenant_store::TenantAssignmentStore::open(
+            config_snapshot.tenant_meta_path(),
+        )?),
+        config_snapshot.reference_default_depth,
+        config_snapshot.reference_max_depth,
+    );
+    let core_provider = Arc::new(StaticCoreProvider::new(core));
 
     let cli_bind_addr = config_snapshot.socket.bind_addr.clone();
     let cli_proxy_handle = cli_proxy::start(
         &cli_bind_addr,
         Arc::clone(&config_path),
         Arc::clone(&tokens),
-        Arc::clone(&tenant_registry) as Arc<dyn CoreProvider>,
+        Arc::clone(&core_provider) as Arc<dyn CoreProvider>,
         Arc::clone(&shared_config),
     )
     .await

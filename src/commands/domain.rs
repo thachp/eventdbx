@@ -453,7 +453,7 @@ fn push_domain(config_path: Option<PathBuf>, args: DomainSyncArgs) -> Result<()>
             event_store_path.display()
         );
         println!(
-            "Run `dbx start` once with domain '{}' active to initialise the store before pushing.",
+            "Run `dbx serve start` once with domain '{}' active to initialise the store before pushing.",
             domain
         );
         return Ok(());

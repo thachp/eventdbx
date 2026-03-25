@@ -476,6 +476,47 @@ impl CoreContext {
         )
     }
 
+    pub fn read_outbox(
+        &self,
+        token: &str,
+        after_event_id: Option<SnowflakeId>,
+        take: Option<usize>,
+    ) -> Result<(Vec<EventRecord>, Option<SnowflakeId>)> {
+        let mut effective_take = take.unwrap_or(self.list_page_size);
+        if effective_take == 0 {
+            return Ok((Vec::new(), None));
+        }
+        if effective_take > self.page_limit {
+            effective_take = self.page_limit;
+        }
+
+        let claims: JwtClaims = self
+            .tokens()
+            .authorize_action(token, "aggregate.read", None)?;
+        let events = self.store.read_outbox(after_event_id, effective_take)?;
+
+        let mut outbox = Vec::new();
+        for record in events {
+            if self.is_hidden_aggregate(&record.aggregate_type) {
+                continue;
+            }
+
+            let resource = Self::aggregate_resource(&record.aggregate_type, &record.aggregate_id);
+            if !claims.allows_resource(Some(resource.as_str())) {
+                continue;
+            }
+
+            let event_id = record.metadata.event_id;
+            outbox.push(record);
+            if outbox.len() >= effective_take {
+                return Ok((outbox, Some(event_id)));
+            }
+        }
+
+        let next_after_event_id = outbox.last().map(|record| record.metadata.event_id);
+        Ok((outbox, next_after_event_id))
+    }
+
     pub fn list_referrers(
         &self,
         token: &str,

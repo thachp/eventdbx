@@ -7,7 +7,6 @@ use super::cli_token;
 use crate::commands::config::ensure_secrets_configured;
 use eventdbx::{
     config::{Config, load_or_default},
-    tenant::normalize_tenant_list,
     token::{IssueTokenInput, JwtLimits, RevokeTokenInput, TokenManager, TokenRecord},
 };
 use serde_json;
@@ -54,10 +53,6 @@ pub struct TokenGenerateArgs {
 
     #[arg(long, default_value_t = false)]
     pub keep_alive: bool,
-
-    /// Restrict the token to one or more tenants (repeat flag to allow multiple)
-    #[arg(long = "tenant", value_name = "TENANT")]
-    pub tenants: Vec<String>,
 
     /// Emit JSON output
     #[arg(long, default_value_t = false)]
@@ -129,9 +124,6 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
             if args.actions.is_empty() {
                 bail!("at least one --action must be provided");
             }
-            if args.tenants.is_empty() {
-                bail!("--tenant must be specified at least once to bind the token to a tenant");
-            }
 
             let subject = args
                 .subject
@@ -149,7 +141,7 @@ pub fn execute(config_path: Option<PathBuf>, command: TokenCommands) -> Result<(
                 user: args.user,
                 actions: args.actions.clone(),
                 resources,
-                tenants: normalize_tenant_list(&args.tenants),
+                tenants: Vec::new(),
                 ttl_secs: args.ttl,
                 not_before: None,
                 issued_by,
