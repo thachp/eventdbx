@@ -290,6 +290,7 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
     if config_path.exists() {
         let contents = fs::read_to_string(&config_path)?;
         let mut cfg: Config = toml::from_str(&contents)?;
+        cfg.ensure_single_tenant_layout()?;
 
         let updated = cfg.ensure_encryption_key();
         let auth_updated = cfg.ensure_auth_keys()?;
@@ -310,6 +311,7 @@ pub fn load_or_default(path: Option<PathBuf>) -> Result<(Config, PathBuf)> {
         Ok((cfg, config_path))
     } else {
         let mut cfg = Config::default();
+        cfg.ensure_single_tenant_layout()?;
         let _ = cfg.ensure_encryption_key();
         cfg.ensure_auth_keys()?;
         cfg.ensure_data_dir()?;
@@ -438,11 +440,11 @@ impl Config {
     }
 
     pub fn active_domain(&self) -> &str {
-        &self.domain
+        DEFAULT_DOMAIN_NAME
     }
 
     pub fn is_default_domain(&self) -> bool {
-        self.domain == DEFAULT_DOMAIN_NAME
+        true
     }
 
     pub fn domains_root(&self) -> PathBuf {
@@ -450,7 +452,7 @@ impl Config {
     }
 
     pub fn domain_data_dir(&self) -> PathBuf {
-        self.domain_data_dir_for(&self.domain)
+        self.domain_data_dir_for(DEFAULT_DOMAIN_NAME)
     }
 
     pub fn domain_data_dir_for(&self, domain: &str) -> PathBuf {
@@ -479,7 +481,7 @@ impl Config {
     }
 
     pub fn multi_tenant(&self) -> bool {
-        self.tenants.multi_tenant
+        false
     }
 
     pub fn shard_count(&self) -> u16 {
@@ -727,6 +729,54 @@ impl Config {
         let dest = self.data_dir.join("plugins").join("run");
         migrate_path_if_absent(&legacy_run, &dest)
     }
+
+    pub fn ensure_single_tenant_layout(&self) -> Result<()> {
+        if self.domain != DEFAULT_DOMAIN_NAME {
+            return Err(EventError::Config(format!(
+                "single-tenant core only supports domain '{DEFAULT_DOMAIN_NAME}', but config.toml selects '{}'. Export/import or run a dedicated migration before upgrading.",
+                self.domain
+            )));
+        }
+        if self.tenants.multi_tenant {
+            return Err(EventError::Config(
+                "single-tenant core does not support `[tenants].multi_tenant = true`. Export/import or run a dedicated migration before upgrading."
+                    .to_string(),
+            ));
+        }
+        if self.tenants.shard_map_path.is_some() {
+            return Err(EventError::Config(
+                "single-tenant core does not support a custom tenant shard map. Export/import or run a dedicated migration before upgrading."
+                    .to_string(),
+            ));
+        }
+
+        let mut conflicts = Vec::new();
+        if let Some(entries) = collect_non_default_entries(self.domains_root().as_path())? {
+            conflicts.extend(entries.into_iter().map(|entry| format!("domains/{entry}")));
+        }
+        if let Some(entries) = collect_non_default_shard_tenants(self.shards_root().as_path())? {
+            conflicts.extend(entries.into_iter());
+        }
+        if self.tenant_meta_path().exists() {
+            let store = TenantAssignmentStore::open_read_only(self.tenant_meta_path())?;
+            for (tenant, _) in store.list()? {
+                if tenant != DEFAULT_DOMAIN_NAME {
+                    conflicts.push(format!("tenant_meta/{tenant}"));
+                }
+            }
+        }
+
+        if conflicts.is_empty() {
+            return Ok(());
+        }
+
+        conflicts.sort();
+        conflicts.dedup();
+        Err(EventError::Config(format!(
+            "single-tenant core only supports one local domain ('{DEFAULT_DOMAIN_NAME}'); found legacy tenant/domain data: {}. Export/import or run a dedicated migration before starting this build.",
+            conflicts.join(", ")
+        )))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -756,6 +806,57 @@ fn default_config_root() -> Result<PathBuf> {
             .map(|dir| dir.join(".eventdbx"))
             .map_err(|err| EventError::Config(err.to_string()))
     }
+}
+
+fn collect_non_default_entries(root: &Path) -> Result<Option<Vec<String>>> {
+    if !root.exists() {
+        return Ok(None);
+    }
+
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name != DEFAULT_DOMAIN_NAME {
+            entries.push(name);
+        }
+    }
+
+    Ok(Some(entries))
+}
+
+fn collect_non_default_shard_tenants(root: &Path) -> Result<Option<Vec<String>>> {
+    if !root.exists() {
+        return Ok(None);
+    }
+
+    let mut entries = Vec::new();
+    for shard_entry in fs::read_dir(root)? {
+        let shard_entry = shard_entry?;
+        if !shard_entry.file_type()?.is_dir() {
+            continue;
+        }
+        let shard_name = shard_entry.file_name().to_string_lossy().to_string();
+        let tenants_root = shard_entry.path().join("tenants");
+        if !tenants_root.exists() {
+            continue;
+        }
+        for tenant_entry in fs::read_dir(&tenants_root)? {
+            let tenant_entry = tenant_entry?;
+            if !tenant_entry.file_type()?.is_dir() {
+                continue;
+            }
+            let tenant = tenant_entry.file_name().to_string_lossy().to_string();
+            if tenant != DEFAULT_DOMAIN_NAME {
+                entries.push(format!("shards/{shard_name}/tenants/{tenant}"));
+            }
+        }
+    }
+
+    Ok(Some(entries))
 }
 
 fn generate_data_encryption_key() -> String {

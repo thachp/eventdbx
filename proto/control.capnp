@@ -27,6 +27,7 @@ struct ControlRequest {
     listSnapshots @20 :ListSnapshotsRequest;
     getSnapshot @21 :GetSnapshotRequest;
     listReferrers @22 :ListReferrersRequest;
+    readOutbox @23 :ReadOutboxRequest;
   }
 }
 
@@ -55,6 +56,7 @@ struct ControlResponse {
     listSnapshots @20 :ListSnapshotsResponse;
     getSnapshot @21 :GetSnapshotResponse;
     listReferrers @22 :ListReferrersResponse;
+    readOutbox @23 :ReadOutboxResponse;
   }
 }
 
@@ -138,6 +140,20 @@ struct ListEventsResponse {
   eventsJson @0 :Text;
   nextCursor @1 :Text;
   hasNextCursor @2 :Bool;
+}
+
+struct ReadOutboxRequest {
+  token @0 :Text;
+  afterEventId @1 :UInt64;
+  hasAfterEventId @2 :Bool;
+  take @3 :UInt64;
+  hasTake @4 :Bool;
+}
+
+struct ReadOutboxResponse {
+  eventsJson @0 :Text;
+  nextAfterEventId @1 :UInt64;
+  hasNextAfterEventId @2 :Bool;
 }
 
 struct AppendEventRequest {

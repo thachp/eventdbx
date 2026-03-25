@@ -568,6 +568,72 @@ impl ServerClient {
         Ok(results)
     }
 
+    #[allow(dead_code)]
+    pub fn read_outbox(
+        &self,
+        token: &str,
+        after_event_id: Option<SnowflakeId>,
+        take: usize,
+    ) -> Result<(Vec<EventRecord>, Option<SnowflakeId>)> {
+        let request_id = next_request_id();
+        self.send_control_request(
+            token,
+            request_id,
+            |request| {
+                let payload_builder = request.reborrow().init_payload();
+                let mut read = payload_builder.init_read_outbox();
+                read.set_token(token);
+                if let Some(event_id) = after_event_id {
+                    read.set_has_after_event_id(true);
+                    read.set_after_event_id(event_id.as_u64());
+                } else {
+                    read.set_has_after_event_id(false);
+                    read.set_after_event_id(0);
+                }
+                read.set_has_take(true);
+                read.set_take(take as u64);
+                Ok(())
+            },
+            |response| {
+                use control_response::payload;
+
+                match response
+                    .get_payload()
+                    .which()
+                    .context("failed to decode read_outbox response payload")?
+                {
+                    payload::ReadOutbox(Ok(result)) => {
+                        let json = read_text(result.get_events_json(), "events_json")?;
+                        let events = if json.trim().is_empty() {
+                            Vec::new()
+                        } else {
+                            serde_json::from_str(&json)
+                                .context("failed to parse read_outbox payload")?
+                        };
+                        let next_after_event_id = if result.get_has_next_after_event_id() {
+                            Some(SnowflakeId::from_u64(result.get_next_after_event_id()))
+                        } else {
+                            None
+                        };
+                        Ok((events, next_after_event_id))
+                    }
+                    payload::Error(Ok(error)) => {
+                        let code = read_text(error.get_code(), "code")?;
+                        let message = read_text(error.get_message(), "message")?;
+                        Err(anyhow!("server returned {}: {}", code, message))
+                    }
+                    payload::Error(Err(err)) => Err(anyhow!(
+                        "failed to decode error payload from CLI proxy: {}",
+                        err
+                    )),
+                    _ => Err(anyhow!(
+                        "unexpected payload returned from CLI proxy response"
+                    )),
+                }
+            },
+        )
+    }
+
     fn list_events_page(
         &self,
         token: &str,

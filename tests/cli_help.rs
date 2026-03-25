@@ -47,18 +47,6 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "Generate a new token",
     },
     HelpCase {
-        path: &["token", "list"],
-        expected_snippet: "List configured tokens",
-    },
-    HelpCase {
-        path: &["token", "revoke"],
-        expected_snippet: "Revoke an active token",
-    },
-    HelpCase {
-        path: &["token", "refresh"],
-        expected_snippet: "Refresh an existing token",
-    },
-    HelpCase {
         path: &["token", "bootstrap"],
         expected_snippet: "Issue a CLI bootstrap token",
     },
@@ -77,70 +65,6 @@ const HELP_CASES: &[HelpCase] = &[
     HelpCase {
         path: &["schema", "apply"],
         expected_snippet: "Apply the local schema.dbx file to the active runtime schema store",
-    },
-    HelpCase {
-        path: &["plugin"],
-        expected_snippet: "Manage plugins",
-    },
-    HelpCase {
-        path: &["plugin", "install"],
-        expected_snippet: "Install a plugin binary into the local registry",
-    },
-    HelpCase {
-        path: &["plugin", "config"],
-        expected_snippet: "Configure plugins",
-    },
-    HelpCase {
-        path: &["plugin", "config", "tcp"],
-        expected_snippet: "Configure the TCP plugin",
-    },
-    HelpCase {
-        path: &["plugin", "config", "http"],
-        expected_snippet: "Configure the HTTP plugin",
-    },
-    HelpCase {
-        path: &["plugin", "config", "log"],
-        expected_snippet: "Configure the logging plugin",
-    },
-    HelpCase {
-        path: &["plugin", "config", "process"],
-        expected_snippet: "Configure a subprocess plugin installed via the registry",
-    },
-    HelpCase {
-        path: &["plugin", "enable"],
-        expected_snippet: "Enable a configured plugin",
-    },
-    HelpCase {
-        path: &["plugin", "disable"],
-        expected_snippet: "Disable a configured plugin",
-    },
-    HelpCase {
-        path: &["plugin", "remove"],
-        expected_snippet: "Remove a configured plugin",
-    },
-    HelpCase {
-        path: &["plugin", "replay"],
-        expected_snippet: "Replay stored events through a plugin",
-    },
-    HelpCase {
-        path: &["plugin", "test"],
-        expected_snippet: "Send a sample event to all enabled plugins",
-    },
-    HelpCase {
-        path: &["plugin", "list"],
-        expected_snippet: "List enabled plugins",
-    },
-    HelpCase {
-        path: &["queue"],
-        expected_snippet: "Show or manage the plugin retry queue",
-    },
-    HelpCase {
-        path: &["queue", "clear"],
-        expected_snippet: "Remove all dead entries from the queue",
-    },
-    HelpCase {
-        path: &["queue", "retry"],
-        expected_snippet: "Retry dead entries, optionally filtering by job id",
     },
     HelpCase {
         path: &["events"],
@@ -174,97 +98,80 @@ const HELP_CASES: &[HelpCase] = &[
         path: &["aggregate", "verify"],
         expected_snippet: "Verify an aggregate's Merkle root",
     },
-    HelpCase {
-        path: &["aggregate", "archive"],
-        expected_snippet: "Archive an aggregate instance",
-    },
-    HelpCase {
-        path: &["aggregate", "restore"],
-        expected_snippet: "Restore an archived aggregate instance",
-    },
-    HelpCase {
-        path: &["aggregate", "remove"],
-        expected_snippet: "Remove an aggregate that has no events",
-    },
-    HelpCase {
-        path: &["aggregate", "commit"],
-        expected_snippet: "Commit events previously staged with `aggregate apply --stage`",
-    },
-    HelpCase {
-        path: &["aggregate", "export"],
-        expected_snippet: "Export aggregate state to CSV or JSON",
-    },
-    HelpCase {
-        path: &["snapshots"],
-        expected_snippet: "Manage snapshots",
-    },
-    HelpCase {
-        path: &["snapshots", "list"],
-        expected_snippet: "List snapshots with optional aggregate filters",
-    },
-    HelpCase {
-        path: &["snapshots", "create"],
-        expected_snippet: "Create a snapshot of an aggregate state",
-    },
-    HelpCase {
-        path: &["snapshots", "get"],
-        expected_snippet: "Fetch a snapshot by id",
-    },
-    HelpCase {
-        path: &["upgrade"],
-        expected_snippet: "Upgrade or switch the EventDBX CLI binary",
-    },
-    HelpCase {
-        path: &["backup"],
-        expected_snippet: "Create a backup archive containing all EventDBX data",
-    },
-    HelpCase {
-        path: &["restore"],
-        expected_snippet: "Restore EventDBX data from a backup archive",
-    },
 ];
 
 #[test]
-fn cli_help_regressions() -> Result<()> {
+fn help_output_matches_supported_surface() -> Result<()> {
+    let temp = tempdir().context("failed to create temp dir")?;
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).context("failed to create HOME")?;
+
+    let mut failures = String::new();
+
     for case in HELP_CASES {
-        let stdout = run_help(case.path)
-            .with_context(|| format!("command {:?} --help failed", case.path))?;
-        assert!(
-            stdout.contains(case.expected_snippet),
-            "expected help for {:?} to contain {:?}\nstdout:\n{}",
-            case.path,
-            case.expected_snippet,
-            indent_output(&stdout)
-        );
+        let mut cmd = cargo_bin_cmd!("dbx");
+        cmd.env("HOME", &home);
+        cmd.env("DBX_NO_UPGRADE_CHECK", "1");
+        cmd.args(case.path);
+        cmd.arg("--help");
+
+        let output = cmd
+            .output()
+            .with_context(|| format!("failed to execute dbx {} --help", case.path.join(" ")))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !output.status.success() || !stdout.contains(case.expected_snippet) {
+            let _ = writeln!(
+                failures,
+                "case {:?} missing {:?}\nstatus={}\nstdout:\n{}\nstderr:\n{}\n",
+                case.path,
+                case.expected_snippet,
+                output.status,
+                stdout,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
-    Ok(())
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!("help regressions detected:\n{}", failures);
 }
 
-fn run_help(path: &[&str]) -> Result<String> {
-    let temp_log = tempdir()?;
+#[test]
+fn removed_commands_no_longer_appear_in_root_help() -> Result<()> {
+    let temp = tempdir().context("failed to create temp dir")?;
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).context("failed to create HOME")?;
+
     let mut cmd = cargo_bin_cmd!("dbx");
-    cmd.args(path);
-    cmd.arg("--help");
-    cmd.env("EVENTDBX_LOG_DIR", temp_log.path());
+    cmd.env("HOME", &home);
     cmd.env("DBX_NO_UPGRADE_CHECK", "1");
-    let output = cmd.output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "dbx {:?} --help exited with {}: {}",
-            path,
-            output.status,
-            stderr
+    cmd.arg("--help");
+    let output = cmd.output().context("failed to execute dbx --help")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for removed in [
+        "checkout",
+        "merge",
+        "push",
+        "pull",
+        "watch",
+        "plugin",
+        "queue",
+        "tenant",
+        "snapshots",
+        "upgrade",
+        "backup",
+        "restore",
+    ] {
+        assert!(
+            !stdout.contains(removed),
+            "root help unexpectedly contains removed command {removed}:\n{stdout}"
         );
     }
-    let stdout = String::from_utf8(output.stdout)?.replace("\r\n", "\n");
-    Ok(stdout)
-}
 
-fn indent_output(output: &str) -> String {
-    let mut indented = String::new();
-    for line in output.lines() {
-        let _ = writeln!(&mut indented, "    {}", line);
-    }
-    indented
+    Ok(())
 }

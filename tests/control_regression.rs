@@ -529,6 +529,95 @@ async fn control_capnp_regression_flows() -> Result<()> {
     assert_eq!(events[0]["event_type"], "order_created");
     next_request_id += 1;
 
+    let outbox = send_control_request(
+        &mut writer,
+        &mut reader,
+        &mut transport,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut read = payload.init_read_outbox();
+            read.set_token(&token_value);
+            read.set_has_after_event_id(false);
+            read.set_after_event_id(0);
+            read.set_has_take(true);
+            read.set_take(25);
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::ReadOutbox(Ok(result)) => {
+                let json = result
+                    .get_events_json()
+                    .context("missing events_json")?
+                    .to_str()
+                    .context("events_json utf-8 error")?;
+                let parsed: Vec<Value> =
+                    serde_json::from_str(json).context("failed to parse events_json")?;
+                let next_after_event_id = if result.get_has_next_after_event_id() {
+                    Some(result.get_next_after_event_id())
+                } else {
+                    None
+                };
+                Ok((parsed, next_after_event_id))
+            }
+            control_response::payload::ReadOutbox(Err(err)) => {
+                Err(anyhow!("failed to decode read_outbox response: {err}"))
+            }
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert_eq!(outbox.0.len(), 1);
+    let first_event_id = outbox.0[0]["metadata"]["event_id"]
+        .as_str()
+        .context("event_id missing from outbox item")?
+        .parse::<u64>()
+        .context("event_id was not a u64 string")?;
+    assert_eq!(outbox.1, Some(first_event_id));
+    next_request_id += 1;
+
+    let outbox_after = send_control_request(
+        &mut writer,
+        &mut reader,
+        &mut transport,
+        next_request_id,
+        |request| {
+            let payload = request.reborrow().init_payload();
+            let mut read = payload.init_read_outbox();
+            read.set_token(&token_value);
+            read.set_has_after_event_id(true);
+            read.set_after_event_id(first_event_id);
+            read.set_has_take(true);
+            read.set_take(25);
+        },
+        |response| match response
+            .get_payload()
+            .which()
+            .context("payload decode failed")?
+        {
+            control_response::payload::ReadOutbox(Ok(result)) => {
+                let json = result
+                    .get_events_json()
+                    .context("missing events_json")?
+                    .to_str()
+                    .context("events_json utf-8 error")?;
+                let parsed: Vec<Value> =
+                    serde_json::from_str(json).context("failed to parse events_json")?;
+                Ok(parsed)
+            }
+            control_response::payload::ReadOutbox(Err(err)) => {
+                Err(anyhow!("failed to decode read_outbox response: {err}"))
+            }
+            _ => Err(anyhow!("unexpected response variant")),
+        },
+    )
+    .await?;
+    assert!(outbox_after.is_empty());
+    next_request_id += 1;
+
     let merkle = send_control_request(
         &mut writer,
         &mut reader,
@@ -1399,241 +1488,6 @@ async fn control_capnp_patch_requires_existing() -> Result<()> {
         !restored_entry_archived,
         "active aggregates should not report archived flag"
     );
-
-    drop(writer);
-    drop(reader);
-
-    let outcome = server_task.await.context("control handler task panicked")?;
-    outcome.context("control handler returned error")?;
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn control_tenant_admin_commands() -> Result<()> {
-    let tempdir = tempdir().context("failed to create temp dir")?;
-    let mut config = Config::default();
-    config.data_dir = tempdir.path().to_path_buf();
-    config.data_encryption_key = None;
-
-    let tokens = Arc::new(TokenManager::load(
-        config.jwt_manager_config()?,
-        config.tokens_path(),
-        config.jwt_revocations_path(),
-        None,
-    )?);
-    let schemas = Arc::new(SchemaManager::load(config.schema_store_path())?);
-    schemas.create(CreateSchemaInput {
-        aggregate: "order".into(),
-        events: vec!["order_created".into()],
-        snapshot_threshold: None,
-    })?;
-    let store = Arc::new(EventStore::open(
-        config.event_store_path(),
-        None,
-        config.snowflake_worker_id,
-    )?);
-    let assignments = Arc::new(TenantAssignmentStore::open(config.tenant_meta_path())?);
-    let usage =
-        assignments.ensure_storage_usage_bytes("default", || store.storage_usage_bytes())?;
-
-    let core = CoreContext::new(
-        Arc::clone(&tokens),
-        Arc::clone(&schemas),
-        Arc::clone(&store),
-        config.restrict,
-        config.list_page_size,
-        config.page_limit,
-        "default",
-        None,
-        Some(usage),
-        Arc::clone(&assignments),
-        config.reference_default_depth,
-        config.reference_max_depth,
-    );
-    let shared_config = Arc::new(RwLock::new(config.clone()));
-    let core_provider: Arc<dyn CoreProvider> = Arc::new(StaticCoreProvider::new(core.clone()));
-
-    let token_record = tokens.issue(IssueTokenInput {
-        subject: "system:admin".into(),
-        group: "system".into(),
-        user: "admin".into(),
-        actions: vec!["tenant.manage".into()],
-        resources: vec!["*".to_string()],
-        tenants: Vec::new(),
-        ttl_secs: Some(3_600),
-        not_before: None,
-        issued_by: "control-tenant-test".into(),
-        limits: JwtLimits::default(),
-    })?;
-    let token_value = token_record
-        .token
-        .clone()
-        .expect("issued token missing value");
-
-    let (mut writer, mut reader, mut transport, server_task) = open_control_session(
-        Arc::clone(&core_provider),
-        Arc::clone(&tokens),
-        Arc::clone(&shared_config),
-        &token_value,
-        config.active_domain(),
-        false,
-    )
-    .await?;
-
-    let mut next_request_id: u64 = 1;
-
-    let assign_changed = send_control_request(
-        &mut writer,
-        &mut reader,
-        &mut transport,
-        next_request_id,
-        |request| {
-            let payload = request.reborrow().init_payload();
-            let mut assign = payload.init_tenant_assign();
-            assign.set_token(&token_value);
-            assign.set_tenant_id("default");
-            assign.set_shard_id("shard-0007");
-        },
-        |response| match response
-            .get_payload()
-            .which()
-            .context("payload decode failed")?
-        {
-            control_response::payload::TenantAssign(Ok(result)) => Ok(result.get_changed()),
-            control_response::payload::TenantAssign(Err(err)) => {
-                Err(anyhow!("failed to decode tenant_assign response: {err}"))
-            }
-            _ => Err(anyhow!("unexpected response variant")),
-        },
-    )
-    .await?;
-    assert!(assign_changed);
-    next_request_id += 1;
-
-    let duplicate_assign = send_control_request(
-        &mut writer,
-        &mut reader,
-        &mut transport,
-        next_request_id,
-        |request| {
-            let payload = request.reborrow().init_payload();
-            let mut assign = payload.init_tenant_assign();
-            assign.set_token(&token_value);
-            assign.set_tenant_id("default");
-            assign.set_shard_id("shard-0007");
-        },
-        |response| match response
-            .get_payload()
-            .which()
-            .context("payload decode failed")?
-        {
-            control_response::payload::TenantAssign(Ok(result)) => Ok(result.get_changed()),
-            _ => Err(anyhow!("unexpected response variant")),
-        },
-    )
-    .await?;
-    assert!(!duplicate_assign);
-    next_request_id += 1;
-
-    let unassign_changed = send_control_request(
-        &mut writer,
-        &mut reader,
-        &mut transport,
-        next_request_id,
-        |request| {
-            let payload = request.reborrow().init_payload();
-            let mut unassign = payload.init_tenant_unassign();
-            unassign.set_token(&token_value);
-            unassign.set_tenant_id("default");
-        },
-        |response| match response
-            .get_payload()
-            .which()
-            .context("payload decode failed")?
-        {
-            control_response::payload::TenantUnassign(Ok(result)) => Ok(result.get_changed()),
-            _ => Err(anyhow!("unexpected response variant")),
-        },
-    )
-    .await?;
-    assert!(unassign_changed);
-    next_request_id += 1;
-
-    let quota_set = send_control_request(
-        &mut writer,
-        &mut reader,
-        &mut transport,
-        next_request_id,
-        |request| {
-            let payload = request.reborrow().init_payload();
-            let mut quota = payload.init_tenant_quota_set();
-            quota.set_token(&token_value);
-            quota.set_tenant_id("default");
-            quota.set_max_storage_mb(5);
-        },
-        |response| match response
-            .get_payload()
-            .which()
-            .context("payload decode failed")?
-        {
-            control_response::payload::TenantQuotaSet(Ok(result)) => Ok(result.get_changed()),
-            _ => Err(anyhow!("unexpected response variant")),
-        },
-    )
-    .await?;
-    assert!(quota_set);
-    next_request_id += 1;
-
-    let quota_clear = send_control_request(
-        &mut writer,
-        &mut reader,
-        &mut transport,
-        next_request_id,
-        |request| {
-            let payload = request.reborrow().init_payload();
-            let mut quota = payload.init_tenant_quota_clear();
-            quota.set_token(&token_value);
-            quota.set_tenant_id("default");
-        },
-        |response| match response
-            .get_payload()
-            .which()
-            .context("payload decode failed")?
-        {
-            control_response::payload::TenantQuotaClear(Ok(result)) => Ok(result.get_changed()),
-            _ => Err(anyhow!("unexpected response variant")),
-        },
-    )
-    .await?;
-    assert!(quota_clear);
-    next_request_id += 1;
-
-    let storage_bytes = send_control_request(
-        &mut writer,
-        &mut reader,
-        &mut transport,
-        next_request_id,
-        |request| {
-            let payload = request.reborrow().init_payload();
-            let mut quota = payload.init_tenant_quota_recalc();
-            quota.set_token(&token_value);
-            quota.set_tenant_id("default");
-        },
-        |response| match response
-            .get_payload()
-            .which()
-            .context("payload decode failed")?
-        {
-            control_response::payload::TenantQuotaRecalc(Ok(result)) => {
-                Ok(result.get_storage_bytes())
-            }
-            _ => Err(anyhow!("unexpected response variant")),
-        },
-    )
-    .await?;
-    let local_usage = store.storage_usage_bytes()?;
-    assert_eq!(storage_bytes, local_usage);
 
     drop(writer);
     drop(reader);
