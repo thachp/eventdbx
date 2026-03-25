@@ -27,7 +27,7 @@ use std::os::fd::AsRawFd;
 use super::{
     encryption::{self, Encryptor},
     error::{EventError, Result},
-    merkle::{compute_merkle_root, empty_root},
+    merkle::{IncrementalMerkleTree, compute_merkle_root, empty_root},
     schema::MAX_EVENT_NOTE_LENGTH,
     validation::MAX_EVENT_TYPE_LENGTH,
 };
@@ -181,11 +181,30 @@ impl<'a> Transaction<'a> {
         let references = input.reference_targets.clone();
         let key = AggregateKey::new(input.aggregate_type.clone(), input.aggregate_id.clone());
         let event_id = self.store.next_event_id();
-        let (meta, state) = self.ensure_cache(&key)?;
-        if meta.archived {
+        self.ensure_cache(&key)?;
+        let previous_meta = self
+            .meta_cache
+            .get(&key)
+            .cloned()
+            .expect("meta cache missing after insertion");
+        if previous_meta.archived {
             return Err(EventError::AggregateArchived);
         }
-        let record = apply_event(meta, state, input, event_id);
+        self.ensure_merkle_tree(&key, Some(&previous_meta))?;
+        let mut record = {
+            let (meta, state) = self.ensure_cache(&key)?;
+            apply_event(meta, state, input, event_id)
+        };
+        let merkle_root = self
+            .merkle_cache
+            .get_mut(&key)
+            .expect("merkle cache missing after insertion")
+            .push(record.hash.clone());
+        self.meta_cache
+            .get_mut(&key)
+            .expect("meta cache missing after append")
+            .merkle_root = merkle_root.clone();
+        record.merkle_root = merkle_root;
         let stored_record = self.store.encode_record(&record)?;
         let event_value = serde_json::to_vec(&stored_record)?;
 
@@ -215,6 +234,7 @@ impl<'a> Transaction<'a> {
 
         let pending_events = std::mem::take(&mut self.pending_events);
         let meta_cache = std::mem::take(&mut self.meta_cache);
+        let merkle_cache = std::mem::take(&mut self.merkle_cache);
         let state_cache = std::mem::take(&mut self.state_cache);
         let records = std::mem::take(&mut self.pending_records);
 
@@ -261,6 +281,10 @@ impl<'a> Transaction<'a> {
         }
 
         self.store.write_batch(batch)?;
+        let mut store_merkle_cache = self.store.merkle_cache.lock();
+        for (key, tree) in merkle_cache {
+            store_merkle_cache.insert(key, tree);
+        }
         Ok(records)
     }
 
@@ -294,6 +318,31 @@ impl<'a> Transaction<'a> {
             .get_mut(key)
             .expect("state cache missing after insertion");
         Ok((meta, state))
+    }
+
+    fn ensure_merkle_tree(
+        &mut self,
+        key: &AggregateKey,
+        meta: Option<&AggregateMeta>,
+    ) -> Result<()> {
+        if self.merkle_cache.contains_key(key) {
+            return Ok(());
+        }
+
+        if let Some(tree) = self.store.merkle_cache.lock().get(key).cloned() {
+            self.merkle_cache.insert(key.clone(), tree);
+            return Ok(());
+        }
+
+        let (aggregate_type, aggregate_id) = key.parts();
+        let tree = self.store.seed_merkle_tree(
+            AggregateIndex::Active,
+            aggregate_type,
+            aggregate_id,
+            meta,
+        )?;
+        self.merkle_cache.insert(key.clone(), tree);
+        Ok(())
     }
 }
 
@@ -344,9 +393,7 @@ fn apply_event(
         &payload_map,
     );
 
-    meta.event_hashes.push(hash.clone());
     meta.version = version;
-    meta.merkle_root = compute_merkle_root(&meta.event_hashes);
 
     for (key, value) in payload_map {
         state.insert(key, value);
@@ -374,7 +421,7 @@ fn apply_event(
         },
         version,
         hash,
-        merkle_root: meta.merkle_root.clone(),
+        merkle_root: empty_root(),
     }
 }
 
@@ -1429,7 +1476,6 @@ struct AggregateMeta {
     aggregate_type: String,
     aggregate_id: String,
     version: u64,
-    event_hashes: Vec<String>,
     merkle_root: String,
     #[serde(default)]
     archived: bool,
@@ -1443,6 +1489,8 @@ struct AggregateMeta {
     created_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     updated_at: Option<DateTime<Utc>>,
+    #[serde(default, rename = "event_hashes", skip_serializing)]
+    legacy_event_hashes: Vec<String>,
 }
 
 impl AggregateMeta {
@@ -1451,7 +1499,6 @@ impl AggregateMeta {
             aggregate_type,
             aggregate_id,
             version: 0,
-            event_hashes: Vec::new(),
             merkle_root: empty_root(),
             archived: false,
             archived_at: None,
@@ -1459,6 +1506,7 @@ impl AggregateMeta {
             extensions: BTreeMap::new(),
             created_at: None,
             updated_at: None,
+            legacy_event_hashes: Vec::new(),
         }
     }
 
@@ -1518,6 +1566,7 @@ struct StoredReferrer {
 pub struct EventStore {
     db: DBWithThreadMode<MultiThreaded>,
     write_lock: Mutex<()>,
+    merkle_cache: Mutex<BTreeMap<AggregateKey, IncrementalMerkleTree>>,
     read_only: bool,
     encryptor: Option<Encryptor>,
     id_generator: Mutex<SnowflakeGenerator>,
@@ -1530,6 +1579,7 @@ pub struct Transaction<'a> {
     pending_records: Vec<EventRecord>,
     pending_refs: Vec<PendingRefUpdate>,
     meta_cache: BTreeMap<AggregateKey, AggregateMeta>,
+    merkle_cache: BTreeMap<AggregateKey, IncrementalMerkleTree>,
     state_cache: BTreeMap<AggregateKey, BTreeMap<String, String>>,
 }
 
@@ -1756,6 +1806,7 @@ impl EventStore {
         Ok(Self {
             db,
             write_lock: Mutex::new(()),
+            merkle_cache: Mutex::new(BTreeMap::new()),
             read_only: false,
             encryptor,
             id_generator: Mutex::new(SnowflakeGenerator::new(worker_id)),
@@ -1771,6 +1822,7 @@ impl EventStore {
         Ok(Self {
             db,
             write_lock: Mutex::new(()),
+            merkle_cache: Mutex::new(BTreeMap::new()),
             read_only: true,
             encryptor,
             id_generator: Mutex::new(SnowflakeGenerator::new(0)),
@@ -1950,7 +2002,16 @@ impl EventStore {
                     None,
                 ),
             };
-        let record = apply_event(&mut meta, &mut state, input, event_id);
+        let mut record = apply_event(&mut meta, &mut state, input, event_id);
+        let (merkle_tree, merkle_root) = self.prepare_merkle_append(
+            AggregateIndex::Active,
+            &aggregate_type,
+            &aggregate_id,
+            previous_meta.as_ref(),
+            &record.hash,
+        )?;
+        meta.merkle_root = merkle_root.clone();
+        record.merkle_root = merkle_root;
         let stored_record = self.encode_record(&record)?;
         let stored_record_bytes = serde_json::to_vec(&stored_record)?;
         let encoded_state = self.encode_state_map(&state)?;
@@ -1992,6 +2053,10 @@ impl EventStore {
         );
 
         self.write_batch(batch)?;
+        self.merkle_cache.lock().insert(
+            AggregateKey::new(&aggregate_type, &aggregate_id),
+            merkle_tree,
+        );
 
         Ok(record)
     }
@@ -2066,14 +2131,20 @@ impl EventStore {
 
         let record_created_at = record.metadata.created_at;
         meta.record_write(record_created_at);
-        meta.event_hashes.push(record.hash.clone());
         meta.version = record.version;
-        meta.merkle_root = compute_merkle_root(&meta.event_hashes);
+        let (merkle_tree, computed_merkle_root) = self.prepare_merkle_append(
+            AggregateIndex::Active,
+            &aggregate_type,
+            &aggregate_id,
+            previous_meta.as_ref(),
+            &record.hash,
+        )?;
+        meta.merkle_root = computed_merkle_root.clone();
 
-        if meta.merkle_root != record.merkle_root {
+        if computed_merkle_root != record.merkle_root {
             return Err(EventError::Storage(format!(
                 "imported event merkle mismatch for {}::{} (expected {}, found {})",
-                aggregate_type, aggregate_id, meta.merkle_root, record.merkle_root
+                aggregate_type, aggregate_id, computed_merkle_root, record.merkle_root
             )));
         }
 
@@ -2109,6 +2180,10 @@ impl EventStore {
         )?;
 
         self.write_batch(batch)?;
+        self.merkle_cache.lock().insert(
+            AggregateKey::new(&aggregate_type, &aggregate_id),
+            merkle_tree,
+        );
         Ok(())
     }
 
@@ -2122,6 +2197,7 @@ impl EventStore {
             pending_records: Vec::new(),
             pending_refs: Vec::new(),
             meta_cache: BTreeMap::new(),
+            merkle_cache: BTreeMap::new(),
             state_cache: BTreeMap::new(),
         })
     }
@@ -2256,7 +2332,7 @@ impl EventStore {
         if version == 0 {
             return Ok(Some(empty_root()));
         }
-        let Some((meta, _)) = self.load_meta_any(aggregate_type, aggregate_id)? else {
+        let Some((meta, index)) = self.load_meta_any(aggregate_type, aggregate_id)? else {
             return Ok(None);
         };
         if version > meta.version {
@@ -2265,9 +2341,9 @@ impl EventStore {
         if version == meta.version {
             return Ok(Some(meta.merkle_root.clone()));
         }
-        let end = version as usize;
-        let hashes = &meta.event_hashes[..end];
-        Ok(Some(compute_merkle_root(hashes)))
+        let hashes =
+            self.load_event_hashes_from(index, aggregate_type, aggregate_id, Some(version))?;
+        Ok(Some(compute_merkle_root(&hashes)))
     }
 
     pub fn event_hashes(
@@ -2275,10 +2351,91 @@ impl EventStore {
         aggregate_type: &str,
         aggregate_id: &str,
     ) -> Result<Option<Vec<String>>> {
-        let Some((meta, _)) = self.load_meta_any(aggregate_type, aggregate_id)? else {
+        let Some((meta, index)) = self.load_meta_any(aggregate_type, aggregate_id)? else {
             return Ok(None);
         };
-        Ok(Some(meta.event_hashes.clone()))
+        Ok(Some(self.load_event_hashes_from(
+            index,
+            aggregate_type,
+            aggregate_id,
+            Some(meta.version),
+        )?))
+    }
+
+    fn prepare_merkle_append(
+        &self,
+        index: AggregateIndex,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        previous_meta: Option<&AggregateMeta>,
+        hash: &str,
+    ) -> Result<(IncrementalMerkleTree, String)> {
+        let key = AggregateKey::new(aggregate_type, aggregate_id);
+        let mut tree = match self.merkle_cache.lock().get(&key).cloned() {
+            Some(tree) => tree,
+            None => self.seed_merkle_tree(index, aggregate_type, aggregate_id, previous_meta)?,
+        };
+        let root = tree.push(hash.to_string());
+        Ok((tree, root))
+    }
+
+    fn seed_merkle_tree(
+        &self,
+        index: AggregateIndex,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        meta: Option<&AggregateMeta>,
+    ) -> Result<IncrementalMerkleTree> {
+        let hashes = match meta {
+            Some(meta) if !meta.legacy_event_hashes.is_empty() => meta.legacy_event_hashes.clone(),
+            Some(meta) if meta.version > 0 => self.load_event_hashes_from(
+                index,
+                aggregate_type,
+                aggregate_id,
+                Some(meta.version),
+            )?,
+            _ => Vec::new(),
+        };
+        Ok(IncrementalMerkleTree::from_hashes(&hashes))
+    }
+
+    fn load_event_hashes_from(
+        &self,
+        index: AggregateIndex,
+        aggregate_type: &str,
+        aggregate_id: &str,
+        limit: Option<u64>,
+    ) -> Result<Vec<String>> {
+        let start = Instant::now();
+        let result = (|| {
+            let mut hashes = Vec::new();
+            let prefix = event_prefix_for(index, aggregate_type, aggregate_id);
+            let iter = self
+                .db
+                .iterator(IteratorMode::From(prefix.as_slice(), Direction::Forward));
+
+            for item in iter {
+                let (key, value) = item.map_err(|err| EventError::Storage(err.to_string()))?;
+                if !key.starts_with(prefix.as_slice()) {
+                    break;
+                }
+                let stored: EventRecord = serde_json::from_slice(&value)?;
+                let record = self.decode_record(stored)?;
+                hashes.push(record.hash);
+                if limit.map(|max| hashes.len() as u64 >= max).unwrap_or(false) {
+                    break;
+                }
+            }
+
+            Ok(hashes)
+        })();
+        let duration = start.elapsed().as_secs_f64();
+        record_store_op(
+            "rocksdb_iter_event_hashes",
+            if result.is_ok() { "ok" } else { "err" },
+            duration,
+        );
+        result
     }
 
     pub fn event_by_version(
@@ -5012,6 +5169,18 @@ mod tests {
     }
 
     #[test]
+    fn incremental_merkle_tree_matches_full_recompute() {
+        let mut tree = IncrementalMerkleTree::default();
+        let mut hashes = Vec::new();
+
+        for idx in 1..=32 {
+            let hash = format!("hash-{idx}");
+            hashes.push(hash.clone());
+            assert_eq!(tree.push(hash), compute_merkle_root(&hashes));
+        }
+    }
+
+    #[test]
     fn append_and_retrieve_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("event_store");
@@ -5103,6 +5272,56 @@ mod tests {
 
         let events = store.list_events("order", "order-42").unwrap();
         assert_eq!(events.len(), 2);
+        let hashes: Vec<_> = events.iter().map(|event| event.hash.clone()).collect();
+        assert_eq!(state.merkle_root, compute_merkle_root(&hashes));
+        assert_eq!(committed[1].merkle_root, compute_merkle_root(&hashes));
+    }
+
+    #[test]
+    fn append_after_reopen_rebuilds_merkle_state_from_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_store");
+
+        {
+            let store = EventStore::open(path.clone(), None, 0).unwrap();
+            for version in 1..=3 {
+                store
+                    .append(AppendEvent {
+                        aggregate_type: "order".into(),
+                        aggregate_id: "order-9".into(),
+                        event_type: "order-updated".into(),
+                        event_type_raw: None,
+                        payload: serde_json::json!({ "version": version }),
+                        metadata: None,
+                        issued_by: None,
+                        note: None,
+                        tenant: "default".into(),
+                        reference_targets: Vec::new(),
+                    })
+                    .unwrap();
+            }
+        }
+
+        let store = EventStore::open(path, None, 0).unwrap();
+        store
+            .append(AppendEvent {
+                aggregate_type: "order".into(),
+                aggregate_id: "order-9".into(),
+                event_type: "order-updated".into(),
+                event_type_raw: None,
+                payload: serde_json::json!({ "version": 4 }),
+                metadata: None,
+                issued_by: None,
+                note: None,
+                tenant: "default".into(),
+                reference_targets: Vec::new(),
+            })
+            .unwrap();
+
+        let events = store.list_events("order", "order-9").unwrap();
+        let hashes: Vec<_> = events.iter().map(|event| event.hash.clone()).collect();
+        let root = store.verify("order", "order-9").unwrap();
+        assert_eq!(root, compute_merkle_root(&hashes));
     }
 
     #[test]
