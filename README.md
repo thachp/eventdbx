@@ -366,7 +366,7 @@ Staged events are stored in `.eventdbx/staged_events.json`. Use `aggregate apply
 - `dbx plugin install <plugin> <version> --source <path|url> [--bin <file>] [--checksum <sha256>] [--force]`
 - `dbx plugin config tcp --name <label> --host <hostname> --port <u16> [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
 - `dbx plugin config http --name <label> --endpoint <host|url> [--https] [--header KEY=VALUE]... [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
-- `dbx plugin config log --name <label> --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
+- `dbx plugin config log --name <label> --level <trace|debug|info|warn|error> [--template "text with {aggregate} {event} {id}"] [--detail <summary|full>] [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
 - `dbx plugin config process --name <instance> --plugin <id> --version <semver> [--arg <value>]... [--env KEY=VALUE]... [--working-dir <path>] [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
 - `dbx plugin config capnp --name <label> --host <hostname> --port <u16> [--payload <all|event-only|state-only|schema-only|event-and-schema>] [--disable]`
 - `dbx plugin enable <label>`
@@ -407,7 +407,7 @@ Plugins fire after every committed event to keep external systems in sync. Remai
 
 - **TCP** – Writes a single-line JSON `EventRecord` to the configured socket.
 - **HTTP** – POSTs the `EventRecord` JSON to an endpoint with optional headers; add `--https` during configuration to force HTTPS when the endpoint lacks a scheme.
-- **Log** – Emits a formatted line via `tracing` at the configured level. By default: `aggregate=<type> id=<id> event=<event>`.
+- **Log** – Emits a formatted line via `tracing` at the configured level. By default it logs metadata only (`aggregate=<type> id=<id> event=<event>` for event payloads, `state=present` for state payloads, and `schema=<aggregate>` for schema payloads). Add `--detail full` if you explicitly want full JSON payload/state/schema bodies in logs.
 - **Process** – Launches an installed plugin binary as a supervised subprocess and streams events to it over Cap'n Proto. Use this for first-party plugins from the [`dbx-plugins`](https://github.com/eventdbx/dbx-plugins) workspace or your own extensions.
 
 Process plugins are distributed as zip/tar bundles. Install them with `dbx plugin install <plugin> <version> --source <path-or-url>`—the bundle is unpacked to `~/.eventdbx/plugins/<plugin>/<version>/<target>/`, where `<target>` matches the current OS/architecture (for example, `x86_64-apple-darwin`). Official bundles live in the `dbx-plugins` releases; pass the asset URL to `--source` or point it at a local build while developing. After installation, bind the binary to an instance:

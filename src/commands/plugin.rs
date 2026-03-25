@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use eventdbx::config::{
-    Config, HttpPluginConfig, LogPluginConfig, PluginConfig, PluginDefinition, PluginKind,
-    PluginPayloadMode, ProcessPluginConfig, TcpPluginConfig, load_or_default,
+    Config, HttpPluginConfig, LogDetailMode, LogPluginConfig, PluginConfig, PluginDefinition,
+    PluginKind, PluginPayloadMode, ProcessPluginConfig, TcpPluginConfig, load_or_default,
 };
 use eventdbx::plugin::{
     Plugin, PluginDelivery, PluginManager, establish_connection, instantiate_plugin,
@@ -166,6 +166,22 @@ pub enum PayloadModeArg {
     ExtensionsOnly,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum LogDetailArg {
+    Summary,
+    Full,
+}
+
+impl From<LogDetailArg> for LogDetailMode {
+    fn from(value: LogDetailArg) -> Self {
+        match value {
+            LogDetailArg::Summary => LogDetailMode::Summary,
+            LogDetailArg::Full => LogDetailMode::Full,
+        }
+    }
+}
+
 impl From<PayloadModeArg> for PluginPayloadMode {
     fn from(value: PayloadModeArg) -> Self {
         match value {
@@ -273,6 +289,10 @@ pub struct PluginLogConfigureArgs {
     /// Optional template using {aggregate}, {id}, {event}
     #[arg(long)]
     pub template: Option<String>,
+
+    /// Whether to log metadata only or include full payload/state/schema bodies
+    #[arg(long, value_enum)]
+    pub detail: Option<LogDetailArg>,
 
     /// Disable the plugin after configuring
     #[arg(long, default_value_t = false)]
@@ -548,11 +568,16 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                 let label = display_label(name);
                 match find_plugin_mut(&mut plugins, PluginKind::Log, Some(name))? {
                     Some(plugin) => {
+                        let current_detail = match &plugin.config {
+                            PluginConfig::Log(settings) => settings.detail,
+                            _ => LogDetailMode::Summary,
+                        };
                         plugin.enabled = !args.disable;
                         plugin.name = Some(name_owned.clone());
                         plugin.config = PluginConfig::Log(LogPluginConfig {
                             level: args.level.clone(),
                             template: args.template.clone(),
+                            detail: args.detail.map(Into::into).unwrap_or(current_detail),
                         });
                         if let Some(mode) = payload_mode {
                             plugin.payload_mode = mode.into();
@@ -568,6 +593,7 @@ pub fn execute(config_path: Option<PathBuf>, command: PluginCommands) -> Result<
                             config: PluginConfig::Log(LogPluginConfig {
                                 level: args.level.clone(),
                                 template: args.template.clone(),
+                                detail: args.detail.map(Into::into).unwrap_or_default(),
                             }),
                         });
                     }

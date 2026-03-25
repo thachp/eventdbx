@@ -1850,6 +1850,37 @@ fn plugin_config_log_sets_template() -> Result<()> {
     assert_eq!(plugin["config"]["type"], json!("log"));
     assert_eq!(plugin["config"]["level"], json!("debug"));
     assert_eq!(plugin["config"]["template"], json!("[{aggregate}] {event}"));
+    assert_eq!(plugin["config"]["detail"], json!("summary"));
+    Ok(())
+}
+
+#[test]
+fn plugin_config_log_preserves_detail_when_omitted_on_update() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.run(&[
+        "plugin", "config", "log", "--name", "audit", "--level", "debug", "--detail", "full",
+    ])?;
+
+    cli.run(&[
+        "plugin",
+        "config",
+        "log",
+        "--name",
+        "audit",
+        "--level",
+        "warn",
+        "--template",
+        "[{aggregate}] {event}",
+    ])?;
+
+    let list = cli.run_json(&["plugin", "list", "--json"])?;
+    let array = list
+        .as_array()
+        .context("log plugin list did not return array")?;
+    assert_eq!(array.len(), 1);
+    let plugin = &array[0];
+    assert_eq!(plugin["config"]["level"], json!("warn"));
+    assert_eq!(plugin["config"]["detail"], json!("full"));
     Ok(())
 }
 

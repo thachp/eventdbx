@@ -981,6 +981,16 @@ pub struct LogPluginConfig {
     pub level: String,
     #[serde(default)]
     pub template: Option<String>,
+    #[serde(default)]
+    pub detail: LogDetailMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogDetailMode {
+    #[default]
+    Summary,
+    Full,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1031,6 +1041,15 @@ mod tests {
             ..ConfigUpdate::default()
         });
         assert!(!config.verbose_responses());
+    }
+
+    #[test]
+    fn log_plugin_config_defaults_detail_to_summary() {
+        let config: LogPluginConfig =
+            serde_json::from_str(r#"{"level":"debug","template":"[{aggregate}] {event}"}"#)
+                .expect("log config should deserialize");
+
+        assert_eq!(config.detail, LogDetailMode::Summary);
     }
 
     #[derive(Deserialize)]

@@ -579,6 +579,7 @@ mod tests {
             config: PluginConfig::Log(LogPluginConfig {
                 level: "info".into(),
                 template: None,
+                detail: Default::default(),
             }),
         }])?;
 
