@@ -1,6 +1,12 @@
-use std::{fs, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+    sync::{Arc, Weak},
+};
 
 use chrono::Utc;
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rocksdb::{DBWithThreadMode, Direction, IteratorMode, MultiThreaded, Options, WriteBatch};
 use serde::{Deserialize, Serialize};
@@ -20,6 +26,11 @@ const PREFIX_JOB: &[u8] = b"job";
 const PREFIX_STATUS: &[u8] = b"status";
 
 const PROCESSING_TIMEOUT_MS: i64 = 60_000;
+
+type SharedDb = Arc<DBWithThreadMode<MultiThreaded>>;
+
+static PLUGIN_QUEUE_DB_CACHE: Lazy<Mutex<HashMap<PathBuf, Weak<DBWithThreadMode<MultiThreaded>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct JobRecord {
@@ -90,7 +101,7 @@ pub struct PluginQueueStatus {
 
 #[derive(Clone)]
 pub struct PluginQueueStore {
-    db: Arc<DBWithThreadMode<MultiThreaded>>,
+    db: SharedDb,
     id_generator: Arc<Mutex<SnowflakeGenerator>>,
 }
 
@@ -520,19 +531,35 @@ impl PluginQueueStore {
             }
         }
 
+        let normalized_path = normalize_db_path(path)?;
         let mut options = Options::default();
         options.create_if_missing(true);
 
-        let db = DBWithThreadMode::<MultiThreaded>::open(&options, path).map_err(|err| {
-            EventError::Storage(format!(
-                "failed to open plugin queue store at {}: {}",
-                path.display(),
-                err
-            ))
-        })?;
+        // Serialize the initial open per process so callers reuse a shared handle.
+        let db = {
+            let mut cache = PLUGIN_QUEUE_DB_CACHE.lock();
+            if let Some(existing) = cache.get(&normalized_path).and_then(Weak::upgrade) {
+                existing
+            } else {
+                cache.remove(&normalized_path);
+                let opened = Arc::new(
+                    DBWithThreadMode::<MultiThreaded>::open(&options, &normalized_path).map_err(
+                        |err| {
+                            EventError::Storage(format!(
+                                "failed to open plugin queue store at {}: {}",
+                                normalized_path.display(),
+                                err
+                            ))
+                        },
+                    )?,
+                );
+                cache.insert(normalized_path.clone(), Arc::downgrade(&opened));
+                opened
+            }
+        };
 
         Ok(Self {
-            db: Arc::new(db),
+            db,
             id_generator: Arc::new(Mutex::new(SnowflakeGenerator::new(0))),
         })
     }
@@ -723,17 +750,87 @@ fn legacy_payload(
     .expect("legacy payload serialization should succeed")
 }
 
+fn normalize_db_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .map_err(|err| {
+                EventError::Storage(format!("failed to resolve current directory: {err}"))
+            })?
+    };
+
+    if absolute.exists() {
+        return fs::canonicalize(&absolute).map_err(|err| {
+            EventError::Storage(format!(
+                "failed to normalize plugin queue path {}: {}",
+                absolute.display(),
+                err
+            ))
+        });
+    }
+
+    let Some(parent) = absolute.parent() else {
+        return Ok(absolute);
+    };
+
+    let canonical_parent = fs::canonicalize(parent).map_err(|err| {
+        EventError::Storage(format!(
+            "failed to normalize plugin queue path {}: {}",
+            absolute.display(),
+            err
+        ))
+    })?;
+
+    Ok(match absolute.file_name() {
+        Some(name) => canonical_parent.join(name),
+        None => canonical_parent,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::Result;
     use chrono::Utc;
     use serde_json::json;
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+    };
     use tempfile::TempDir;
 
     fn open_store(tmp: &TempDir) -> Result<PluginQueueStore> {
         let path = tmp.path().join("queue.db");
         PluginQueueStore::open(path.as_path())
+    }
+
+    #[test]
+    fn open_reuses_cached_db_handle_across_threads() -> Result<()> {
+        let tmp = TempDir::new().expect("create temp dir");
+        let queue_path = tmp.path().join("queue.db");
+        let barrier = Arc::new(Barrier::new(4));
+        let mut handles = Vec::new();
+
+        for _ in 0..4 {
+            let queue_path = queue_path.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                PluginQueueStore::open(queue_path.as_path())
+            }));
+        }
+
+        let stores: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread should not panic"))
+            .collect::<Result<Vec<_>>>()?;
+
+        let first = &stores[0];
+        assert!(stores.iter().all(|store| Arc::ptr_eq(&first.db, &store.db)));
+
+        Ok(())
     }
 
     #[test]
