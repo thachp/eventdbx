@@ -39,49 +39,67 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 3. **Define a schema (recommended when running in restricted mode)**
 
    ```bash
-   dbx schema create person \
-     --events person_created,person_updated \
-     --snapshot-threshold 100
+   cat > schema.dbx <<'EOF'
+   aggregate person {
+     snapshot_threshold = 100
+
+     field email {
+       type = "text"
+       rules = {"required": true, "format": "email"}
+     }
+
+     field name {
+       type = "text"
+       rules = {"length": {"min": 1, "max": 64}}
+     }
+
+     event person_created {
+       fields = ["first_name", "last_name", "email"]
+     }
+
+     event person_updated {}
+   }
+   EOF
+
+   dbx schema validate
+   dbx schema apply
    ```
 
-   Omit `--snapshot-threshold` to inherit the default configured in `config.toml` (if any).
+   EventDBX discovers `schema.dbx` by walking upward from the current working directory, so you can run schema commands from the project root or a nested folder. Use `--file <path>` to bypass lookup and target a specific schema source explicitly.
 
-   EventDBX stores schemas in `~/.eventdbx/data/schemas.json` (or the `data_dir` you configured). Inspect the full definition at any time with `dbx schema <aggregate>`; the command prints the JSON the server enforces. For example, a `person` aggregate that validates email format and enforces name lengths can be declared as:
+   `dbx schema validate` checks the local source file. `dbx schema show [aggregate]` renders the compiled runtime JSON from that file, and `dbx schema apply` writes the compiled result to the active tenant/domain schema store.
 
    ```bash
-   dbx schema create person --events person_created,person_updated
-   dbx schema person
+   dbx schema show person
    ```
 
    ```json
    {
-     "person": {
-       "aggregate": "person",
-       "snapshot_threshold": null,
-       "locked": false,
-       "field_locks": [],
-       "hidden": false,
-       "hidden_fields": [],
-       "column_types": {
-         "email": { "type": "text", "required": true, "format": "email" },
-         "name": {
-           "type": "text",
-           "rules": { "length": { "min": "1", "max": "64" } }
-         }
+     "aggregate": "person",
+     "snapshot_threshold": 100,
+     "locked": false,
+     "field_locks": [],
+     "hidden": false,
+     "hidden_fields": [],
+     "column_types": {
+       "email": { "type": "text", "required": true, "format": "email" },
+       "name": {
+         "type": "text",
+         "length": { "min": 1, "max": 64 }
+       }
+     },
+     "events": {
+       "person_created": {
+         "fields": ["email", "first_name", "last_name"]
        },
-       "events": {
-         "person_created": {
-           "fields": ["first_name", "last_name"]
-         },
-         "person_updated": {
-           "fields": []
-         }
-       },
-       "created_at": "2025-10-26T22:25:24.028129Z",
-       "updated_at": "2025-10-26T22:27:25.967615Z"
+       "person_updated": {
+         "fields": []
+       }
      }
    }
    ```
+
+   EventDBX still stores the active runtime schema in `~/.eventdbx/data/schemas.json` (or the configured `data_dir`). `schema.dbx` is the project authoring source; `dbx schema apply` compiles it into the runtime file the server enforces.
 
    - `column_types` declare data types, validation formats, and rule blocks per field. Rules can enforce length, numeric ranges, regexes, or cross-field matches.
    - `events.<event>.fields` restrict the properties an event may set; leaving the list empty keeps the event permissive.
@@ -90,7 +108,7 @@ The CLI installs as `dbx`. Older releases exposed an `eventdbx` alias, but the p
 
    When you need hot reloads or historical context, snapshot schema changes per tenant:
 
-   - `dbx tenant schema publish <tenant> [--activate] [--reason <text>]` captures the current `schemas.json`, writes it to `schemas/versions/<id>.json`, and records metadata in `schemas/schema_manifest.json` under the tenant’s data directory. (Omit `<tenant>` to target whichever domain is currently active.) Prefer `dbx schema publish …` if you’re already in the schema workflow—the commands are identical and simply default the tenant from the active domain.
+   - `dbx tenant schema publish <tenant> [--activate] [--reason <text>]` captures the current applied `schemas.json`, writes it to `schemas/versions/<id>.json`, and records metadata in `schemas/schema_manifest.json` under the tenant’s data directory. Apply `schema.dbx` first, then publish when you want a versioned snapshot. (Omit `<tenant>` to target whichever domain is currently active.)
    - `dbx tenant schema history <tenant> [--json] [--audit]` prints every recorded version plus the audit trail of publish/activate/rollback events.
 
 - `dbx tenant schema diff <tenant> --from <version> --to <version> [--json] [--style patch|unified|split] [--color auto|always|never]` emits either a JSON Patch, a GitHub-style unified diff, or a side-by-side split view. Use `--color always` to force green additions / red removals (default `auto` enables color only when stdout is a TTY).
@@ -295,13 +313,11 @@ EventDBX ships a single `dbx` binary. Every command accepts an optional `--confi
 
 ### Schemas
 
-- `dbx schema create <name> --events <event1,event2,...> [--snapshot-threshold <u64>]`
-- `dbx schema add <name> --events <event1,event2,...>`
-- `dbx schema remove <name> <event>`
-- `dbx schema annotate <name> <event> [--note <text>] [--clear]`
-- `dbx schema list`
+- `dbx schema validate [--file <path>] [--json]`
+- `dbx schema show [aggregate] [--file <path>] [--json]`
+- `dbx schema apply [--file <path>] [--tenant <id>] [--no-reload] [--json]`
 
-Schemas are stored on disk; when restriction is `default` or `strict`, incoming events must satisfy the recorded schema (and `strict` additionally requires every aggregate to declare one).
+Project schemas live in `schema.dbx` and compile into the active runtime `schemas.json`; when restriction is `default` or `strict`, incoming events must satisfy the applied schema (and `strict` additionally requires every aggregate to declare one).
 
 ### Aggregates
 
@@ -491,16 +507,41 @@ Rules are optional and can be combined when the target type supports them:
 - `range`: `{ "min": <value>, "max": <value> }` for numeric and temporal types (`integer`, `float`, `decimal`, `timestamp`, `date`). Boundary values must parse to the column’s type.
 - `properties`: nested `column_types` definitions for `object` columns, enabling recursion with the same rule set as top-level fields.
 
-Use `dbx schema field <aggregate> <field> …` to manage types and rules without editing `schemas.json`. It can set `--type <text|integer|…>`, toggle `--required/--not-required`, enforce `--format <email|url|…>`, swap `--regex` / `--contains` lists, adjust `--length-min` / `--length-max`, feed JSON rule blocks via `--rules @rules.json` or `--properties @object_rules.json`, and clear definitions (`--clear-type`, `--clear-rules`, `--clear-format`, etc.). Pair it with `dbx schema alter <aggregate> <event>` to append/remove event field allow-lists or replace them entirely via `--set`/`--clear`.
+Encode those rules directly in `schema.dbx`. Aggregate-level properties such as `snapshot_threshold`, `locked`, `hidden`, `hidden_fields`, and `field_locks` use JSON literals on the right-hand side. Field blocks define `type`, `rules`, and optional `hidden` / `locked` flags. Event blocks define the allow-list via `fields` and the default event note via `note`.
 
 ```bash
-dbx schema field person email --type text --format email --required
-dbx schema field person status --regex '^(pending|active|blocked)$'
-dbx schema field person profile --type object --properties @profile_rules.json
+aggregate person {
+  field email {
+    type = "text"
+    rules = {"required": true, "format": "email"}
+  }
 
-dbx schema alter person person_created --add first_name,last_name
-dbx schema alter person person_updated --set status,comment
-dbx schema alter person person_updated --clear
+  field status {
+    type = "text"
+    rules = {"regex": ["^(pending|active|blocked)$"]}
+  }
+
+  field profile {
+    type = "object"
+    rules = {
+      "properties": {
+        "country": {
+          "type": "text",
+          "format": "country_code"
+        }
+      }
+    }
+  }
+
+  event person_created {
+    fields = ["first_name", "last_name", "email"]
+    note = "Initial signup"
+  }
+
+  event person_updated {
+    fields = ["status", "profile"]
+  }
+}
 ```
 
 ## Performance Testing

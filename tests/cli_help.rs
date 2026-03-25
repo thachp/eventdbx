@@ -67,32 +67,16 @@ const HELP_CASES: &[HelpCase] = &[
         expected_snippet: "Manage schemas",
     },
     HelpCase {
-        path: &["schema", "create"],
-        expected_snippet: "Create a new schema definition",
-    },
-    HelpCase {
-        path: &["schema", "add"],
-        expected_snippet: "Add events to an existing schema definition",
-    },
-    HelpCase {
-        path: &["schema", "remove"],
-        expected_snippet: "Remove an event definition from an aggregate",
-    },
-    HelpCase {
-        path: &["schema", "annotate"],
-        expected_snippet: "Set or clear the default note for an event",
-    },
-    HelpCase {
-        path: &["schema", "list"],
-        expected_snippet: "List available schemas",
-    },
-    HelpCase {
-        path: &["schema", "hide"],
-        expected_snippet: "Hide or unhide a field from aggregate detail responses",
-    },
-    HelpCase {
         path: &["schema", "validate"],
-        expected_snippet: "Validate payload against a schema definition",
+        expected_snippet: "Validate the local schema.dbx file",
+    },
+    HelpCase {
+        path: &["schema", "show"],
+        expected_snippet: "Show compiled runtime JSON from the local schema.dbx file",
+    },
+    HelpCase {
+        path: &["schema", "apply"],
+        expected_snippet: "Apply the local schema.dbx file to the active runtime schema store",
     },
     HelpCase {
         path: &["plugin"],

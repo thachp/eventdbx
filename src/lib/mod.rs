@@ -16,6 +16,7 @@ pub mod restrict;
 pub mod schema;
 pub mod schema_capnp;
 pub mod schema_history;
+pub mod schema_source;
 pub mod server;
 pub mod service;
 pub mod snowflake;

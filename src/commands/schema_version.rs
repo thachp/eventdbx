@@ -626,7 +626,7 @@ pub(crate) fn schema_rollback(
     )
 }
 
-fn schema_reload_online(config: &Config, tenant: &str) -> Result<bool> {
+pub(crate) fn schema_reload_online(config: &Config, tenant: &str) -> Result<bool> {
     if let Ok((client, token)) = prepare_remote_client(config, tenant) {
         if let Ok(reloaded) = client.reload_tenant(&token, tenant) {
             return Ok(reloaded);
@@ -635,7 +635,7 @@ fn schema_reload_online(config: &Config, tenant: &str) -> Result<bool> {
     Ok(false)
 }
 
-fn report_schema_reload(tenant: &str, reloaded: bool) {
+pub(crate) fn report_schema_reload(tenant: &str, reloaded: bool) {
     if reloaded {
         println!("tenant={} schema cache reloaded", tenant);
     } else {

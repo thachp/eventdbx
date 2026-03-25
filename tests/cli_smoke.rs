@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{fs, io::Read};
 
 use anyhow::{Context, Result};
@@ -103,6 +103,12 @@ impl CliTest {
         Ok(cmd)
     }
 
+    fn command_in_dir(&self, dir: &Path) -> Result<Command> {
+        let mut cmd = self.command()?;
+        cmd.current_dir(dir);
+        Ok(cmd)
+    }
+
     fn run(&self, args: &[&str]) -> Result<String> {
         let output = self.exec(args)?;
         if !output.status.success() {
@@ -193,6 +199,35 @@ impl CliTest {
             .with_context(|| format!("failed to run dbx {:?}", args))
     }
 
+    fn exec_in_dir(&self, args: &[&str], dir: &Path) -> Result<std::process::Output> {
+        let mut cmd = self.command_in_dir(dir)?;
+        cmd.args(args);
+        cmd.output()
+            .with_context(|| format!("failed to run dbx {:?} in {}", args, dir.display()))
+    }
+
+    fn run_in_dir(&self, args: &[&str], dir: &Path) -> Result<String> {
+        let output = self.exec_in_dir(args, dir)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "dbx {:?} in {} exited with {}: {}",
+                args,
+                dir.display(),
+                output.status,
+                stderr
+            );
+        }
+        Ok(normalize_output(output.stdout)?)
+    }
+
+    fn run_json_in_dir(&self, args: &[&str], dir: &Path) -> Result<Value> {
+        let stdout = self.run_in_dir(args, dir)?;
+        let parsed = serde_json::from_str(stdout.trim())
+            .with_context(|| format!("failed to parse JSON output from dbx {:?}", args))?;
+        Ok(parsed)
+    }
+
     fn run_with_input(&self, args: &[&str], input: &str) -> Result<String> {
         let mut cmd = self.command()?;
         cmd.args(args);
@@ -209,6 +244,39 @@ impl CliTest {
 
     fn data_dir(&self) -> PathBuf {
         self.home.join(".eventdbx")
+    }
+
+    fn project_dir(&self) -> Result<PathBuf> {
+        let dir = self.home.join("project");
+        fs::create_dir_all(&dir).context("failed to create project directory")?;
+        Ok(dir)
+    }
+
+    fn write_project_file(&self, relative: &str, contents: &str) -> Result<PathBuf> {
+        let path = self.project_dir()?.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(path)
+    }
+
+    fn write_schema_source(&self, contents: &str) -> Result<PathBuf> {
+        self.write_project_file("schema.dbx", contents)
+    }
+
+    fn apply_schema_source(&self, contents: &str) -> Result<()> {
+        let path = self.write_schema_source(contents)?;
+        self.run(&[
+            "schema",
+            "apply",
+            "--file",
+            path.to_string_lossy().as_ref(),
+            "--no-reload",
+        ])?;
+        Ok(())
     }
 
     fn config_path(&self) -> PathBuf {
@@ -625,633 +693,228 @@ fn queue_status_displays_dead_events() -> Result<()> {
 }
 
 #[test]
-fn schema_list_empty_json() -> Result<()> {
+fn schema_validate_reports_compiled_summary() -> Result<()> {
     let cli = CliTest::new()?;
-    let stdout = cli.run(&["schema", "list", "--json"])?;
-    let schemas: Value =
-        serde_json::from_str(stdout.trim()).context("failed to parse schema list JSON")?;
-    assert_eq!(schemas, json!([]));
-    Ok(())
-}
+    let path = cli.write_schema_source(
+        r#"
+        aggregate inventory {
+          snapshot_threshold = 25
+          hidden_fields = ["internal_notes"]
+          field_locks = ["sku"]
 
-#[test]
-fn schema_add_remove_annotate_flow() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run_json(&[
+          field email {
+            type = "text"
+            rules = {"required": true, "format": "email"}
+          }
+
+          field manager {
+            type = "reference"
+            hidden = true
+            locked = true
+            rules = {"reference": {"tenant": "default", "aggregate_type": "person"}}
+          }
+
+          event item_created {
+            fields = ["sku", "email"]
+            note = "Initial load event"
+          }
+
+          event item_restocked {}
+        }
+        "#,
+    )?;
+
+    let summary = cli.run_json(&[
         "schema",
-        "create",
-        "inventory",
-        "--events",
-        "item_created",
+        "validate",
+        "--file",
+        path.to_string_lossy().as_ref(),
         "--json",
     ])?;
-
-    let add_out = cli.run(&["schema", "add", "inventory", "item_restocked"])?;
-    assert!(
-        add_out.contains("schema=inventory added_events=item_restocked total_events=2"),
-        "unexpected schema add output:\n{}",
-        add_out
-    );
-
-    let schema_after_add = cli.run_json(&["schema", "inventory"])?;
-    assert!(
-        schema_after_add["events"]
-            .get("item_restocked")
-            .and_then(|event| event.get("fields"))
-            .is_some(),
-        "expected schema to contain item_restocked event: {}",
-        schema_after_add
-    );
-
-    let annotate_out = cli.run(&[
-        "schema",
-        "annotate",
-        "inventory",
-        "item_created",
-        "--note",
-        "Initial load event",
-    ])?;
-    assert!(
-        annotate_out.contains("note_set=\"Initial load event\""),
-        "unexpected schema annotate output:\n{}",
-        annotate_out
-    );
-
-    let schema_with_note = cli.run_json(&["schema", "inventory"])?;
-    assert_eq!(
-        schema_with_note["events"]["item_created"]["notes"],
-        json!("Initial load event")
-    );
-
-    let clear_out = cli.run(&["schema", "annotate", "inventory", "item_created", "--clear"])?;
-    assert!(
-        clear_out.contains("note_cleared"),
-        "unexpected schema annotate clear output:\n{}",
-        clear_out
-    );
-
-    let schema_cleared = cli.run_json(&["schema", "inventory"])?;
-    assert!(
-        schema_cleared["events"]["item_created"]
-            .get("notes")
-            .is_none(),
-        "expected note to be cleared from schema: {}",
-        schema_cleared
-    );
-
-    let remove_out = cli.run(&["schema", "remove", "inventory", "item_restocked"])?;
-    assert!(
-        remove_out.contains("schema=inventory removed_event=item_restocked remaining_events=1"),
-        "unexpected schema remove output:\n{}",
-        remove_out
-    );
-
+    assert_eq!(summary["valid"], json!(true));
+    assert_eq!(summary["aggregate_count"], json!(1));
+    assert_eq!(summary["aggregates"], json!(["inventory"]));
     Ok(())
 }
 
 #[test]
-fn schema_hide_field() -> Result<()> {
+fn schema_validate_invalid_source_emits_json_error() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "orders",
-        "--events",
-        "order_created",
-        "--json",
-    ])?;
+    let path = cli.write_schema_source(
+        r#"
+        aggregate broken {
+          field email {
+            rules = {"required": true}
+          }
+          event broken_created {}
+        }
+        "#,
+    )?;
 
-    let hide_out = cli.run(&[
-        "schema",
-        "hide",
-        "--aggregate",
-        "orders",
-        "--field",
-        "internal_notes",
-    ])?;
-    assert!(
-        hide_out.contains("aggregate=orders field=internal_notes hidden"),
-        "unexpected schema hide output:\n{}",
-        hide_out
-    );
-
-    let schema_after_hide = cli.run_json(&["schema", "orders"])?;
-    let hidden = schema_after_hide["hidden_fields"]
-        .as_array()
-        .context("hidden_fields not present in schema json")?;
-    assert!(
-        hidden.iter().any(|value| value == "internal_notes"),
-        "expected hidden_fields to include internal_notes: {}",
-        schema_after_hide
-    );
-
-    Ok(())
-}
-
-#[test]
-fn schema_unhide_field() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "orders",
-        "--events",
-        "order_created",
-        "--json",
-    ])?;
-
-    cli.run(&[
-        "schema",
-        "hide",
-        "--aggregate",
-        "orders",
-        "--field",
-        "internal_notes",
-    ])?;
-
-    let unhide_out = cli.run(&[
-        "schema",
-        "hide",
-        "--aggregate",
-        "orders",
-        "--field",
-        "internal_notes",
-        "--unhide",
-    ])?;
-    assert!(
-        unhide_out.contains("aggregate=orders field=internal_notes unhidden"),
-        "unexpected schema unhide output:\n{}",
-        unhide_out
-    );
-
-    let schema_after_unhide = cli.run_json(&["schema", "orders"])?;
-    let hidden = schema_after_unhide["hidden_fields"]
-        .as_array()
-        .context("hidden_fields not present in schema json")?;
-    assert!(
-        !hidden.iter().any(|value| value == "internal_notes"),
-        "expected hidden_fields to exclude internal_notes after unhide: {}",
-        schema_after_unhide
-    );
-
-    Ok(())
-}
-
-#[test]
-fn schema_field_sets_type_and_rules() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run(&[
-        "schema",
-        "create",
-        "contacts",
-        "--events",
-        "contact_created",
-    ])?;
-
-    let type_out = cli.run(&["schema", "field", "contacts", "email", "--type", "text"])?;
-    assert!(
-        type_out.contains("type=text"),
-        "unexpected schema field type output:\n{}",
-        type_out
-    );
-
-    let rules_out = cli.run(&[
-        "schema",
-        "field",
-        "contacts",
-        "email",
-        "--format",
-        "email",
-        "--required",
-    ])?;
-    assert!(
-        rules_out.contains("rules=updated"),
-        "unexpected schema field rules output:\n{}",
-        rules_out
-    );
-
-    let schema = cli.run_json(&["schema", "contacts"])?;
-    let column = schema["column_types"]["email"]
-        .as_object()
-        .context("email column missing from schema json")?;
-    assert_eq!(column.get("type"), Some(&json!("text")));
-    assert_eq!(column.get("required"), Some(&json!(true)));
-    assert_eq!(column.get("format"), Some(&json!("email")));
-
-    let clear_rules = cli.run(&[
-        "schema",
-        "field",
-        "contacts",
-        "email",
-        "--clear-format",
-        "--not-required",
-    ])?;
-    assert!(
-        clear_rules.contains("rules=updated"),
-        "unexpected schema field clear output:\n{}",
-        clear_rules
-    );
-    let after = cli.run_json(&["schema", "contacts"])?;
-    assert_eq!(after["column_types"]["email"], json!("text"));
-
-    Ok(())
-}
-
-#[test]
-fn schema_field_clear_type_removes_column() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "orders", "--events", "order_created"])?;
-    cli.run(&["schema", "field", "orders", "total", "--type", "integer"])?;
-
-    let cleared = cli.run(&["schema", "field", "orders", "total", "--clear-type"])?;
-    assert!(
-        cleared.contains("type=cleared"),
-        "unexpected schema field clear type output:\n{}",
-        cleared
-    );
-
-    let schema = cli.run_json(&["schema", "orders"])?;
-    let columns = schema["column_types"]
-        .as_object()
-        .context("column_types missing from schema json")?;
-    assert!(
-        !columns.contains_key("total"),
-        "expected total column to be removed: {}",
-        schema
-    );
-    Ok(())
-}
-
-#[test]
-fn schema_alter_add_remove_flow() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "person", "--events", "person_created"])?;
-
-    let add = cli.run(&[
-        "schema",
-        "alter",
-        "person",
-        "person_created",
-        "--add",
-        "first_name,last_name",
-    ])?;
-    assert!(
-        add.contains("added=first_name,last_name"),
-        "unexpected schema alter add output:\n{}",
-        add
-    );
-
-    let schema = cli.run_json(&["schema", "person"])?;
-    let fields = schema["events"]["person_created"]["fields"]
-        .as_array()
-        .context("expected fields array after add")?;
-    assert!(
-        fields.iter().any(|value| value == "first_name")
-            && fields.iter().any(|value| value == "last_name"),
-        "field list missing expected entries: {}",
-        schema
-    );
-
-    let remove = cli.run(&[
-        "schema",
-        "alter",
-        "person",
-        "person_created",
-        "--remove",
-        "last_name",
-    ])?;
-    assert!(
-        remove.contains("removed=last_name"),
-        "unexpected schema alter remove output:\n{}",
-        remove
-    );
-
-    let after_remove = cli.run_json(&["schema", "person"])?;
-    let remaining = after_remove["events"]["person_created"]["fields"]
-        .as_array()
-        .context("expected fields array after remove")?;
-    let remaining_values: Vec<_> = remaining
-        .iter()
-        .map(|value| value.as_str().unwrap_or_default().to_string())
-        .collect();
-    assert_eq!(
-        remaining_values,
-        vec!["first_name".to_string()],
-        "expected only first_name after removal: {}",
-        after_remove
-    );
-
-    Ok(())
-}
-
-#[test]
-fn schema_alter_set_and_clear() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "order", "--events", "order_created"])?;
-
-    let set = cli.run(&[
-        "schema",
-        "alter",
-        "order",
-        "order_created",
-        "--set",
-        "order_id,status",
-    ])?;
-    assert!(
-        set.contains("fields=order_id,status"),
-        "unexpected schema alter set output:\n{}",
-        set
-    );
-
-    let schema = cli.run_json(&["schema", "order"])?;
-    let fields = schema["events"]["order_created"]["fields"]
-        .as_array()
-        .context("expected fields array after set")?;
-    let set_values: Vec<_> = fields
-        .iter()
-        .map(|value| value.as_str().unwrap_or_default().to_string())
-        .collect();
-    assert_eq!(
-        set_values,
-        vec!["order_id".to_string(), "status".to_string()],
-        "expected set fields to replace list: {}",
-        schema
-    );
-
-    let cleared = cli.run(&["schema", "alter", "order", "order_created", "--clear"])?;
-    assert!(
-        cleared.contains("fields=cleared"),
-        "unexpected schema alter clear output:\n{}",
-        cleared
-    );
-
-    let after_clear = cli.run_json(&["schema", "order"])?;
-    let cleared_fields = after_clear["events"]["order_created"]["fields"]
-        .as_array()
-        .context("expected fields array after clear")?;
-    assert!(
-        cleared_fields.is_empty(),
-        "expected fields to be empty after clear: {}",
-        after_clear
-    );
-
-    Ok(())
-}
-
-#[test]
-fn schema_create_duplicate_fails() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "dupe", "--events", "event_a"])?;
-    let failure = cli.run_failure(&["schema", "create", "dupe", "--events", "event_b"])?;
-    assert!(
-        failure.stderr.contains("schema already exists"),
-        "unexpected duplicate schema message:\n{}",
-        failure.stderr
-    );
-    Ok(())
-}
-
-#[test]
-fn schema_list_after_create_contains_entry() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run(&[
-        "schema",
-        "create",
-        "customers",
-        "--events",
-        "customer_created",
-    ])?;
-    let list = cli.run_json(&["schema", "list", "--json"])?;
-    let array = list
-        .as_array()
-        .context("schema list did not return an array")?;
-    assert_eq!(array.len(), 1);
-    assert_eq!(array[0]["aggregate"], json!("customers"));
-    Ok(())
-}
-
-#[test]
-fn schema_remove_unknown_event_fails() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "inventory", "--events", "item_created"])?;
-    let failure = cli.run_failure(&["schema", "remove", "inventory", "item_deleted"])?;
-    assert!(
-        failure
-            .stderr
-            .contains("event item_deleted is not defined for aggregate inventory"),
-        "unexpected remove failure:\n{}",
-        failure.stderr
-    );
-    Ok(())
-}
-
-#[test]
-fn schema_validate_unknown_event_fails() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "prices", "--events", "price_created"])?;
     let failure = cli.run_failure(&[
         "schema",
         "validate",
-        "--aggregate",
-        "prices",
-        "--event",
-        "price_updated",
-        "--payload",
-        "{}",
-    ])?;
-    assert!(
-        failure
-            .stderr
-            .contains("event price_updated is not defined for aggregate prices"),
-        "unexpected schema validate failure:\n{}",
-        failure.stderr
-    );
-    Ok(())
-}
-
-#[test]
-fn schema_validate_invalid_json_fails() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "audit", "--events", "log_created"])?;
-    let failure = cli.run_failure(&[
-        "schema",
-        "validate",
-        "--aggregate",
-        "audit",
-        "--event",
-        "log_created",
-        "--payload",
-        "{invalid",
-    ])?;
-    assert!(
-        failure.stderr.contains("key must be a string")
-            || failure.stderr.contains("expected value"),
-        "unexpected invalid JSON message:\n{}",
-        failure.stderr
-    );
-    Ok(())
-}
-
-#[test]
-fn schema_hide_empty_field_fails() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "orders", "--events", "order_created"])?;
-    let failure = cli.run_failure(&["schema", "hide", "--aggregate", "orders", "--field", ""])?;
-    assert!(
-        failure.stderr.contains("field name cannot be empty"),
-        "unexpected hide validation message:\n{}",
-        failure.stderr
-    );
-    Ok(())
-}
-
-#[test]
-fn schema_create_empty_aggregate_fails() -> Result<()> {
-    let cli = CliTest::new()?;
-    let failure = cli.run_failure(&["schema", "create", "", "--events", "evt"])?;
-    assert!(
-        failure.stderr.contains("aggregate name must be provided"),
-        "unexpected empty aggregate message:\n{}",
-        failure.stderr
-    );
-    Ok(())
-}
-
-#[test]
-fn schema_annotate_requires_note_or_clear() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "ledger",
-        "--events",
-        "entry_logged",
+        "--file",
+        path.to_string_lossy().as_ref(),
         "--json",
     ])?;
-
-    let failure = cli.run_failure(&["schema", "annotate", "ledger", "entry_logged"])?;
+    let body: Value = serde_json::from_str(failure.stdout.trim())
+        .context("failed to parse validate error JSON")?;
+    assert_eq!(body["valid"], json!(false));
     assert!(
-        failure
-            .stderr
-            .contains("either --note must be provided or use --clear"),
-        "unexpected annotate validation message:\n{}",
-        failure.stderr
+        body["error"]
+            .as_str()
+            .map(|value| value.contains("must define type"))
+            .unwrap_or(false),
+        "unexpected validate error JSON: {}",
+        body
     );
-
     Ok(())
 }
 
 #[test]
-fn schema_annotate_clear_with_note_fails() -> Result<()> {
+fn schema_show_outputs_compiled_runtime_json() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
+    let path = cli.write_schema_source(
+        r#"
+        aggregate customers {
+          field email {
+            type = "text"
+            rules = {"required": true, "format": "email"}
+          }
+
+          event customer_created {
+            fields = ["email"]
+            note = "Signup event"
+          }
+        }
+
+        aggregate invoices {
+          event invoice_created {}
+        }
+        "#,
+    )?;
+
+    let compiled = cli.run_json(&[
         "schema",
-        "create",
-        "ledger",
-        "--events",
-        "entry_logged",
+        "show",
+        "--file",
+        path.to_string_lossy().as_ref(),
         "--json",
     ])?;
-    let failure = cli.run_failure(&[
-        "schema",
-        "annotate",
-        "ledger",
-        "entry_logged",
-        "--note",
-        "example",
-        "--clear",
-    ])?;
-    assert!(
-        failure
-            .stderr
-            .contains("--note cannot be combined with --clear"),
-        "unexpected annotate clear message:\n{}",
-        failure.stderr
-    );
-    Ok(())
-}
-
-#[test]
-fn schema_hide_field_idempotent_and_error_cases() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "billing",
-        "--events",
-        "invoice_created",
-        "--json",
-    ])?;
-
-    let hide_again = cli.run(&[
-        "schema",
-        "hide",
-        "--aggregate",
-        "billing",
-        "--field",
-        "secret_code",
-    ])?;
-    assert!(
-        hide_again.contains("aggregate=billing field=secret_code hidden"),
-        "unexpected schema hide output:\n{}",
-        hide_again
+    assert!(compiled.get("customers").is_some());
+    assert!(compiled.get("invoices").is_some());
+    assert_eq!(
+        compiled["customers"]["events"]["customer_created"]["notes"],
+        json!("Signup event")
     );
 
-    let schema_hidden = cli.run_json(&["schema", "billing"])?;
-    let hidden = schema_hidden["hidden_fields"]
-        .as_array()
-        .context("hidden_fields not present after hide")?;
-    assert!(
-        hidden.iter().any(|value| value == "secret_code"),
-        "expected hidden_fields to contain secret_code: {}",
-        schema_hidden
-    );
-
-    let hide_duplicate = cli.run(&[
+    let single = cli.run_json(&[
         "schema",
-        "hide",
-        "--aggregate",
-        "billing",
-        "--field",
-        "secret_code",
-    ])?;
-    assert!(
-        hide_duplicate.contains("aggregate=billing field=secret_code hidden"),
-        "duplicate hide should still report hidden:\n{}",
-        hide_duplicate
-    );
-
-    let failure = cli.run_failure(&[
-        "schema",
-        "hide",
-        "--aggregate",
-        "",
-        "--field",
-        "secret_code",
-    ])?;
-    assert!(
-        failure.stderr.contains("aggregate name cannot be empty"),
-        "expected empty aggregate error, got:\n{}",
-        failure.stderr
-    );
-
-    Ok(())
-}
-
-#[test]
-fn schema_show_outputs_json() -> Result<()> {
-    let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
+        "show",
         "customers",
-        "--events",
-        "customer_created",
+        "--file",
+        path.to_string_lossy().as_ref(),
         "--json",
     ])?;
-    let schema = cli.run_json(&["schema", "customers"])?;
-    assert_eq!(schema["aggregate"], json!("customers"));
-    assert!(schema["events"].get("customer_created").is_some());
+    assert_eq!(single["aggregate"], json!("customers"));
+    assert_eq!(single["column_types"]["email"]["format"], json!("email"));
+    Ok(())
+}
+
+#[test]
+fn schema_apply_writes_runtime_schema_store() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.apply_schema_source(
+        r#"
+        aggregate orders {
+          field status {
+            type = "text"
+            rules = {"required": true}
+          }
+
+          event order_created {
+            fields = ["status"]
+          }
+        }
+        "#,
+    )?;
+
+    let config = cli.load_config()?;
+    let stored: Value = serde_json::from_str(
+        &fs::read_to_string(config.schema_store_path()).context("failed to read schemas.json")?,
+    )
+    .context("failed to parse schemas.json")?;
+    assert!(
+        stored.get("orders").is_some(),
+        "missing orders schema: {}",
+        stored
+    );
+
+    let created = cli.run_json(&[
+        "aggregate",
+        "create",
+        "orders",
+        "order-1",
+        "--event",
+        "order_created",
+        "--field",
+        "status=pending",
+        "--json",
+    ])?;
+    assert_eq!(created["aggregate_type"], json!("orders"));
+    assert_eq!(created["state"]["status"], json!("pending"));
+    Ok(())
+}
+
+#[test]
+fn schema_apply_finds_schema_in_nearest_ancestor() -> Result<()> {
+    let cli = CliTest::new()?;
+    cli.write_schema_source(
+        r#"
+        aggregate accounts {
+          event account_created {}
+        }
+        "#,
+    )?;
+    let nested = cli.project_dir()?.join("src").join("api");
+    fs::create_dir_all(&nested)?;
+
+    let shown = cli.run_json_in_dir(&["schema", "show", "accounts", "--json"], &nested)?;
+    assert_eq!(shown["aggregate"], json!("accounts"));
+
+    let applied = cli.run_in_dir(&["schema", "apply", "--no-reload"], &nested)?;
+    assert!(
+        applied.contains("applied aggregates=1"),
+        "unexpected schema apply output:\n{}",
+        applied
+    );
+    Ok(())
+}
+
+#[test]
+fn schema_removed_mutation_commands_fail() -> Result<()> {
+    let cli = CliTest::new()?;
+    let failure = cli.run_failure(&["schema", "create", "orders", "--events", "order_created"])?;
+    assert!(
+        failure.stderr.contains("unrecognized subcommand")
+            || failure.stderr.contains("unexpected argument"),
+        "unexpected removed command error:\n{}",
+        failure.stderr
+    );
+    Ok(())
+}
+
+#[test]
+fn schema_removed_version_aliases_fail() -> Result<()> {
+    let cli = CliTest::new()?;
+    let failure = cli.run_failure(&["schema", "publish"])?;
+    assert!(
+        failure.stderr.contains("unrecognized subcommand")
+            || failure.stderr.contains("unexpected argument"),
+        "unexpected removed alias error:\n{}",
+        failure.stderr
+    );
     Ok(())
 }
 
@@ -1447,14 +1110,13 @@ fn tenant_stats_reports_counts() -> Result<()> {
 fn tenant_schema_publish_records_history() -> Result<()> {
     let cli = CliTest::new()?;
 
-    cli.run(&[
-        "schema",
-        "create",
-        "orders",
-        "--events",
-        "order_created",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate orders {
+          event order_created {}
+        }
+        "#,
+    )?;
 
     let publish_output = cli.run(&[
         "tenant",
@@ -1508,14 +1170,13 @@ fn tenant_schema_publish_records_history() -> Result<()> {
 fn tenant_schema_diff_and_rollback_flow() -> Result<()> {
     let cli = CliTest::new()?;
 
-    cli.run(&[
-        "schema",
-        "create",
-        "orders",
-        "--events",
-        "order_created",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate orders {
+          event order_created {}
+        }
+        "#,
+    )?;
     cli.run(&[
         "tenant",
         "schema",
@@ -1525,7 +1186,14 @@ fn tenant_schema_diff_and_rollback_flow() -> Result<()> {
         "--no-reload",
     ])?;
 
-    cli.run(&["schema", "add", "orders", "order_shipped"])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate orders {
+          event order_created {}
+          event order_shipped {}
+        }
+        "#,
+    )?;
     cli.run(&[
         "tenant",
         "schema",
@@ -1664,7 +1332,13 @@ fn tenant_quota_limits_aggregate_creation() -> Result<()> {
         .context("missing default tenant entry with quota")?;
     assert_eq!(quota_entry["quota_mb"], json!(1));
 
-    cli.run(&["schema", "create", "order", "--events", "order_created"])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate order {
+          event order_created {}
+        }
+        "#,
+    )?;
 
     let payload_blob = "x".repeat((MAX_EVENT_PAYLOAD_BYTES.saturating_sub(32)) as usize);
     let payload_json = format!(r#"{{"blob":"{}"}}"#, payload_blob);
@@ -1994,13 +1668,13 @@ fn plugin_list_multiple_entries() -> Result<()> {
 #[test]
 fn aggregate_get_unknown_fails() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&[
-        "schema",
-        "create",
-        "existing",
-        "--events",
-        "existing_created",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate existing {
+          event existing_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate("existing", "existing-1", "existing_created")?;
     cli.run(&[
         "aggregate",
@@ -2023,13 +1697,13 @@ fn aggregate_get_unknown_fails() -> Result<()> {
 #[test]
 fn aggregate_remove_unknown_fails() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&[
-        "schema",
-        "create",
-        "existing",
-        "--events",
-        "existing_created",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate existing {
+          event existing_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate("existing", "existing-1", "existing_created")?;
     cli.run(&[
         "aggregate",
@@ -2052,13 +1726,13 @@ fn aggregate_remove_unknown_fails() -> Result<()> {
 #[test]
 fn aggregate_verify_unknown_fails() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&[
-        "schema",
-        "create",
-        "existing",
-        "--events",
-        "existing_created",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate existing {
+          event existing_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate("existing", "existing-1", "existing_created")?;
     cli.run(&[
         "aggregate",
@@ -2126,14 +1800,13 @@ fn aggregate_apply_allows_missing_schema_in_default_mode() -> Result<()> {
 #[test]
 fn aggregate_apply_without_create_requires_flag() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "legacy",
-        "--events",
-        "legacy_created",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate legacy {
+          event legacy_created {}
+        }
+        "#,
+    )?;
 
     let failure = cli.run_failure(&[
         "aggregate",
@@ -2167,14 +1840,13 @@ fn aggregate_apply_without_create_requires_flag() -> Result<()> {
 #[test]
 fn aggregate_create_outputs_state() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "patient",
-        "--events",
-        "patient_created",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate patient {
+          event patient_created {}
+        }
+        "#,
+    )?;
 
     let state = cli.run_json(&[
         "aggregate",
@@ -2212,8 +1884,17 @@ cli_failure_test!(
 #[test]
 fn aggregate_list_accepts_positional_type() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "patient", "--events", "patient_created"])?;
-    cli.run(&["schema", "create", "order", "--events", "order_created"])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate patient {
+          event patient_created {}
+        }
+
+        aggregate order {
+          event order_created {}
+        }
+        "#,
+    )?;
 
     cli.create_aggregate("patient", "patient-1", "patient_created")?;
     cli.run(&[
@@ -2255,10 +1936,20 @@ fn aggregate_list_accepts_positional_type() -> Result<()> {
 #[test]
 fn aggregate_list_resolves_references() -> Result<()> {
     let cli = CliTest::new()?;
-    // Schemas
-    cli.run(&["schema", "create", "address", "--events", "address_created"])?;
-    cli.run(&["schema", "create", "farm", "--events", "farm_created"])?;
-    cli.run(&["schema", "field", "--type", "reference", "farm", "address"])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate address {
+          event address_created {}
+        }
+
+        aggregate farm {
+          field address {
+            type = "reference"
+          }
+          event farm_created {}
+        }
+        "#,
+    )?;
 
     // Target aggregate
     cli.create_aggregate("address", "addr-1", "address_created")?;
@@ -2305,9 +1996,20 @@ fn aggregate_list_resolves_references() -> Result<()> {
 #[test]
 fn aggregate_referrers_reports_sources() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "address", "--events", "address_created"])?;
-    cli.run(&["schema", "create", "farm", "--events", "farm_created"])?;
-    cli.run(&["schema", "field", "--type", "reference", "farm", "address"])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate address {
+          event address_created {}
+        }
+
+        aggregate farm {
+          field address {
+            type = "reference"
+          }
+          event farm_created {}
+        }
+        "#,
+    )?;
 
     cli.create_aggregate("address", "addr-1", "address_created")?;
     cli.run(&[
@@ -2343,18 +2045,21 @@ fn aggregate_referrers_reports_sources() -> Result<()> {
 #[test]
 fn aggregate_archive_nullifies_references() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "address", "--events", "address_created"])?;
-    cli.run(&["schema", "create", "farm", "--events", "farm_created"])?;
-    cli.run(&[
-        "schema",
-        "field",
-        "--type",
-        "reference",
-        "--reference-cascade",
-        "nullify",
-        "farm",
-        "address",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate address {
+          event address_created {}
+        }
+
+        aggregate farm {
+          field address {
+            type = "reference"
+            rules = {"reference": {"cascade": "nullify"}}
+          }
+          event farm_created {}
+        }
+        "#,
+    )?;
 
     cli.create_aggregate("address", "addr-1", "address_created")?;
     cli.run(&[
@@ -2395,13 +2100,13 @@ fn aggregate_commit_no_staged_events() -> Result<()> {
 #[test]
 fn aggregate_apply_metadata_invalid_key_fails() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&[
-        "schema",
-        "create",
-        "metadata",
-        "--events",
-        "metadata_created",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate metadata {
+          event metadata_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate("metadata", "id-1", "metadata_created")?;
     let failure = cli.run_failure(&[
         "aggregate",
@@ -2427,7 +2132,13 @@ fn aggregate_apply_metadata_invalid_key_fails() -> Result<()> {
 #[test]
 fn aggregate_apply_note_too_long_fails() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "notes", "--events", "note_created"])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate notes {
+          event note_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate("notes", "id-1", "note_created")?;
     let long_note = "n".repeat(129);
     let failure = cli.run_failure(&[
@@ -2460,14 +2171,14 @@ fn aggregate_list_stage_empty_shows_message() -> Result<()> {
 #[test]
 fn aggregate_stage_accepts_first_event_without_created_suffix() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "order",
-        "--events",
-        "order_created,order_updated",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate order {
+          event order_created {}
+          event order_updated {}
+        }
+        "#,
+    )?;
 
     cli.create_aggregate("order", "order-1", "order_created")?;
     let staged = cli.run(&[
@@ -2498,14 +2209,13 @@ fn aggregate_stage_accepts_first_event_without_created_suffix() -> Result<()> {
 #[test]
 fn aggregate_apply_payload_and_field_conflict() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "conflict",
-        "--events",
-        "conflict_created",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate conflict {
+          event conflict_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate("conflict", "id-1", "conflict_created")?;
     let failure = cli.run_failure(&[
         "aggregate",
@@ -2531,14 +2241,14 @@ fn aggregate_apply_payload_and_field_conflict() -> Result<()> {
 #[test]
 fn aggregate_apply_and_get_flow() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "order",
-        "--events",
-        "order_created,order_updated",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate order {
+          event order_created {}
+          event order_updated {}
+        }
+        "#,
+    )?;
 
     cli.create_aggregate_with_fields(
         "order",
@@ -2590,14 +2300,13 @@ fn aggregate_apply_and_get_flow() -> Result<()> {
 #[test]
 fn aggregate_get_includes_extension_metadata_inline() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "person",
-        "--events",
-        "person_updated",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate person {
+          event person_updated {}
+        }
+        "#,
+    )?;
 
     cli.run_json(&[
         "aggregate",
@@ -2645,13 +2354,14 @@ fn aggregate_get_includes_extension_metadata_inline() -> Result<()> {
 #[test]
 fn aggregate_patch_and_select_flow() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&[
-        "schema",
-        "create",
-        "person",
-        "--events",
-        "person_created,person_updated",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate person {
+          event person_created {}
+          event person_updated {}
+        }
+        "#,
+    )?;
 
     cli.create_aggregate_with_payload(
         "person",
@@ -2928,13 +2638,13 @@ fn aggregate_list_timestamp_cursor_shorthand() -> Result<()> {
 #[test]
 fn aggregate_list_hides_archived_by_default() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&[
-        "schema",
-        "create",
-        "archive_demo",
-        "--events",
-        "archive_created",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate archive_demo {
+          event archive_created {}
+        }
+        "#,
+    )?;
 
     cli.create_aggregate("archive_demo", "demo-1", "archive_created")?;
     cli.run(&[
@@ -2980,14 +2690,13 @@ fn aggregate_list_hides_archived_by_default() -> Result<()> {
 #[test]
 fn aggregate_snapshot_creates_record() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "snap",
-        "--events",
-        "snap_created",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate snap {
+          event snap_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate_with_fields("snap", "snap-1", "snap_created", &[("status", "ready")])?;
     let output = cli.run(&["snapshots", "create", "snap", "snap-1"])?;
     let snapshot: Value =
@@ -3021,14 +2730,13 @@ fn aggregate_snapshot_creates_record() -> Result<()> {
 #[test]
 fn aggregate_verify_success_json() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "verify",
-        "--events",
-        "verify_created",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate verify {
+          event verify_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate_with_fields("verify", "verify-1", "verify_created", &[("status", "ok")])?;
     let output = cli.run(&["aggregate", "verify", "verify", "verify-1", "--json"])?;
     let body: Value =
@@ -3046,14 +2754,13 @@ fn aggregate_verify_success_json() -> Result<()> {
 #[test]
 fn aggregate_archive_and_restore_flow() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "archive",
-        "--events",
-        "archive_created",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate archive {
+          event archive_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate_with_fields(
         "archive",
         "archive-1",
@@ -3094,14 +2801,13 @@ fn aggregate_archive_and_restore_flow() -> Result<()> {
 #[test]
 fn aggregate_export_json_creates_file() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run_json(&[
-        "schema",
-        "create",
-        "export",
-        "--events",
-        "export_created",
-        "--json",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate export {
+          event export_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate_with_fields(
         "export",
         "export-1",
@@ -3137,13 +2843,13 @@ fn aggregate_export_json_creates_file() -> Result<()> {
 #[test]
 fn aggregate_export_csv_sorts_headers_and_rows() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&[
-        "schema",
-        "create",
-        "exportcsv",
-        "--events",
-        "export_created",
-    ])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate exportcsv {
+          event export_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate_with_fields(
         "exportcsv",
         "exp-2",
@@ -3198,8 +2904,17 @@ fn aggregate_export_csv_sorts_headers_and_rows() -> Result<()> {
 #[test]
 fn aggregate_export_all_errors_when_output_is_file() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "first", "--events", "first_created"])?;
-    cli.run(&["schema", "create", "second", "--events", "second_created"])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate first {
+          event first_created {}
+        }
+
+        aggregate second {
+          event second_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate("first", "first-1", "first_created")?;
     cli.create_aggregate("second", "second-1", "second_created")?;
 
@@ -3228,8 +2943,17 @@ fn aggregate_export_all_errors_when_output_is_file() -> Result<()> {
 #[test]
 fn aggregate_export_all_to_zip_includes_each_type() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "alpha", "--events", "alpha_created"])?;
-    cli.run(&["schema", "create", "beta", "--events", "beta_created"])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate alpha {
+          event alpha_created {}
+        }
+
+        aggregate beta {
+          event beta_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate_with_fields("alpha", "alpha-1", "alpha_created", &[("status", "ok")])?;
     cli.create_aggregate_with_fields("beta", "beta-1", "beta_created", &[("count", "1")])?;
 
@@ -3290,15 +3014,14 @@ fn aggregate_export_all_to_zip_includes_each_type() -> Result<()> {
 #[test]
 fn aggregate_stage_and_commit_flow() -> Result<()> {
     let cli = CliTest::new()?;
-    let schema = cli.run_json(&[
-        "schema",
-        "create",
-        "order",
-        "--events",
-        "order_created,order_updated",
-        "--json",
-    ])?;
-    assert_eq!(schema["aggregate"], "order");
+    cli.apply_schema_source(
+        r#"
+        aggregate order {
+          event order_created {}
+          event order_updated {}
+        }
+        "#,
+    )?;
 
     cli.create_aggregate("order", "order-1", "order_created")?;
 
@@ -3350,7 +3073,13 @@ fn aggregate_stage_and_commit_flow() -> Result<()> {
 #[test]
 fn events_list_filters_by_payload_field() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "orders", "--events", "order_created"])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate orders {
+          event order_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate("orders", "order-1", "order_created")?;
     cli.run(&[
         "aggregate",
@@ -3387,7 +3116,13 @@ fn events_list_filters_by_payload_field() -> Result<()> {
 #[test]
 fn event_show_returns_single_event() -> Result<()> {
     let cli = CliTest::new()?;
-    cli.run(&["schema", "create", "orders", "--events", "order_created"])?;
+    cli.apply_schema_source(
+        r#"
+        aggregate orders {
+          event order_created {}
+        }
+        "#,
+    )?;
     cli.create_aggregate("orders", "order-1", "order_created")?;
     let record = cli.run_json(&[
         "aggregate",
