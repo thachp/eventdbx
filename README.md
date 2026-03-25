@@ -242,17 +242,15 @@ Supported `reference` keys:
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `integrity` | string | `strong` or `weak`. `strong` rejects missing/forbidden targets; `weak` allows unresolved targets. |
-| `tenant` | string | Restricts the reference to a specific domain/tenant. |
 | `aggregate_type` | string | Restricts the reference to a specific aggregate type. |
 | `cascade` | string | `none`, `restrict`, or `nullify`. Stored in schema metadata for downstream reference handling. |
 
 Accepted reference string shapes:
 
-- `domain#aggregate#id`
 - `aggregate#id`
 - `#id`
 
-Reference values are canonicalized to `domain#aggregate#id` during normalization. Invalid shapes, wrong target tenant/aggregate, or unresolved strong references fail validation.
+Legacy `domain#aggregate#id` values are still accepted during reads, but reference values are canonicalized to `aggregate#id` during normalization. Invalid shapes, wrong target aggregate, or unresolved strong references fail validation.
 
 ### Nested Object Rules
 
