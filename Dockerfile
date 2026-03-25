@@ -80,4 +80,4 @@ VOLUME ["${EVENTDBX_DATA_DIR}"]
 EXPOSE 7070 6363
 
 ENTRYPOINT ["dbx"]
-CMD ["start", "--foreground"]
+CMD ["serve", "start", "--foreground"]
